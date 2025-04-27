@@ -16,7 +16,6 @@ import java.util.UUID;
 @AllArgsConstructor
 public class FillRequestResponse {
     private UUID id;
-    private UUID formId;
     private int surveyCount;
     private BigDecimal pricePerSurvey;
     private BigDecimal totalPrice;

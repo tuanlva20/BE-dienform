@@ -12,9 +12,7 @@ import lombok.NoArgsConstructor;
 import jakarta.persistence.*;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
-import java.util.LinkedHashSet;
-import java.util.Set;
-import java.util.UUID;
+import java.util.*;
 
 @Data
 @Builder
@@ -46,16 +44,16 @@ public class FillRequest {
     private String status;
 
     @OneToMany(mappedBy = "fillRequest")
-    private Set<AnswerDistribution> answerDistributions = new LinkedHashSet<>();
+    private List<AnswerDistribution> answerDistributions = new ArrayList<>();
 
     @OneToOne(mappedBy = "fillRequest")
     private FillSchedule fillSchedule;
 
-    @OneToMany(mappedBy = "fillRequest")
-    private Set<SurveyExecution> surveyExecutions = new LinkedHashSet<>();
+//    @OneToMany(mappedBy = "fillRequest")
+//    private Set<SurveyExecution> surveyExecutions = new LinkedHashSet<>();
 
     @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "form_id", updatable = false, nullable = false)
+    @JoinColumn(name = "form_id", nullable = false)
     private Form form;
 
     @PrePersist
@@ -66,3 +64,4 @@ public class FillRequest {
         }
     }
 }
+

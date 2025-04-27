@@ -129,8 +129,8 @@ public class ScheduleServiceImpl implements ScheduleService {
                 // .executionsPerDay(schedule.getExecutionsPerDay())
                 // .customSchedule(schedule.getCustomSchedule())
                 // .active(schedule.isActive())
-                .createdAt(schedule.getCreatedAt())
-                .updatedAt(schedule.getUpdatedAt())
+//                .createdAt(schedule.getCreatedAt())
+//                .updatedAt(schedule.getUpdatedAt())
                 .build();
     }
 }

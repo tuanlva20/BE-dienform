@@ -5,14 +5,13 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
-
-import com.dienform.tool.dienformtudong.question.entity.Question;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import com.dienform.common.exception.BadRequestException;
+import com.dienform.common.exception.NotFoundException;
 import com.dienform.common.exception.ResourceNotFoundException;
 import com.dienform.common.util.Constants;
 import com.dienform.tool.dienformtudong.answerdistribution.entity.AnswerDistribution;
@@ -20,33 +19,45 @@ import com.dienform.tool.dienformtudong.answerdistribution.repository.AnswerDist
 import com.dienform.tool.dienformtudong.fillrequest.dto.request.FillRequestDTO;
 import com.dienform.tool.dienformtudong.fillrequest.dto.response.FillRequestResponse;
 import com.dienform.tool.dienformtudong.fillrequest.entity.FillRequest;
+import com.dienform.tool.dienformtudong.fillrequest.mapper.FillRequestMapper;
 import com.dienform.tool.dienformtudong.fillrequest.repository.FillRequestRepository;
 import com.dienform.tool.dienformtudong.fillrequest.service.FillRequestService;
+import com.dienform.tool.dienformtudong.form.entity.Form;
+import com.dienform.tool.dienformtudong.form.repository.FormRepository;
+import com.dienform.tool.dienformtudong.googleform.service.GoogleFormService;
+import com.dienform.tool.dienformtudong.question.entity.Question;
 import com.dienform.tool.dienformtudong.question.entity.QuestionOption;
 import com.dienform.tool.dienformtudong.question.repository.QuestionOptionRepository;
+import com.dienform.tool.dienformtudong.question.repository.QuestionRepository;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class FillRequestServiceImpl implements FillRequestService {
 
         private final FillRequestRepository fillRequestRepository;
         private final AnswerDistributionRepository distributionRepository;
         private final QuestionOptionRepository optionRepository;
+        private final FormRepository formRepository;
+        private final QuestionRepository questionRepository;
+        private final FillRequestMapper fillRequestMapper;
+        private final GoogleFormService googleFormService;
 
         @Override
         @Transactional
         public FillRequestResponse createFillRequest(UUID formId, FillRequestDTO fillRequestDTO) {
                 // Validate form exists
-                // Form form = formRepository.findById(formId)
-                // .orElseThrow(() -> new ResourceNotFoundException("Form", "id", formId));
+                Form form = formRepository.findById(formId).orElseThrow(
+                                () -> new NotFoundException("Cannot find form with id: " + formId));
+                List<Question> questions = questionRepository.findByForm(form);
 
                 // Validate answer distributions
                 validateAnswerDistributions(fillRequestDTO.getAnswerDistributions());
 
                 // Create fill request
-                FillRequest fillRequest = FillRequest.builder()
-                // .formId(formId)
+                FillRequest fillRequest = FillRequest.builder().form(form)
                                 .surveyCount(fillRequestDTO.getSurveyCount())
                                 .pricePerSurvey(fillRequestDTO.getPricePerSurvey())
                                 .totalPrice(fillRequestDTO.getPricePerSurvey()
@@ -66,6 +77,10 @@ public class FillRequestServiceImpl implements FillRequestService {
                 for (Map.Entry<UUID, List<FillRequestDTO.AnswerDistributionRequest>> entry : groupedByQuestion
                                 .entrySet()) {
                         UUID questionId = entry.getKey();
+                        Question question = questions.stream()
+                                        .filter(q -> q.getId().equals(questionId)).findFirst()
+                                        .orElseThrow(() -> new ResourceNotFoundException("Question",
+                                                        "id", questionId));
                         List<FillRequestDTO.AnswerDistributionRequest> questionDistributions =
                                         entry.getValue();
 
@@ -74,9 +89,10 @@ public class FillRequestServiceImpl implements FillRequestService {
                                         FillRequestDTO.AnswerDistributionRequest::getPercentage)
                                         .sum();
 
-                        if (totalPercentage != 100) {
+                        if (totalPercentage > 100) {
                                 throw new BadRequestException(String.format(
-                                                "Total percentage for question %s must be 100%%, but was %d%%",
+                                                "Total percentage for question %s <= 100%, but"
+                                                                + " was %d%%",
                                                 questionId, totalPercentage));
                         }
 
@@ -84,23 +100,50 @@ public class FillRequestServiceImpl implements FillRequestService {
                         for (FillRequestDTO.AnswerDistributionRequest dist : questionDistributions) {
                                 int count = (int) Math.round(fillRequestDTO.getSurveyCount()
                                                 * (dist.getPercentage() / 100.0));
-
+                                QuestionOption option = question.getOptions().stream()
+                                                .filter(o -> o.getId().equals(dist.getOptionId()))
+                                                .findAny()
+                                                .orElseThrow(() -> new NotFoundException(
+                                                                "Cannot find option with id: "
+                                                                                + dist.getOptionId()));
                                 AnswerDistribution distribution = AnswerDistribution.builder()
-                                                .fillRequest(savedRequest)
-//                                                .question(dist.getQuestionId())
-//                                                .optionId(dist.getOptionId())
-                                                .percentage(dist.getPercentage())
-//                                    .count(count)
-                                                .build();
-
+                                                .fillRequest(savedRequest).question(question)
+                                                .option(option).percentage(dist.getPercentage())
+                                                .count(count).build();
                                 distributions.add(distribution);
                         }
                 }
 
                 distributionRepository.saveAll(distributions);
 
-                // Return response
-                return mapToFillRequestResponse(savedRequest, distributions);
+                // Start the form filling process asynchronously
+                CompletableFuture.runAsync(() -> {
+                        try {
+                                log.info("Starting automated form filling for request ID: {}",
+                                                savedRequest.getId());
+                                googleFormService.fillForm(savedRequest.getId());
+                        } catch (Exception e) {
+                                log.error("Error starting form filling process: {}", e.getMessage(),
+                                                e);
+
+                                // Update request status to failed if there's an error
+                                try {
+                                        FillRequest request = fillRequestRepository
+                                                        .findById(savedRequest.getId())
+                                                        .orElse(null);
+                                        if (request != null) {
+                                                request.setStatus(
+                                                                Constants.FILL_REQUEST_STATUS_FAILED);
+                                                fillRequestRepository.save(request);
+                                        }
+                                } catch (Exception ex) {
+                                        log.error("Error updating fill request status: {}",
+                                                        ex.getMessage(), ex);
+                                }
+                        }
+                });
+
+                return fillRequestMapper.toReponse(savedRequest);
         }
 
         @Override
@@ -125,6 +168,16 @@ public class FillRequestServiceImpl implements FillRequestService {
                 // Update status
                 fillRequest.setStatus(Constants.FILL_REQUEST_STATUS_RUNNING);
                 fillRequestRepository.save(fillRequest);
+
+                // Start form filling process asynchronously
+                CompletableFuture.runAsync(() -> {
+                        try {
+                                googleFormService.fillForm(id);
+                        } catch (Exception e) {
+                                log.error("Error in form filling process for request ID {}: {}", id,
+                                                e.getMessage(), e);
+                        }
+                });
 
                 // Return response with status
                 Map<String, Object> response = new HashMap<>();
@@ -175,36 +228,36 @@ public class FillRequestServiceImpl implements FillRequestService {
                 // Group distributions by question
                 Map<UUID, Map<UUID, AnswerDistribution>> distributionMap = new HashMap<>();
 
-//                for (AnswerDistribution distribution : distributions) {
-//                        distributionMap.computeIfAbsent(distribution.getQuestionId(),
-//                                        k -> new HashMap<>())
-//                                        .put(distribution.getOptionId(), distribution);
-//                }
+                // for (AnswerDistribution distribution : distributions) {
+                // distributionMap.computeIfAbsent(distribution.getQuestionId(),
+                // k -> new HashMap<>())
+                // .put(distribution.getOptionId(), distribution);
+                // }
 
                 // Fetch option information
-//                Set<UUID> optionIds = distributions.stream().map(AnswerDistribution::getQuestion)
-//                                .collect(Collectors.toSet());
+                // Set<UUID> optionIds = distributions.stream().map(AnswerDistribution::getQuestion)
+                // .collect(Collectors.toSet());
 
-                Map<UUID, QuestionOption> optionMap = optionRepository.findAllById(null)
-                                .stream()
+                Map<UUID, QuestionOption> optionMap = optionRepository.findAllById(null).stream()
                                 .collect(Collectors.toMap(QuestionOption::getId, option -> option));
 
                 // Create answer distribution responses
                 List<FillRequestResponse.AnswerDistributionResponse> distributionResponses =
                                 distributions.stream().map(distribution -> {
                                         QuestionOption option = null;
-//                                  QuestionOption option = optionMap.get(distribution.getOptionId());
+                                        // QuestionOption option =
+                                        // optionMap.get(distribution.getOptionId());
 
                                         return FillRequestResponse.AnswerDistributionResponse
                                                         .builder()
-//                                                        .questionId(distribution.getQuestionId())
-//                                                        .optionId(distribution.getOptionId())
-//                                                        .percentage(distribution.getPercentage())
-//                                                        .count(distribution.getCount())
+                                                        // .questionId(distribution.getQuestionId())
+                                                        // .optionId(distribution.getOptionId())
+                                                        // .percentage(distribution.getPercentage())
+                                                        // .count(distribution.getCount())
                                                         .option(FillRequestResponse.AnswerDistributionResponse.OptionInfo
                                                                         .builder()
                                                                         .id(option.getId())
-                                                                        .text(option.getOptionText())
+                                                                        .text(option.getText())
                                                                         .build())
                                                         .build();
                                 }).collect(Collectors.toList());

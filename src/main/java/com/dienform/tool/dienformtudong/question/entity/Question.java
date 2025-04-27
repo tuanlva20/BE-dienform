@@ -17,6 +17,8 @@ import org.springframework.data.annotation.CreatedDate;
 
 import java.time.Instant;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 
 @Data
@@ -30,32 +32,38 @@ public class Question {
   @GeneratedValue(strategy = GenerationType.UUID)
   private UUID id;
 
-  @ManyToOne(fetch = FetchType.LAZY, optional = false)
-  @JoinColumn(name = "form_id", nullable = false)
-  private Form form;
-
   @Lob
-  @Column(name = "title", nullable = false)
+  @Column(name = "title")
   private String title;
 
   @Lob
   @Column(name = "description")
   private String description;
 
-  @Size(max = 50)
-  @NotNull
-  @Column(name = "type", nullable = false, length = 50)
+  @Column(name = "type")
   private String type;
 
-  @NotNull
-  @Column(name = "required", nullable = false)
+  @Column(name = "required")
   private Boolean required = false;
 
-  @NotNull
-  @Column(name = "position", nullable = false)
+  @Column(name = "position")
   private Integer position;
 
-  @Column(name = "created_at", nullable = false)
+  @Column(name = "created_at")
   @CreatedDate
   private LocalDateTime createdAt;
+
+  @ManyToOne(fetch = FetchType.LAZY)
+  @JoinColumn(name = "form_id")
+  private Form form;
+
+  @OneToMany(mappedBy = "question", fetch = FetchType.LAZY)
+  private List<QuestionOption> options = new ArrayList<>();
+
+  @PrePersist
+  protected void onCreate() {
+    if (createdAt == null) {
+      createdAt = LocalDateTime.now();
+    }
+  }
 }

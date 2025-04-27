@@ -33,6 +33,9 @@ public class AnswerDistribution extends AuditEntity {
   @Column(name = "percentage", nullable = false)
   private Integer percentage;
 
+  @Column(name = "count")
+  private Integer count;
+
   @Lob
   @Column(name = "value_string")
   private String valueString;

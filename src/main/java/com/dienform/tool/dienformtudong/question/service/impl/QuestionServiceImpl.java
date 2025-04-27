@@ -44,8 +44,8 @@ public class QuestionServiceImpl implements QuestionService {
         List<QuestionOptionResponse> optionResponses = options.stream()
                 .map(option -> QuestionOptionResponse.builder()
                         .id(option.getId())
-                        .text(option.getOptionText())
-                        .value(option.getOptionValue())
+                        .text(option.getText())
+                        .value(option.getValue())
                         .position(option.getPosition())
                         .build())
                 .collect(Collectors.toList());

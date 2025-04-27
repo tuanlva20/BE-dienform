@@ -34,3 +34,5 @@ build/
 
 # Ignore Docker Compose file
 docker-compose.yml
+logs
+/src/test

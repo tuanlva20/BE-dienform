@@ -1,15 +1,17 @@
 package com.dienform.tool.dienformtudong.form.service.impl;
 
-import java.time.LocalDateTime;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import com.dienform.common.exception.ResourceNotFoundException;
-import com.dienform.common.util.Constants;
+import com.dienform.tool.dienformtudong.fillrequest.entity.FillRequest;
+import com.dienform.tool.dienformtudong.fillrequest.repository.FillRequestRepository;
+import com.dienform.tool.dienformtudong.form.dto.param.FormParam;
 import com.dienform.tool.dienformtudong.form.dto.request.FormRequest;
 import com.dienform.tool.dienformtudong.form.dto.response.FormDetailResponse;
 import com.dienform.tool.dienformtudong.form.dto.response.FormResponse;
@@ -18,11 +20,14 @@ import com.dienform.tool.dienformtudong.form.enums.FormStatusEnum;
 import com.dienform.tool.dienformtudong.form.mapper.FormMapper;
 import com.dienform.tool.dienformtudong.form.repository.FormRepository;
 import com.dienform.tool.dienformtudong.form.service.FormService;
-import com.dienform.tool.dienformtudong.formstatistic.dto.response.FormStatisticResponse;
+import com.dienform.tool.dienformtudong.form.utils.SortUtil;
 import com.dienform.tool.dienformtudong.formstatistic.entity.FormStatistic;
 import com.dienform.tool.dienformtudong.formstatistic.repository.FormStatisticRepository;
-import com.dienform.tool.dienformtudong.question.dto.response.QuestionResponse;
+import com.dienform.tool.dienformtudong.googleform.service.GoogleFormService;
+import com.dienform.tool.dienformtudong.googleform.util.GoogleFormParser.ExtractedQuestion;
 import com.dienform.tool.dienformtudong.question.entity.Question;
+import com.dienform.tool.dienformtudong.question.entity.QuestionOption;
+import com.dienform.tool.dienformtudong.question.repository.QuestionOptionRepository;
 import com.dienform.tool.dienformtudong.question.repository.QuestionRepository;
 import com.dienform.tool.dienformtudong.question.service.QuestionService;
 import lombok.RequiredArgsConstructor;
@@ -31,100 +36,109 @@ import lombok.RequiredArgsConstructor;
 @RequiredArgsConstructor
 public class FormServiceImpl implements FormService {
 
-    private final FormMapper formMapper;
-    private final FormRepository formRepository;
-    private final FormStatisticRepository statisticRepository;
-    private final QuestionService questionService;
+  private static final Logger log = LoggerFactory.getLogger(FormServiceImpl.class);
+  private final FormMapper formMapper;
+  private final FormRepository formRepository;
+  private final FormStatisticRepository statisticRepository;
+  private final QuestionService questionService;
+  private final GoogleFormService googleFormService;
+  private final QuestionRepository questionRepository;
+  private final QuestionOptionRepository optionRepository;
+  private final FillRequestRepository fillRequestRepository;
 
-    @Override
-    public Page<FormResponse> getAllForms(String search, Pageable pageable) {
-        Page<Form> formPage;
+  @Override
+  public Page<FormResponse> getAllForms(FormParam param, Pageable pageable) {
+    Page<Form> formPage;
 
-        if (search != null && !search.trim().isEmpty()) {
-            formPage = formRepository.findByNameContainingIgnoreCase(search, pageable);
-        } else {
-            formPage = formRepository.findAll(pageable);
-        }
-
-        return null;
+    if (param.getSearch() != null && !param.getSearch().isEmpty()) {
+      formPage = formRepository.findByNameContainingIgnoreCase(param.getSearch(), pageable);
+    } else {
+      formPage = formRepository.findAll(pageable);
     }
 
-    @Override
-    public FormDetailResponse getFormById(UUID id) {
-        Form form = formRepository.findById(id)
-                .orElseThrow(() -> new ResourceNotFoundException("Form", "id", id));
+    return formPage.map(formMapper::toResponse);
+  }
 
-        List<QuestionResponse> questions = questionService.getQuestionsByFormId(id);
-        FormStatisticResponse statistics = getFormStatistics(id);
+  @Override
+  @Transactional
+  public FormDetailResponse getFormById(UUID id) {
+    Form form = findByIdWithFetch(id);
+    return formMapper.toDetailResponse(form);
+  }
 
-        return null;
+  @Override
+  @Transactional
+  public FormResponse createForm(FormRequest formRequest) {
+    // Create and save the form
+    Form form = formMapper.toEntity(formRequest);
+    form.setStatus(FormStatusEnum.CREATED);
+    Form savedForm = formRepository.save(form);
+
+    // Create initial statistics
+    FormStatistic statistic = FormStatistic.builder().form(savedForm).totalSurvey(0)
+        .completedSurvey(0).failedSurvey(0).errorQuestion(0).build();
+    statisticRepository.save(statistic);
+
+    // Extract and save questions from Google Form
+    List<ExtractedQuestion> extractedQuestions =
+        googleFormService.readGoogleForm(formRequest.getEditLink());
+    extractedQuestions.forEach(q -> {
+      Question question =
+          Question.builder().form(savedForm).title(q.getTitle()).description(q.getDescription())
+              .type(q.getType()).required(q.isRequired()).position(q.getPosition()).build();
+      // Save the question to the repository
+      questionRepository.save(question);
+
+      // Save the options for the question
+      q.getOptions().forEach(option -> {
+        QuestionOption questionOption = QuestionOption.builder().question(question)
+            .text(option.getText()).value(option.getValue()).position(option.getPosition()).build();
+        optionRepository.save(questionOption);
+      });
+    });
+
+    return formMapper.toResponse(savedForm);
+  }
+
+  @Override
+  public FormResponse updateForm(UUID formId, FormRequest formRequest) {
+    return null;
+  }
+
+  @Override
+  @Transactional
+  public void deleteForm(UUID id) {
+    if (!formRepository.existsById(id)) {
+      throw new ResourceNotFoundException("Form", "id", id);
     }
 
-    @Override
-    @Transactional
-    public FormResponse createForm(FormRequest formRequest) {
-        // Create and save the form
-        Form form = formMapper.toEntity(formRequest);
+    formRepository.deleteById(id);
+  }
 
-        Form savedForm = formRepository.save(form);
-
-        // Create initial statistics
-        // FormStatistic statistic = FormStatistic.builder().formId(savedForm.getId()).totalSurvey(0)
-        //         .completedSurvey(0).failedSurvey(0).errorQuestion(0).build();
-
-        // statisticRepository.save(statistic);
-
-        // // Extract and save questions from Google Form
-        // List<Question> extractedQuestions = new ArrayList<>();
-        // questionRepository.saveAll(extractedQuestions);
-
-        // // Get the questions as DTOs
-        // List<QuestionResponse> questions = questionService.getQuestionsByFormId(savedForm.getId());
-
-        // // Create response
-        // FormStatisticResponse statisticResponse = mapToFormStatisticResponse(statistic);
-
-        return formMapper.toResponse(savedForm);
+  @Override
+  public Form findByIdWithFetch(UUID id) {
+    Form form = formRepository.findById(id)
+        .orElseThrow(() -> new ResourceNotFoundException("Form", "id", id));
+    // Fetch the questions and options
+    List<Question> questionDbs = questionRepository.findByForm(form);
+    for (Question question : form.getQuestions()) {
+      question.setOptions(
+          questionDbs.stream().filter(q -> q.getId().equals(question.getId())).findFirst()
+              .orElseThrow(() -> new ResourceNotFoundException("Question", "id", question.getId()))
+              .getOptions());
     }
-
-    @Override
-    @Transactional
-    public void deleteForm(UUID id) {
-        if (!formRepository.existsById(id)) {
-            throw new ResourceNotFoundException("Form", "id", id);
-        }
-
-        formRepository.deleteById(id);
+    // Fetch fill requests
+    List<FillRequest> fillRequestDbs = fillRequestRepository.findByForm(form);
+    for (FillRequest fillRequest : form.getFillRequests()) {
+      fillRequest.setAnswerDistributions(
+          fillRequestDbs.stream().filter(f -> f.getId().equals(fillRequest.getId())).findFirst()
+              .orElseThrow(
+                  () -> new ResourceNotFoundException("FillRequest", "id", fillRequest.getId()))
+              .getAnswerDistributions());
     }
+    // Sort
+    SortUtil.sortByPosition(form);
 
-    // private FormResponse mapToFormResponse(Form form) {
-    //     FormStatisticResponse statistics = getFormStatistics(form.getId());
-
-    //     return FormResponse.builder().id(form.getId()).name(form.getName()).status(form.getStatus())
-    //             .createdAt(form.getCreatedAt()).statistics(statistics).build();
-    // }
-
-    // private FormDetailResponse mapToFormDetailResponse(Form form, List<QuestionResponse> questions,
-    //         FormStatisticResponse statistics) {
-    //     return FormDetailResponse.builder().id(form.getId()).name(form.getName())
-    //             .editLink(form.getEditLink()).createdAt(form.getCreatedAt())
-    //             .status(form.getStatus()).questions(questions).statistics(statistics).build();
-    // }
-
-    private FormStatisticResponse getFormStatistics(UUID formId) {
-        return statisticRepository.findByFormId(formId).map(this::mapToFormStatisticResponse)
-                .orElse(FormStatisticResponse.builder().totalSurvey(0).completedSurvey(0)
-                        .failedSurvey(0).errorQuestion(0).lastUpdatedAt(LocalDateTime.now())
-                        .build());
-    }
-
-    private FormStatisticResponse mapToFormStatisticResponse(FormStatistic statistic) {
-        return FormStatisticResponse.builder().id(statistic.getId())
-                .totalSurvey(statistic.getTotalSurvey())
-                .completedSurvey(statistic.getCompletedSurvey())
-                .failedSurvey(statistic.getFailedSurvey())
-                .errorQuestion(statistic.getErrorQuestion())
-//                .lastUpdatedAt(statistic.getLastUpdatedAt())
-            .build();
-    }
+    return form;
+  }
 }
