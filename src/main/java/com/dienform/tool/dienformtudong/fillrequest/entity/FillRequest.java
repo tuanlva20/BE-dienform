@@ -1,18 +1,29 @@
 package com.dienform.tool.dienformtudong.fillrequest.entity;
 
+import java.math.BigDecimal;
+import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.UUID;
 import com.dienform.tool.dienformtudong.answerdistribution.entity.AnswerDistribution;
 import com.dienform.tool.dienformtudong.fillschedule.entity.FillSchedule;
-import com.dienform.tool.dienformtudong.surveyexecution.entity.SurveyExecution;
 import com.dienform.tool.dienformtudong.form.entity.Form;
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.FetchType;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.JoinColumn;
+import jakarta.persistence.ManyToOne;
+import jakarta.persistence.OneToMany;
+import jakarta.persistence.OneToOne;
+import jakarta.persistence.PrePersist;
+import jakarta.persistence.Table;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
-
-import jakarta.persistence.*;
-import java.math.BigDecimal;
-import java.time.LocalDateTime;
-import java.util.*;
 
 @Data
 @Builder
@@ -40,6 +51,12 @@ public class FillRequest {
     @Column(name = "created_at", nullable = false)
     private LocalDateTime createdAt;
 
+    @Column(name = "start_date")
+    private LocalDateTime startDate;
+
+    @Column(name = "end_date")
+    private LocalDateTime endDate;
+
     @Column(name = "status", nullable = false)
     private String status;
 
@@ -48,9 +65,6 @@ public class FillRequest {
 
     @OneToOne(mappedBy = "fillRequest")
     private FillSchedule fillSchedule;
-
-//    @OneToMany(mappedBy = "fillRequest")
-//    private Set<SurveyExecution> surveyExecutions = new LinkedHashSet<>();
 
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "form_id", nullable = false)
@@ -64,4 +78,3 @@ public class FillRequest {
         }
     }
 }
-

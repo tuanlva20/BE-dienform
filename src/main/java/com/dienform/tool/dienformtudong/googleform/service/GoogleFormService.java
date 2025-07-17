@@ -36,6 +36,14 @@ public interface GoogleFormService {
     List<ExtractedQuestion> readGoogleForm(String formUrl);
 
     /**
+     * Extract the title from the edit link
+     * 
+     * @param editLink The edit link of the Google Form
+     * @return The title of the Google Form
+     */
+    String extractTitleFromFormLink(String editLink);
+
+    /**
      * Fill Google Form using Selenium with distributed answers based on requested percentages
      * 
      * @param fillRequestId The ID of the fill request

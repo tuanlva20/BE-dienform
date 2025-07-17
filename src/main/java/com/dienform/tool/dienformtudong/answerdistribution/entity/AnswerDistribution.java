@@ -1,25 +1,27 @@
 package com.dienform.tool.dienformtudong.answerdistribution.entity;
 
+import java.util.UUID;
 import com.dienform.common.entity.AuditEntity;
 import com.dienform.tool.dienformtudong.fillrequest.entity.FillRequest;
 import com.dienform.tool.dienformtudong.question.entity.Question;
 import com.dienform.tool.dienformtudong.question.entity.QuestionOption;
-import jakarta.validation.constraints.NotNull;
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.FetchType;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.JoinColumn;
+import jakarta.persistence.ManyToOne;
+import jakarta.persistence.Table;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
-import lombok.Data;
+import lombok.Getter;
 import lombok.NoArgsConstructor;
-import jakarta.persistence.*;
-import org.hibernate.annotations.ColumnDefault;
-import org.hibernate.annotations.OnDelete;
-import org.hibernate.annotations.OnDeleteAction;
-import org.springframework.data.annotation.CreatedDate;
+import lombok.Setter;
 
-import java.time.Instant;
-import java.time.LocalDateTime;
-import java.util.UUID;
-
-@Data
+@Getter
+@Setter
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
@@ -36,7 +38,6 @@ public class AnswerDistribution extends AuditEntity {
   @Column(name = "count")
   private Integer count;
 
-  @Lob
   @Column(name = "value_string")
   private String valueString;
 
@@ -48,7 +49,7 @@ public class AnswerDistribution extends AuditEntity {
   @JoinColumn(name = "question_id", nullable = false)
   private Question question;
 
-  @ManyToOne(fetch = FetchType.LAZY, optional = false)
-  @JoinColumn(name = "option_id", nullable = false)
+  @ManyToOne(fetch = FetchType.LAZY)
+  @JoinColumn(name = "option_id", nullable = true)
   private QuestionOption option;
 }

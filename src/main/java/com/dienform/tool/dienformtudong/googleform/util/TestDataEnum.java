@@ -46,6 +46,16 @@ public class TestDataEnum {
       "Nội dung chương trình cần cập nhật và đổi mới hơn.",
       "Tài liệu trình chiếu rất trực quan và dễ hiểu.");
 
+  private static final List<String> STREET_NAMES =
+      Arrays.asList("Lê Lợi", "Nguyễn Huệ", "Trần Hưng Đạo", "Lý Thái Tổ", "Bà Triệu",
+          "Điện Biên Phủ", "Lê Duẩn", "Nguyễn Thái Học", "Trần Phú", "Lê Thánh Tông", "Hàng Bài",
+          "Tràng Tiền", "Hai Bà Trưng", "Quang Trung", "Phạm Ngũ Lão", "Võ Văn Tần",
+          "Nguyễn Đình Chiểu", "Cách Mạng Tháng Tám", "Lê Hồng Phong", "Tôn Đức Thắng");
+
+  private static final List<String> CITIES = Arrays.asList("Hà Nội", "Hồ Chí Minh", "Đà Nẵng",
+      "Hải Phòng", "Cần Thơ", "Hội An", "Nha Trang", "Huế", "Vũng Tàu", "Đà Lạt", "Quy Nhơn",
+      "Buôn Ma Thuột", "Vinh", "Hạ Long", "Long Xuyên");
+
   /**
    * Get a random name from the list
    * 
@@ -71,5 +81,42 @@ public class TestDataEnum {
    */
   public static String getRandomFeedback() {
     return FEEDBACK_TEXTS.get(random.nextInt(FEEDBACK_TEXTS.size()));
+  }
+
+  /**
+   * Get random street name
+   * 
+   * @return Random street name
+   */
+  public static String getRandomStreetName() {
+    return STREET_NAMES.get(random.nextInt(STREET_NAMES.size()));
+  }
+
+  /**
+   * Get random city name
+   * 
+   * @return Random city name
+   */
+  public static String getRandomCity() {
+    return CITIES.get(random.nextInt(CITIES.size()));
+  }
+
+  /**
+   * Get a random phone number
+   * 
+   * @return Random Vietnamese phone number
+   */
+  public static String getRandomPhoneNumber() {
+    return "0" + (900000000 + random.nextInt(99999999));
+  }
+
+  /**
+   * Get a random address
+   * 
+   * @return Random Vietnamese address
+   */
+  public static String getRandomAddress() {
+    return "Số " + (1 + random.nextInt(100)) + " đường " + getRandomStreetName() + ", "
+        + getRandomCity();
   }
 }

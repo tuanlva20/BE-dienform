@@ -1,9 +1,6 @@
 package com.dienform.tool.dienformtudong.form.controller;
 
 import java.util.UUID;
-
-import com.dienform.common.model.ResponseModel;
-import com.dienform.tool.dienformtudong.form.dto.param.FormParam;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
@@ -19,6 +16,8 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import com.dienform.common.model.ResponseModel;
+import com.dienform.tool.dienformtudong.form.dto.param.FormParam;
 import com.dienform.tool.dienformtudong.form.dto.request.FormRequest;
 import com.dienform.tool.dienformtudong.form.dto.response.FormDetailResponse;
 import com.dienform.tool.dienformtudong.form.dto.response.FormResponse;
@@ -34,19 +33,15 @@ public class FormController {
     private final FormService formService;
 
     @GetMapping
-    public ResponseModel<?> getAllForms(
-            @RequestParam(required = false) String search,
+    public ResponseModel<?> getAllForms(@RequestParam(required = false) String search,
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "10") int size) {
 
-      FormParam param = FormParam.builder()
-                .search(search)
-                .page(page)
-                .size(size)
-                .build();
-      Pageable pageable = PageRequest.of(page, size, Sort.by("createdAt").descending());
-      Page<FormResponse> forms = formService.getAllForms(param, pageable);
-      return ResponseModel.success(forms.getContent(), forms.getTotalPages(), page, size, forms.getTotalElements(), HttpStatus.OK);
+        FormParam param = FormParam.builder().search(search).page(page).size(size).build();
+        Pageable pageable = PageRequest.of(page, size, Sort.by("createdAt").descending());
+        Page<FormResponse> forms = formService.getAllForms(param, pageable);
+        return ResponseModel.success(forms.getContent(), forms.getTotalPages(), page, size,
+                forms.getTotalElements(), HttpStatus.OK);
     }
 
     @GetMapping("/{formId}")
@@ -62,8 +57,8 @@ public class FormController {
     }
 
     @PutMapping("/{formId}")
-    public ResponseEntity<FormResponse> updateForm(@PathVariable UUID formId, 
-                                                 @Valid @RequestBody FormRequest formRequest) {
+    public ResponseEntity<FormResponse> updateForm(@PathVariable UUID formId,
+            @Valid @RequestBody FormRequest formRequest) {
         FormResponse updatedForm = formService.updateForm(formId, formRequest);
         return ResponseEntity.ok(updatedForm);
     }

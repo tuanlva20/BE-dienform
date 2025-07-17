@@ -12,6 +12,7 @@ import java.util.UUID;
 public interface QuestionRepository extends JpaRepository<Question, UUID> {
   List<Question> findByFormIdOrderByPosition(UUID formId);
   void deleteByFormId(UUID formId);
+  void deleteByForm(Form form);
 
   @EntityGraph(attributePaths = {"options"})
   List<Question> findByForm(Form form);

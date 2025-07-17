@@ -6,33 +6,88 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import com.dienform.common.util.Constants;
+import com.dienform.config.CampaignSchedulerConfig;
+import com.dienform.tool.dienformtudong.datamapping.dto.request.ColumnMapping;
+import com.dienform.tool.dienformtudong.datamapping.dto.request.DataFillRequestDTO;
 import com.dienform.tool.dienformtudong.fillrequest.entity.FillRequest;
+import com.dienform.tool.dienformtudong.fillrequest.entity.FillRequestMapping;
+import com.dienform.tool.dienformtudong.fillrequest.repository.FillRequestMappingRepository;
 import com.dienform.tool.dienformtudong.fillrequest.repository.FillRequestRepository;
+import com.dienform.tool.dienformtudong.fillrequest.service.DataFillCampaignService;
+import com.dienform.tool.dienformtudong.fillrequest.service.ScheduleDistributionService;
 import com.dienform.tool.dienformtudong.fillschedule.entity.FillSchedule;
 import com.dienform.tool.dienformtudong.form.entity.Form;
 import com.dienform.tool.dienformtudong.form.repository.FormRepository;
+import com.dienform.tool.dienformtudong.question.entity.Question;
+import com.dienform.tool.dienformtudong.question.repository.QuestionRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
 /**
- * Service responsible for scheduling and executing survey fill requests
+ * Service responsible for scheduling and executing survey fill requests Checks for PENDING
+ * campaigns and starts them when their scheduled time arrives
  */
 @Service
 @RequiredArgsConstructor
 @Slf4j
+@ConditionalOnProperty(prefix = "campaign.scheduler", name = "enabled", havingValue = "true",
+    matchIfMissing = true)
 public class SurveySchedulerService {
 
-  // private final FillScheduleRepository scheduleRepository;
   private final FillRequestRepository fillRequestRepository;
+  private final FillRequestMappingRepository fillRequestMappingRepository;
   private final FormRepository formRepository;
-  // private final ExecutionService executionService;
-  // private final GoogleFormService googleFormService;
+  private final QuestionRepository questionRepository;
+  private final CampaignSchedulerConfig schedulerConfig;
+
+  @Autowired
+  private DataFillCampaignService dataFillCampaignService;
+
+  @Autowired
+  private ScheduleDistributionService scheduleDistributionService;
 
   /**
-   * Scheduled task that runs every hour to check for and execute scheduled survey fills
+   * Scheduled task that checks for PENDING campaigns and starts them when scheduled Rate is
+   * configurable via application-local.yml (campaign.scheduler.fixed-rate)
+   */
+  @Scheduled(fixedRateString = "#{@campaignSchedulerConfig.fixedRate}")
+  @Transactional
+  public void checkPendingCampaigns() {
+    if (!schedulerConfig.isEnabled()) {
+      return;
+    }
+
+    log.debug("Checking for PENDING campaigns to start at {}", LocalDateTime.now());
+
+    // Find PENDING campaigns that should start now
+    LocalDateTime now = LocalDateTime.now();
+    LocalDateTime checkTime = now.plusMinutes(1); // Include campaigns starting in next minute
+
+    List<FillRequest> pendingCampaigns = fillRequestRepository
+        .findByStatusAndStartDateLessThanEqual(Constants.FILL_REQUEST_STATUS_PENDING, checkTime);
+
+    if (pendingCampaigns.isEmpty()) {
+      log.debug("No PENDING campaigns ready to start");
+      return;
+    }
+
+    log.info("Found {} PENDING campaigns ready to start", pendingCampaigns.size());
+
+    // Process each PENDING campaign
+    for (FillRequest campaign : pendingCampaigns) {
+      processPendingCampaign(campaign);
+    }
+  }
+
+  /**
+   * Legacy method - kept for compatibility Scheduled task that runs every hour to check for and
+   * execute scheduled survey fills
    */
   @Scheduled(cron = "0 0 * * * *") // Run every hour at the start of the hour
   @Transactional(readOnly = true)
@@ -52,6 +107,106 @@ public class SurveySchedulerService {
     for (FillSchedule schedule : activeSchedules) {
       processSchedule(schedule);
     }
+  }
+
+  /**
+   * Process a single PENDING campaign by starting it
+   */
+  private void processPendingCampaign(FillRequest campaign) {
+    try {
+      log.info("Starting PENDING campaign: {} scheduled for {}", campaign.getId(),
+          campaign.getStartDate());
+
+      // Update status to RUNNING
+      campaign.setStatus(Constants.FILL_REQUEST_STATUS_RUNNING);
+      fillRequestRepository.save(campaign);
+
+      // Get form and questions
+      Form form = campaign.getForm();
+      if (form == null) {
+        log.error("Form not found for campaign: {}", campaign.getId());
+        campaign.setStatus(Constants.FILL_REQUEST_STATUS_FAILED);
+        fillRequestRepository.save(campaign);
+        return;
+      }
+
+      List<Question> questions = questionRepository.findByFormIdOrderByPosition(form.getId());
+      if (questions.isEmpty()) {
+        log.error("No questions found for form: {}", form.getId());
+        campaign.setStatus(Constants.FILL_REQUEST_STATUS_FAILED);
+        fillRequestRepository.save(campaign);
+        return;
+      }
+
+      // Get stored mappings
+      List<FillRequestMapping> storedMappings =
+          fillRequestMappingRepository.findByFillRequestId(campaign.getId());
+      if (storedMappings.isEmpty()) {
+        log.error("No mappings found for campaign: {}", campaign.getId());
+        campaign.setStatus(Constants.FILL_REQUEST_STATUS_FAILED);
+        fillRequestRepository.save(campaign);
+        return;
+      }
+
+      // Reconstruct DataFillRequestDTO from stored data
+      DataFillRequestDTO reconstructedRequest =
+          reconstructDataFillRequest(campaign, storedMappings);
+
+      // Create schedule distribution
+      List<ScheduleDistributionService.ScheduledTask> schedule =
+          scheduleDistributionService.distributeSchedule(campaign.getSurveyCount(),
+              campaign.getStartDate(), campaign.getEndDate(), campaign.isHumanLike());
+
+      // Execute campaign
+      dataFillCampaignService.executeCampaign(campaign, reconstructedRequest, questions, schedule)
+          .thenRun(() -> {
+            log.info("Campaign {} execution completed successfully", campaign.getId());
+            campaign.setStatus(Constants.FILL_REQUEST_STATUS_COMPLETED);
+            fillRequestRepository.save(campaign);
+          }).exceptionally(throwable -> {
+            log.error("Campaign {} execution failed", campaign.getId(), throwable);
+            campaign.setStatus(Constants.FILL_REQUEST_STATUS_FAILED);
+            fillRequestRepository.save(campaign);
+            return null;
+          });
+
+      log.info("Campaign {} status updated to RUNNING with {} scheduled tasks", campaign.getId(),
+          schedule.size());
+
+    } catch (Exception e) {
+      log.error("Failed to start campaign: {}", campaign.getId(), e);
+
+      // Update status to FAILED
+      campaign.setStatus(Constants.FILL_REQUEST_STATUS_FAILED);
+      fillRequestRepository.save(campaign);
+    }
+  }
+
+  /**
+   * Reconstruct DataFillRequestDTO from stored FillRequest and mappings
+   */
+  private DataFillRequestDTO reconstructDataFillRequest(FillRequest fillRequest,
+      List<FillRequestMapping> mappings) {
+    DataFillRequestDTO dto = new DataFillRequestDTO();
+    dto.setFormId(fillRequest.getForm().getId().toString());
+    dto.setSheetLink(mappings.get(0).getSheetLink()); // All mappings have same sheet link
+    dto.setSubmissionCount(fillRequest.getSurveyCount());
+    dto.setPricePerSurvey(fillRequest.getPricePerSurvey());
+    dto.setIsHumanLike(fillRequest.isHumanLike());
+    dto.setStartDate(fillRequest.getStartDate());
+    dto.setEndDate(fillRequest.getEndDate());
+
+    // Convert mappings
+    List<ColumnMapping> questionMappings = new ArrayList<>();
+    for (FillRequestMapping mapping : mappings) {
+      ColumnMapping columnMapping = new ColumnMapping();
+      columnMapping.setQuestionId(mapping.getQuestionId().toString());
+      columnMapping.setColumnName(mapping.getColumnName());
+      questionMappings.add(columnMapping);
+    }
+    dto.setMappings(questionMappings);
+
+    return dto;
   }
 
   /**

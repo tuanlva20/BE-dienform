@@ -1,16 +1,15 @@
 package com.dienform.tool.dienformtudong.fillrequest.repository;
 
-import com.dienform.tool.dienformtudong.form.entity.Form;
-import org.springframework.data.domain.Page;
-import org.springframework.data.domain.Pageable;
+import java.time.LocalDateTime;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
 import org.springframework.data.jpa.repository.EntityGraph;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.stereotype.Repository;
 import com.dienform.tool.dienformtudong.fillrequest.entity.FillRequest;
-import java.util.List;
-import java.util.Optional;
-import java.util.UUID;
+import com.dienform.tool.dienformtudong.form.entity.Form;
 
 @Repository
 public interface FillRequestRepository extends JpaRepository<FillRequest, UUID> {
@@ -22,4 +21,13 @@ public interface FillRequestRepository extends JpaRepository<FillRequest, UUID> 
   @EntityGraph(attributePaths = {"form"})
   @Query("SELECT fr FROM FillRequest fr WHERE fr.id = ?1")
   Optional<FillRequest> findByIdWithFetchForm(UUID id);
+
+  /**
+   * Find PENDING campaigns that should start now or in the past
+   */
+  @EntityGraph(attributePaths = {"form"})
+  @Query("SELECT fr FROM FillRequest fr WHERE fr.status = ?1 AND fr.startDate <= ?2")
+  List<FillRequest> findByStatusAndStartDateLessThanEqual(String status, LocalDateTime startDate);
+
+  void deleteByForm(Form form);
 }

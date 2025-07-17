@@ -1,17 +1,25 @@
 package com.dienform.tool.dienformtudong.form.entity;
 
-import java.util.*;
-
+import java.util.ArrayList;
+import java.util.List;
+import java.util.UUID;
 import com.dienform.common.entity.AuditEntity;
 import com.dienform.tool.dienformtudong.fillrequest.entity.FillRequest;
 import com.dienform.tool.dienformtudong.form.enums.FormStatusEnum;
 import com.dienform.tool.dienformtudong.formstatistic.entity.FormStatistic;
 import com.dienform.tool.dienformtudong.question.entity.Question;
-import com.dienform.tool.dienformtudong.surveyexecution.entity.SurveyExecution;
-import jakarta.persistence.*;
-import lombok.AllArgsConstructor;
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
+import jakarta.persistence.FetchType;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.OneToMany;
+import jakarta.persistence.OneToOne;
+import jakarta.persistence.Table;
 import lombok.Getter;
-import lombok.NoArgsConstructor;
 import lombok.Setter;
 
 @Getter
@@ -41,7 +49,4 @@ public class Form extends AuditEntity {
 
   @OneToOne(mappedBy = "form")
   private FormStatistic formStatistic;
-
-//  @OneToMany(mappedBy = "form")
-//  private Set<SurveyExecution> surveyExecutions = new LinkedHashSet<>();
 }

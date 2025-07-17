@@ -24,6 +24,7 @@ import com.dienform.tool.dienformtudong.form.utils.SortUtil;
 import com.dienform.tool.dienformtudong.formstatistic.entity.FormStatistic;
 import com.dienform.tool.dienformtudong.formstatistic.repository.FormStatisticRepository;
 import com.dienform.tool.dienformtudong.googleform.service.GoogleFormService;
+import com.dienform.tool.dienformtudong.googleform.util.GoogleFormParser;
 import com.dienform.tool.dienformtudong.googleform.util.GoogleFormParser.ExtractedQuestion;
 import com.dienform.tool.dienformtudong.question.entity.Question;
 import com.dienform.tool.dienformtudong.question.entity.QuestionOption;
@@ -45,6 +46,7 @@ public class FormServiceImpl implements FormService {
   private final QuestionRepository questionRepository;
   private final QuestionOptionRepository optionRepository;
   private final FillRequestRepository fillRequestRepository;
+  private final GoogleFormParser googleFormParser;
 
   @Override
   public Page<FormResponse> getAllForms(FormParam param, Pageable pageable) {
@@ -71,6 +73,19 @@ public class FormServiceImpl implements FormService {
   public FormResponse createForm(FormRequest formRequest) {
     // Create and save the form
     Form form = formMapper.toEntity(formRequest);
+
+    // If form name is null or empty, extract title from Google Form
+    if (form.getName() == null || form.getName().trim().isEmpty()) {
+      // Convert edit link to public link first
+      String title = googleFormService.extractTitleFromFormLink(form.getEditLink());
+      if (title != null && !title.trim().isEmpty()) {
+        form.setName(title);
+        log.info("Using extracted title as form name: {}", title);
+      } else {
+        log.warn("Could not extract title from Google Form, using empty name");
+      }
+    }
+
     form.setStatus(FormStatusEnum.CREATED);
     Form savedForm = formRepository.save(form);
 
@@ -112,6 +127,25 @@ public class FormServiceImpl implements FormService {
       throw new ResourceNotFoundException("Form", "id", id);
     }
 
+    Form form = formRepository.findById(id)
+        .orElseThrow(() -> new ResourceNotFoundException("Form", "id", id));
+
+    // Delete all options for each question
+    List<Question> questions = questionRepository.findByForm(form);
+    for (Question question : questions) {
+      optionRepository.deleteByQuestionId(question.getId());
+    }
+
+    // Delete all questions
+    questionRepository.deleteByForm(form);
+
+    // Delete all fill requests
+    fillRequestRepository.deleteByForm(form);
+
+    // Delete statistics
+    statisticRepository.deleteByForm(form);
+
+    // Finally, delete the form
     formRepository.deleteById(id);
   }
 
@@ -138,6 +172,7 @@ public class FormServiceImpl implements FormService {
     }
     // Sort
     SortUtil.sortByPosition(form);
+    SortUtil.sortFillRequestsByCreatedAt(form);
 
     return form;
   }
