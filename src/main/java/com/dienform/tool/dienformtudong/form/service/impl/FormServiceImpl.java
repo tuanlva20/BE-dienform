@@ -10,6 +10,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import com.dienform.common.exception.ResourceNotFoundException;
 import com.dienform.tool.dienformtudong.fillrequest.entity.FillRequest;
+import com.dienform.tool.dienformtudong.fillrequest.repository.FillRequestMappingRepository;
 import com.dienform.tool.dienformtudong.fillrequest.repository.FillRequestRepository;
 import com.dienform.tool.dienformtudong.form.dto.param.FormParam;
 import com.dienform.tool.dienformtudong.form.dto.request.FormRequest;
@@ -24,13 +25,11 @@ import com.dienform.tool.dienformtudong.form.utils.SortUtil;
 import com.dienform.tool.dienformtudong.formstatistic.entity.FormStatistic;
 import com.dienform.tool.dienformtudong.formstatistic.repository.FormStatisticRepository;
 import com.dienform.tool.dienformtudong.googleform.service.GoogleFormService;
-import com.dienform.tool.dienformtudong.googleform.util.GoogleFormParser;
 import com.dienform.tool.dienformtudong.googleform.util.GoogleFormParser.ExtractedQuestion;
 import com.dienform.tool.dienformtudong.question.entity.Question;
 import com.dienform.tool.dienformtudong.question.entity.QuestionOption;
 import com.dienform.tool.dienformtudong.question.repository.QuestionOptionRepository;
 import com.dienform.tool.dienformtudong.question.repository.QuestionRepository;
-import com.dienform.tool.dienformtudong.question.service.QuestionService;
 import lombok.RequiredArgsConstructor;
 
 @Service
@@ -41,12 +40,11 @@ public class FormServiceImpl implements FormService {
   private final FormMapper formMapper;
   private final FormRepository formRepository;
   private final FormStatisticRepository statisticRepository;
-  private final QuestionService questionService;
   private final GoogleFormService googleFormService;
   private final QuestionRepository questionRepository;
   private final QuestionOptionRepository optionRepository;
   private final FillRequestRepository fillRequestRepository;
-  private final GoogleFormParser googleFormParser;
+  private final FillRequestMappingRepository fillRequestMappingRepository;
 
   @Override
   public Page<FormResponse> getAllForms(FormParam param, Pageable pageable) {
@@ -123,30 +121,40 @@ public class FormServiceImpl implements FormService {
   @Override
   @Transactional
   public void deleteForm(UUID id) {
-    if (!formRepository.existsById(id)) {
-      throw new ResourceNotFoundException("Form", "id", id);
+    log.info("Starting to delete form with ID: {}", id);
+
+    try {
+      Form form = formRepository.findById(id)
+          .orElseThrow(() -> new ResourceNotFoundException("Form", "id", id));
+
+      // Delete fill requests and related data first
+      List<FillRequest> fillRequests = fillRequestRepository.findByForm(form);
+      fillRequests.forEach(request -> {
+        fillRequestMappingRepository.deleteByFillRequestId(request.getId());
+        request.getAnswerDistributions().clear();
+      });
+      fillRequestRepository.deleteByForm(form);
+
+      // Delete all question options
+      List<Question> questions = questionRepository.findByForm(form);
+      questions.forEach(question -> {
+        optionRepository.deleteByQuestion(question);
+      });
+
+      // Delete questions
+      questionRepository.deleteByForm(form);
+
+      // Delete form statistics
+      statisticRepository.findByFormId(id).ifPresent(statisticRepository::delete);
+
+      // Finally delete the form
+      formRepository.delete(form);
+
+      log.info("Successfully deleted form {}", id);
+    } catch (Exception e) {
+      log.error("Error deleting form: {}. Error: {}", id, e.getMessage());
+      throw new RuntimeException("Failed to delete form: " + e.getMessage(), e);
     }
-
-    Form form = formRepository.findById(id)
-        .orElseThrow(() -> new ResourceNotFoundException("Form", "id", id));
-
-    // Delete all options for each question
-    List<Question> questions = questionRepository.findByForm(form);
-    for (Question question : questions) {
-      optionRepository.deleteByQuestionId(question.getId());
-    }
-
-    // Delete all questions
-    questionRepository.deleteByForm(form);
-
-    // Delete all fill requests
-    fillRequestRepository.deleteByForm(form);
-
-    // Delete statistics
-    statisticRepository.deleteByForm(form);
-
-    // Finally, delete the form
-    formRepository.deleteById(id);
   }
 
   @Override
@@ -176,4 +184,5 @@ public class FormServiceImpl implements FormService {
 
     return form;
   }
+
 }

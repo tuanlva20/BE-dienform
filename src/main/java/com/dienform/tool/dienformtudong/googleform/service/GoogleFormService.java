@@ -1,6 +1,7 @@
 package com.dienform.tool.dienformtudong.googleform.service;
 
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import com.dienform.tool.dienformtudong.googleform.dto.FormSubmissionRequest;
 import com.dienform.tool.dienformtudong.googleform.dto.FormSubmissionResponse;
@@ -50,4 +51,13 @@ public interface GoogleFormService {
      * @return Number of successful form submissions
      */
     int fillForm(UUID fillRequestId);
+
+    /**
+     * Submit form data using browser automation
+     * 
+     * @param formUrl The URL of the form to submit
+     * @param formData Map of question IDs to answers
+     * @return true if submission was successful, false otherwise
+     */
+    boolean submitFormWithBrowser(String formUrl, Map<String, String> formData);
 }

@@ -261,13 +261,10 @@ public class FillRequestServiceImpl implements FillRequestService {
 
     // Step 5: Create fill request
     FillRequest fillRequest = FillRequest.builder().form(form)
-        .surveyCount(Math.min(dataFillRequestDTO.getSubmissionCount(), sheetData.size())) // Don't
-                                                                                          // exceed
-                                                                                          // available
-                                                                                          // data
+        .surveyCount(Math.min(dataFillRequestDTO.getSubmissionCount(), sheetData.size()))
         .pricePerSurvey(dataFillRequestDTO.getPricePerSurvey())
         .totalPrice(dataFillRequestDTO.getPricePerSurvey()
-            .multiply(BigDecimal.valueOf(dataFillRequestDTO.getSubmissionCount())))
+        .multiply(BigDecimal.valueOf(dataFillRequestDTO.getSubmissionCount())))
         .humanLike(Boolean.TRUE.equals(dataFillRequestDTO.getIsHumanLike()))
         .startDate(dataFillRequestDTO.getStartDate()).endDate(dataFillRequestDTO.getEndDate())
         .status(Constants.FILL_REQUEST_STATUS_PENDING).build();

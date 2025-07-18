@@ -1,20 +1,32 @@
 package com.dienform.tool.dienformtudong.fillrequest.service;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import com.dienform.common.util.Constants;
+import com.dienform.common.util.CopyUtil;
 import com.dienform.tool.dienformtudong.datamapping.dto.request.DataFillRequestDTO;
 import com.dienform.tool.dienformtudong.fillrequest.entity.FillRequest;
+import com.dienform.tool.dienformtudong.fillrequest.repository.FillRequestRepository;
 import com.dienform.tool.dienformtudong.fillrequest.service.ScheduleDistributionService.ScheduledTask;
 import com.dienform.tool.dienformtudong.fillrequest.validator.DataFillValidator;
 import com.dienform.tool.dienformtudong.googleform.service.GoogleFormService;
 import com.dienform.tool.dienformtudong.question.entity.Question;
+import com.dienform.tool.dienformtudong.question.entity.QuestionOption;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 
 @Service
@@ -30,7 +42,24 @@ public class DataFillCampaignService {
   @Autowired
   private DataFillValidator dataFillValidator;
 
-  private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(10);
+  @Autowired
+  private FillRequestRepository fillRequestRepository;
+
+  @Value("${google.form.thread-pool-size:1}")
+  private int threadPoolSize;
+
+  private ExecutorService executorService;
+
+  @PostConstruct
+  public void init() {
+    log.info("Initializing executor service with thread pool size: {}", threadPoolSize);
+    executorService = Executors.newFixedThreadPool(threadPoolSize);
+  }
+
+  @PreDestroy
+  public void cleanup() {
+    shutdownExecutorService();
+  }
 
   /**
    * Execute data fill campaign based on schedule
@@ -41,110 +70,220 @@ public class DataFillCampaignService {
     log.info("Starting data fill campaign for request: {} with {} tasks", fillRequest.getId(),
         schedule.size());
 
-    return CompletableFuture.runAsync(() -> {
-      try {
-        // Read sheet data
-        List<Map<String, Object>> sheetData =
-            googleSheetsService.getSheetData(originalRequest.getSheetLink());
+    // Set initial status to RUNNING
+    updateFillRequestStatus(fillRequest, Constants.FILL_REQUEST_STATUS_RUNNING);
 
-        // Execute each scheduled task
-        for (ScheduledTask task : schedule) {
-          scheduleFormFill(fillRequest, originalRequest, questions, sheetData, task);
-        }
+    CompletableFuture<Void> executionFuture = new CompletableFuture<>();
 
-        log.info("All tasks scheduled for campaign: {}", fillRequest.getId());
-
-      } catch (Exception e) {
-        log.error("Failed to execute campaign: {}", fillRequest.getId(), e);
-        throw new RuntimeException("Campaign execution failed", e);
+    try {
+      // Initialize data needed for form filling
+      Map<UUID, Question> questionMap = new HashMap<>();
+      for (Question q : questions) {
+        Question detachedQuestion = CopyUtil.detachedCopy(q, source -> {
+          Question copy = new Question(source);
+          List<QuestionOption> detachedOptions =
+              source.getOptions().stream().map(QuestionOption::new).toList();
+          copy.setOptions(detachedOptions);
+          detachedOptions.forEach(opt -> opt.setQuestion(copy));
+          return copy;
+        });
+        questionMap.put(q.getId(), detachedQuestion);
       }
-    });
+
+      // Read sheet data
+      List<Map<String, Object>> sheetData =
+          googleSheetsService.getSheetData(originalRequest.getSheetLink());
+
+      if (sheetData == null || sheetData.isEmpty()) {
+        log.error("No data found in sheet for request: {}", fillRequest.getId());
+        updateFillRequestStatus(fillRequest, Constants.FILL_REQUEST_STATUS_FAILED);
+        executionFuture.complete(null);
+        return executionFuture;
+      }
+
+      // Check if there are enough data rows for the requested survey count
+      if (sheetData.size() < fillRequest.getSurveyCount()) {
+        log.warn(
+            "Not enough data rows in sheet. Required: {}, Available: {}. Data will be reused from the beginning.",
+            fillRequest.getSurveyCount(), sheetData.size());
+      }
+
+      AtomicInteger completedTasks = new AtomicInteger(0);
+      AtomicInteger successfulTasks = new AtomicInteger(0);
+      int totalTasks = schedule.size();
+
+      // Execute each task
+      for (ScheduledTask task : schedule) {
+        scheduleFormFill(fillRequest, originalRequest, questionMap, sheetData, task)
+            .thenAccept(success -> {
+              if (success) {
+                successfulTasks.incrementAndGet();
+              }
+
+              // Check if all tasks are complete
+              if (completedTasks.incrementAndGet() == totalTasks) {
+                log.info("All tasks completed for campaign {}. Successful: {}/{}",
+                    fillRequest.getId(), successfulTasks.get(), totalTasks);
+
+                String finalStatus =
+                    successfulTasks.get() == totalTasks ? Constants.FILL_REQUEST_STATUS_COMPLETED
+                        : Constants.FILL_REQUEST_STATUS_FAILED;
+
+                updateFillRequestStatus(fillRequest, finalStatus);
+                executionFuture.complete(null);
+              }
+            }).exceptionally(throwable -> {
+              log.error("Task execution failed", throwable);
+              if (completedTasks.incrementAndGet() == totalTasks) {
+                updateFillRequestStatus(fillRequest, Constants.FILL_REQUEST_STATUS_FAILED);
+                executionFuture.complete(null);
+              }
+              return null;
+            });
+      }
+
+    } catch (Exception e) {
+      log.error("Failed to initialize campaign: {}", fillRequest.getId(), e);
+      updateFillRequestStatus(fillRequest, Constants.FILL_REQUEST_STATUS_FAILED);
+      executionFuture.complete(null);
+    }
+
+    return executionFuture;
   }
 
-  /**
-   * Shutdown scheduler gracefully
-   */
-  public void shutdown() {
-    scheduler.shutdown();
+  @Transactional
+  protected void updateFillRequestStatus(FillRequest fillRequest, String newStatus) {
     try {
-      if (!scheduler.awaitTermination(60, TimeUnit.SECONDS)) {
-        scheduler.shutdownNow();
+      FillRequest freshRequest = fillRequestRepository.findById(fillRequest.getId()).orElseThrow(
+          () -> new RuntimeException("Fill request not found: " + fillRequest.getId()));
+
+      if (!newStatus.equals(freshRequest.getStatus())) {
+        freshRequest.setStatus(newStatus);
+        fillRequestRepository.save(freshRequest);
+        log.info("Updated fill request {} status to: {}", fillRequest.getId(), newStatus);
       }
-    } catch (InterruptedException e) {
-      scheduler.shutdownNow();
-      Thread.currentThread().interrupt();
+    } catch (Exception e) {
+      log.error("Failed to update fill request status: {}", fillRequest.getId(), e);
     }
   }
 
-  /**
-   * Schedule individual form fill task
-   */
-  private void scheduleFormFill(FillRequest fillRequest, DataFillRequestDTO originalRequest,
-      List<Question> questions, List<Map<String, Object>> sheetData, ScheduledTask task) {
-
-    LocalDateTime now = LocalDateTime.now();
-    LocalDateTime executionTime = task.getExecutionTime();
-
-    long delaySeconds = java.time.Duration.between(now, executionTime).getSeconds();
-    delaySeconds = Math.max(0, delaySeconds); // Don't allow negative delays
-
-    log.debug("Scheduling task for row {} to execute in {} seconds", task.getRowIndex(),
-        delaySeconds);
-
-    scheduler.schedule(() -> {
+  private void shutdownExecutorService() {
+    if (executorService != null) {
+      executorService.shutdown();
       try {
-        executeFormFill(fillRequest, originalRequest, questions, sheetData, task);
-      } catch (Exception e) {
-        log.error("Failed to execute form fill for task: {}", task.getRowIndex(), e);
+        if (!executorService.awaitTermination(60, TimeUnit.SECONDS)) {
+          executorService.shutdownNow();
+        }
+      } catch (InterruptedException e) {
+        executorService.shutdownNow();
+        Thread.currentThread().interrupt();
       }
-    }, delaySeconds, TimeUnit.SECONDS);
+    }
+  }
+
+  private CompletableFuture<Boolean> scheduleFormFill(FillRequest fillRequest,
+      DataFillRequestDTO originalRequest, Map<UUID, Question> questionMap,
+      List<Map<String, Object>> sheetData, ScheduledTask task) {
+
+    return CompletableFuture.supplyAsync(() -> {
+      try {
+        // Calculate delay
+        long delaySeconds = Math.max(0,
+            Duration.between(LocalDateTime.now(), task.getExecutionTime()).getSeconds());
+
+        if (delaySeconds > 0) {
+          log.info("Waiting {} seconds before executing task for row {}", delaySeconds,
+              task.getRowIndex());
+          Thread.sleep(delaySeconds * 1000);
+        }
+
+        // Execute form fill with retry mechanism
+        int maxRetries = 3;
+        int retryCount = 0;
+        boolean success = false;
+
+        while (retryCount < maxRetries && !success) {
+          try {
+            success = executeFormFill(fillRequest, originalRequest, questionMap, sheetData, task);
+            if (!success) {
+              retryCount++;
+              if (retryCount < maxRetries) {
+                log.warn("Form fill attempt {} failed for row {}. Retrying in 5 seconds...",
+                    retryCount, task.getRowIndex());
+                Thread.sleep(5000); // Wait 5 seconds before retry
+              }
+            }
+          } catch (Exception e) {
+            log.error("Error in form fill attempt {} for row {}: {}", retryCount + 1,
+                task.getRowIndex(), e.getMessage());
+            retryCount++;
+            if (retryCount < maxRetries) {
+              Thread.sleep(5000);
+            }
+          }
+        }
+
+        if (!success) {
+          log.error("All form fill attempts failed for row {}", task.getRowIndex());
+        }
+
+        return success;
+      } catch (Exception e) {
+        log.error("Error in scheduled form fill: {}", e.getMessage(), e);
+        return false;
+      }
+    }, executorService);
   }
 
   /**
    * Execute actual form filling with data from sheet row
    */
-  private void executeFormFill(FillRequest fillRequest, DataFillRequestDTO originalRequest,
-      List<Question> questions, List<Map<String, Object>> sheetData, ScheduledTask task) {
+  private boolean executeFormFill(FillRequest fillRequest, DataFillRequestDTO originalRequest,
+      Map<UUID, Question> questionMap, List<Map<String, Object>> sheetData, ScheduledTask task) {
 
     log.info("Executing form fill for request: {}, row: {}", fillRequest.getId(),
         task.getRowIndex());
 
     try {
-      // Get data for this row
-      if (task.getRowIndex() >= sheetData.size()) {
-        log.warn("Row index {} exceeds available data size {}", task.getRowIndex(),
-            sheetData.size());
-        return;
-      }
-
-      Map<String, Object> rowData = sheetData.get(task.getRowIndex());
+      // Get data for this row (wrap if not enough rows)
+      int actualRowIndex = task.getRowIndex() % sheetData.size();
+      Map<String, Object> rowData = sheetData.get(actualRowIndex);
+      log.info("Using data from row {} (wrapped from row {})", actualRowIndex, task.getRowIndex());
 
       // Build form submission data
-      Map<String, String> formData = buildFormData(originalRequest, questions, rowData);
+      Map<String, String> formData = buildFormData(originalRequest, questionMap, rowData);
 
       // Add human-like delay before submission
       if (task.getDelaySeconds() > 0) {
         Thread.sleep(task.getDelaySeconds() * 1000L);
       }
 
-      // Submit form (you'll need to implement this based on your form submission logic)
-      boolean success = submitFormData(fillRequest.getForm().getEditLink(), formData);
+      // Submit form using browser automation
+      String formUrl = fillRequest.getForm().getEditLink();
+      boolean success = googleFormService.submitFormWithBrowser(formUrl, formData);
 
-      log.info("Form submission {} for request: {}, row: {}", success ? "successful" : "failed",
-          fillRequest.getId(), task.getRowIndex());
+      if (success) {
+        log.info("Form submission successful for request: {}, row: {}", fillRequest.getId(),
+            task.getRowIndex());
+      } else {
+        log.error("Form submission failed for request: {}, row: {}", fillRequest.getId(),
+            task.getRowIndex());
+      }
+
+      return success;
 
     } catch (Exception e) {
       log.error("Error executing form fill for request: {}, row: {}", fillRequest.getId(),
           task.getRowIndex(), e);
+      return false;
     }
   }
 
   /**
-   * Build form data from sheet row based on mappings Now supports position-based selection for
-   * choice questions
+   * Build form data from sheet row based on mappings
    */
   private Map<String, String> buildFormData(DataFillRequestDTO originalRequest,
-      List<Question> questions, Map<String, Object> rowData) {
+      Map<UUID, Question> questionMap, Map<String, Object> rowData) {
 
     Map<String, String> formData = new java.util.HashMap<>();
 
@@ -154,21 +293,22 @@ public class DataFillCampaignService {
       String columnName = extractColumnName(mapping.getColumnName());
 
       // Find question
-      Question question = questions.stream().filter(q -> q.getId().toString().equals(questionId))
-          .findFirst().orElse(null);
-
+      Question question = questionMap.get(UUID.fromString(questionId));
       if (question == null) {
         log.warn("Question not found for ID: {}", questionId);
         continue;
       }
 
-      // Get value from row data
-      Object cellValue = rowData.get(columnName);
-      String stringValue = cellValue != null ? cellValue.toString().trim() : "";
+      // Get value from sheet
+      Object value = rowData.get(columnName);
+      if (value == null) {
+        log.warn("No value found in column {} for question {}", columnName, questionId);
+        continue;
+      }
 
-      if (!stringValue.isEmpty() || Boolean.TRUE.equals(question.getRequired())) {
-        // Convert position-based values to actual option values for choice questions
-        String convertedValue = convertValueBasedOnQuestionType(stringValue, question);
+      // Convert value based on question type
+      String convertedValue = convertValueBasedOnQuestionType(value.toString(), question);
+      if (convertedValue != null) {
         formData.put(questionId, convertedValue);
       }
     }
@@ -177,54 +317,34 @@ public class DataFillCampaignService {
   }
 
   /**
-   * Convert value based on question type For choice questions, convert position numbers to actual
-   * option values
+   * Convert value based on question type
    */
   private String convertValueBasedOnQuestionType(String value, Question question) {
-    if (value == null || value.trim().isEmpty()) {
-      return value;
-    }
-
-    String questionType = question.getType().toLowerCase();
-
-    switch (questionType) {
-      case "radio":
-      case "select":
-      case "combobox":
-        // Single choice - convert position to value
-        return dataFillValidator.convertPositionToValue(value, question.getOptions());
-
-      case "checkbox":
-      case "multiselect":
-        // Multiple choice - convert positions to values
-        return dataFillValidator.convertMultiplePositionsToValues(value, question.getOptions());
-
-      default:
-        // For other question types, return value as-is
-        return value;
-    }
-  }
-
-  /**
-   * Submit form data to Google Form This is a simplified implementation - you may need to adapt
-   * based on your actual form submission logic
-   */
-  private boolean submitFormData(String formUrl, Map<String, String> formData) {
     try {
-      // TODO: Implement actual form submission logic
-      // This could use Google Forms API or HTTP POST to form submission endpoint
+      switch (question.getType().toLowerCase()) {
+        case "text":
+        case "paragraph":
+          return value;
 
-      log.debug("Submitting form data: {} to URL: {}", formData, formUrl);
+        case "radio":
+        case "checkbox":
+        case "combobox":
+        case "dropdown":
+        case "select":
+          // If value is numeric, treat it as position
+          if (value.matches("\\d+")) {
+            return dataFillValidator.convertPositionToValue(value, question.getOptions());
+          }
+          return value;
 
-      // Simulate form submission for now
-      Thread.sleep(500 + (int) (Math.random() * 1000)); // Random delay 0.5-1.5s
-
-      // Return success (in real implementation, check actual response)
-      return true;
-
+        default:
+          log.error("Unsupported question type: {} for question ID: {}", question.getType(),
+              question.getId());
+          return null;
+      }
     } catch (Exception e) {
-      log.error("Failed to submit form data", e);
-      return false;
+      log.error("Error converting value for question {}: {}", question.getId(), e.getMessage());
+      return null;
     }
   }
 

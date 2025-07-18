@@ -29,5 +29,8 @@ public interface FillRequestRepository extends JpaRepository<FillRequest, UUID> 
   @Query("SELECT fr FROM FillRequest fr WHERE fr.status = ?1 AND fr.startDate <= ?2")
   List<FillRequest> findByStatusAndStartDateLessThanEqual(String status, LocalDateTime startDate);
 
+  @Query("SELECT fr FROM FillRequest fr WHERE fr.status = ?1 AND fr.startDate < ?2")
+  List<FillRequest> findByStatusAndStartDateLessThan(String status, LocalDateTime startDate);
+
   void deleteByForm(Form form);
 }

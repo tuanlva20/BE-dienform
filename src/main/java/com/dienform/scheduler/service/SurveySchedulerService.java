@@ -89,7 +89,7 @@ public class SurveySchedulerService {
    * Legacy method - kept for compatibility Scheduled task that runs every hour to check for and
    * execute scheduled survey fills
    */
-  @Scheduled(cron = "0 0 * * * *") // Run every hour at the start of the hour
+  // @Scheduled(cron = "0 0 * * * *") // Run every hour at the start of the hour
   @Transactional(readOnly = true)
   public void executeScheduledSurveys() {
     log.info("Starting scheduled survey execution check at {}", LocalDateTime.now());
@@ -106,6 +106,39 @@ public class SurveySchedulerService {
     // Process each schedule asynchronously
     for (FillSchedule schedule : activeSchedules) {
       processSchedule(schedule);
+    }
+  }
+
+  @Scheduled(fixedRate = 300000) // Run every 5 minutes
+  @Transactional
+  public void checkStuckRunningCampaigns() {
+    if (!schedulerConfig.isEnabled()) {
+      return;
+    }
+
+    log.info("Checking for stuck RUNNING campaigns...");
+
+    // Find campaigns that have been running for more than 30 minutes
+    LocalDateTime thirtyMinutesAgo = LocalDateTime.now().minusMinutes(30);
+    List<FillRequest> stuckCampaigns = fillRequestRepository
+        .findByStatusAndStartDateLessThan(Constants.FILL_REQUEST_STATUS_RUNNING, thirtyMinutesAgo);
+
+    if (stuckCampaigns.isEmpty()) {
+      log.debug("No stuck RUNNING campaigns found");
+      return;
+    }
+
+    log.warn("Found {} potentially stuck RUNNING campaigns", stuckCampaigns.size());
+
+    // Process each stuck campaign
+    for (FillRequest campaign : stuckCampaigns) {
+      try {
+        log.info("Marking stuck campaign as FAILED: {}", campaign.getId());
+        campaign.setStatus(Constants.FILL_REQUEST_STATUS_FAILED);
+        fillRequestRepository.save(campaign);
+      } catch (Exception e) {
+        log.error("Error updating stuck campaign status: {}", campaign.getId(), e);
+      }
     }
   }
 
@@ -157,13 +190,9 @@ public class SurveySchedulerService {
           scheduleDistributionService.distributeSchedule(campaign.getSurveyCount(),
               campaign.getStartDate(), campaign.getEndDate(), campaign.isHumanLike());
 
-      // Execute campaign
+      // Execute campaign - status will be updated by GoogleFormService after actual form filling
       dataFillCampaignService.executeCampaign(campaign, reconstructedRequest, questions, schedule)
-          .thenRun(() -> {
-            log.info("Campaign {} execution completed successfully", campaign.getId());
-            campaign.setStatus(Constants.FILL_REQUEST_STATUS_COMPLETED);
-            fillRequestRepository.save(campaign);
-          }).exceptionally(throwable -> {
+          .exceptionally(throwable -> {
             log.error("Campaign {} execution failed", campaign.getId(), throwable);
             campaign.setStatus(Constants.FILL_REQUEST_STATUS_FAILED);
             fillRequestRepository.save(campaign);
@@ -188,6 +217,7 @@ public class SurveySchedulerService {
   private DataFillRequestDTO reconstructDataFillRequest(FillRequest fillRequest,
       List<FillRequestMapping> mappings) {
     DataFillRequestDTO dto = new DataFillRequestDTO();
+    dto.setFormName(fillRequest.getForm().getName());
     dto.setFormId(fillRequest.getForm().getId().toString());
     dto.setSheetLink(mappings.get(0).getSheetLink()); // All mappings have same sheet link
     dto.setSubmissionCount(fillRequest.getSurveyCount());

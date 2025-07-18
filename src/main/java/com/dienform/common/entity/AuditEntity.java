@@ -2,37 +2,47 @@ package com.dienform.common.entity;
 
 import java.io.Serializable;
 import java.time.LocalDateTime;
-
-import jakarta.persistence.*;
+import java.util.UUID;
 import org.springframework.data.annotation.CreatedDate;
 import org.springframework.data.annotation.LastModifiedDate;
 import org.springframework.data.jpa.domain.support.AuditingEntityListener;
-import lombok.AccessLevel;
+import jakarta.persistence.Column;
+import jakarta.persistence.EntityListeners;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.MappedSuperclass;
+import jakarta.persistence.PrePersist;
+import jakarta.persistence.PreUpdate;
 import lombok.Getter;
-import lombok.NoArgsConstructor;
 import lombok.Setter;
 
-@Getter(value = AccessLevel.PUBLIC)
-@Setter(value = AccessLevel.PUBLIC)
 @MappedSuperclass
 @EntityListeners(AuditingEntityListener.class)
-@NoArgsConstructor
-public class AuditEntity implements Serializable {
-  @Column(name = "created_at", updatable = false)
+@Getter
+@Setter
+public abstract class AuditEntity implements Serializable {
+  private static final long serialVersionUID = 1L;
+
+  @Id
+  @GeneratedValue(strategy = GenerationType.UUID)
+  private UUID id;
+
   @CreatedDate
+  @Column(name = "created_at", nullable = false, updatable = false)
   private LocalDateTime createdAt;
 
-  @Column(name = "updated_at")
   @LastModifiedDate
+  @Column(name = "updated_at")
   private LocalDateTime updatedAt;
 
   @PrePersist
   protected void onCreate() {
     if (createdAt == null) {
-    createdAt = LocalDateTime.now();
+      createdAt = LocalDateTime.now();
     }
     if (updatedAt == null) {
-    updatedAt = LocalDateTime.now();
+      updatedAt = LocalDateTime.now();
     }
   }
 

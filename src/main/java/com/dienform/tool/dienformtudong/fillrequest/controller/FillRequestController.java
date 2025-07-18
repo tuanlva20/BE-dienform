@@ -52,10 +52,6 @@ public class FillRequestController {
         return ResponseEntity.noContent().build();
     }
 
-    /**
-     * Create fill request for "Fill-in-data" tab functionality This endpoint handles form filling
-     * based on pre-existing data from Google Sheets
-     */
     @PostMapping("/fill-request/fill-in-data")
     public ResponseEntity<FillRequestResponse> createDataFillRequest(
             @Valid @RequestBody DataFillRequestDTO dataFillRequestDTO) {

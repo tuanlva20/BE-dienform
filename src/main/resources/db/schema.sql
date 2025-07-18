@@ -2,6 +2,39 @@
 CREATE DATABASE IF NOT EXISTS `fill_form`;
 USE `fill_form`;
 
+-- Tạo bảng users
+CREATE TABLE IF NOT EXISTS `users` (
+    `id` VARCHAR(36) NOT NULL,
+    `email` VARCHAR(255) UNIQUE NOT NULL,
+    `name` VARCHAR(255) NOT NULL,
+    `password_hash` VARCHAR(255) NULL, -- NULL for Google OAuth users
+    `avatar` TEXT NULL, -- Base64 SVG or URL
+    `provider` ENUM('manual', 'google') DEFAULT 'manual',
+    `role` ENUM('user', 'admin') DEFAULT 'user',
+    `google_id` VARCHAR(255) NULL, -- Google sub ID
+    `email_verified` BOOLEAN DEFAULT FALSE,
+    `balance` DECIMAL(10,2) DEFAULT 0.00, -- User balance for surveys
+    `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_users_email` (`email`),
+    INDEX `idx_users_google_id` (`google_id`),
+    INDEX `idx_users_provider` (`provider`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Tạo bảng password_resets
+CREATE TABLE IF NOT EXISTS `password_resets` (
+    `id` INT AUTO_INCREMENT PRIMARY KEY,
+    `email` VARCHAR(255) NOT NULL,
+    `token` VARCHAR(255) NOT NULL,
+    `expires_at` TIMESTAMP NOT NULL,
+    `used` BOOLEAN DEFAULT FALSE,
+    `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX `idx_password_resets_email` (`email`),
+    INDEX `idx_password_resets_token` (`token`),
+    INDEX `idx_password_resets_expires` (`expires_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- Tạo bảng form
 CREATE TABLE IF NOT EXISTS `form` (
             `id` VARCHAR(36) NOT NULL,
@@ -119,6 +152,22 @@ CREATE TABLE IF NOT EXISTS `survey_execution` (
                 REFERENCES `fill_request` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- Tạo bảng fill_request_mapping để lưu mapping data cho scheduler
+CREATE TABLE IF NOT EXISTS `fill_request_mapping` (
+            `id` VARCHAR(36) NOT NULL,
+            `fill_request_id` VARCHAR(36) NOT NULL,
+            `question_id` VARCHAR(36) NOT NULL,
+            `column_name` VARCHAR(500) NOT NULL,
+            `sheet_link` VARCHAR(1000) NOT NULL,
+            `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` DATETIME NULL,
+            PRIMARY KEY (`id`),
+            CONSTRAINT `fk_mapping_fill_request` FOREIGN KEY (`fill_request_id`)
+                REFERENCES `fill_request` (`id`) ON DELETE CASCADE,
+            CONSTRAINT `fk_mapping_question` FOREIGN KEY (`question_id`)
+                REFERENCES `question` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- Tạo indexes để tăng hiệu suất truy vấn
 CREATE INDEX `idx_question_form` ON `question` (`form_id`);
 CREATE INDEX `idx_option_question` ON `question_option` (`question_id`);
@@ -128,4 +177,6 @@ CREATE INDEX `idx_answer_distribution_request` ON `answer_distribution` (`fill_r
 CREATE INDEX `idx_answer_distribution_question` ON `answer_distribution` (`question_id`);
 CREATE INDEX `idx_answer_distribution_option` ON `answer_distribution` (`option_id`);
 CREATE INDEX `idx_survey_execution_request` ON `survey_execution` (`fill_request_id`);
+CREATE INDEX `idx_fill_request_mapping_request` ON `fill_request_mapping` (`fill_request_id`);
+CREATE INDEX `idx_fill_request_mapping_question` ON `fill_request_mapping` (`question_id`);
 CREATE INDEX `idx_survey_execution_time` ON `survey_execution` (`execution_time`);

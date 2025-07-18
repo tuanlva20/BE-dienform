@@ -10,13 +10,16 @@ import lombok.experimental.UtilityClass;
 @UtilityClass
 public class SortUtil {
   public static Form sortByPosition(Form form) {
-    form.getQuestions().sort(Comparator.comparing(Question::getPosition));
-    form.getQuestions().forEach(
-        question -> question.getOptions().sort(Comparator.comparing(QuestionOption::getPosition)));
+    form.getQuestions().sort(
+        Comparator.comparing(Question::getPosition, Comparator.nullsLast(Integer::compareTo)));
+    form.getQuestions().forEach(question -> question.getOptions().sort(Comparator
+        .comparing(QuestionOption::getPosition, Comparator.nullsLast(Integer::compareTo))));
     return form;
   }
+
   public static Form sortFillRequestsByCreatedAt(Form form) {
-    form.getFillRequests().sort(Comparator.comparing(FillRequest::getCreatedAt, Comparator.reverseOrder()));
+    form.getFillRequests()
+        .sort(Comparator.comparing(FillRequest::getCreatedAt, Comparator.reverseOrder()));
     return form;
   }
 }

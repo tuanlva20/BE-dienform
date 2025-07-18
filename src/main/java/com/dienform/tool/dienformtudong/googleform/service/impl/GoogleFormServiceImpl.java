@@ -1,12 +1,10 @@
 package com.dienform.tool.dienformtudong.googleform.service.impl;
 
-import java.io.File;
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.nio.file.Paths;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -14,12 +12,10 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.NoSuchElementException;
 import java.util.Random;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -85,6 +81,9 @@ public class GoogleFormServiceImpl implements GoogleFormService {
 
     @Value("${google.form.timeout-seconds:30}")
     private int timeoutSeconds;
+
+    @Value("${google.form.headless:true}")
+    private boolean headless;
 
     @Override
     public FormSubmissionResponse submitForm(FormSubmissionRequest request) {
@@ -167,6 +166,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
         String link = form.getEditLink();
         if (link == null || link.isEmpty()) {
             log.error("Form edit link is empty for form ID: {}", form.getId());
+            updateFillRequestStatus(fillRequest, Constants.FILL_REQUEST_STATUS_FAILED);
             return 0;
         }
 
@@ -174,16 +174,20 @@ public class GoogleFormServiceImpl implements GoogleFormService {
         List<AnswerDistribution> distributions = fillRequest.getAnswerDistributions();
         if (ArrayUtils.isEmpty(distributions)) {
             log.error("No answer distributions found for request ID: {}", fillRequestId);
+            updateFillRequestStatus(fillRequest, Constants.FILL_REQUEST_STATUS_FAILED);
             return 0;
         }
 
         // Create a record in fill form sessionExecute
-        SesstionExecution sessionExecute = SesstionExecution.builder().formId(form.getId())
+        final SesstionExecution sessionExecute = SesstionExecution.builder().formId(form.getId())
                 .fillRequestId(fillRequestId).startTime(LocalDateTime.now())
                 .totalExecutions(fillRequest.getSurveyCount()).successfulExecutions(0)
                 .failedExecutions(0).status(FormStatusEnum.PROCESSING).build();
 
-        sessionExecute = sessionExecutionRepository.save(sessionExecute);
+        sessionExecutionRepository.save(sessionExecute);
+
+        // Update request status to RUNNING
+        updateFillRequestStatus(fillRequest, Constants.FILL_REQUEST_STATUS_RUNNING);
 
         // Group distributions by question
         Map<Question, List<AnswerDistribution>> distributionsByQuestion = distributions.stream()
@@ -196,6 +200,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
         // Initialize counters
         AtomicInteger successCount = new AtomicInteger(0);
         AtomicInteger failCount = new AtomicInteger(0);
+        AtomicInteger totalProcessed = new AtomicInteger(0);
 
         ExecutorService executor = Executors.newFixedThreadPool(threadPoolSize);
         List<CompletableFuture<Void>> futures = new ArrayList<>();
@@ -219,6 +224,14 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                     } catch (Exception e) {
                         log.error("Error during form filling: {}", e.getMessage(), e);
                         failCount.incrementAndGet();
+                    } finally {
+                        // Update progress after each task
+                        int processed = totalProcessed.incrementAndGet();
+                        if (processed == fillRequest.getSurveyCount()) {
+                            // All tasks completed, update final status
+                            updateFinalStatus(fillRequest, sessionExecute, successCount.get(),
+                                    failCount.get());
+                        }
                     }
                 }, executor));
 
@@ -226,6 +239,8 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             } catch (InterruptedException e) {
                 log.error("Task scheduling was interrupted", e);
                 Thread.currentThread().interrupt();
+                updateFillRequestStatus(fillRequest, Constants.FILL_REQUEST_STATUS_FAILED);
+                return 0;
             }
         }
 
@@ -233,28 +248,19 @@ public class GoogleFormServiceImpl implements GoogleFormService {
         CompletableFuture<Void> allTasks =
                 CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
         try {
-            allTasks.get();
-            executor.awaitTermination(180, TimeUnit.SECONDS);
-        } catch (InterruptedException | ExecutionException e) {
-            log.error("Form filling execution was interrupted", e);
-            Thread.currentThread().interrupt();
-        } finally {
+            // Wait for all tasks with timeout
+            allTasks.get(180, TimeUnit.SECONDS);
             executor.shutdown();
+            executor.awaitTermination(30, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            log.error("Form filling execution was interrupted or timed out", e);
+            updateFillRequestStatus(fillRequest, Constants.FILL_REQUEST_STATUS_FAILED);
+            return 0;
+        } finally {
+            if (!executor.isShutdown()) {
+                executor.shutdownNow();
+            }
         }
-
-        // Update sessionExecute record
-        sessionExecute.setEndTime(LocalDateTime.now());
-        sessionExecute.setSuccessfulExecutions(successCount.get());
-        sessionExecute.setFailedExecutions(failCount.get());
-        sessionExecute.setStatus(FormStatusEnum.COMPLETED);
-        sessionExecutionRepository.save(sessionExecute);
-
-        // Update fill request status
-        fillRequest.setStatus(Constants.FILL_REQUEST_STATUS_COMPLETED);
-        fillRequestRepository.save(fillRequest);
-
-        log.info("Form filling completed for request ID: {}. Success: {}, Failed: {}",
-                fillRequestId, successCount.get(), failCount.get());
 
         return successCount.get();
     }
@@ -299,6 +305,83 @@ public class GoogleFormServiceImpl implements GoogleFormService {
         } catch (Exception e) {
             log.error("Error extracting form title from link: {}", e.getMessage(), e);
             return null;
+        }
+    }
+
+    /**
+     * Submit form data using browser automation
+     */
+    @Override
+    public boolean submitFormWithBrowser(String formUrl, Map<String, String> formData) {
+        try {
+            // Convert formData to Map<Question, QuestionOption>
+            Map<Question, QuestionOption> selections = new HashMap<>();
+            for (Map.Entry<String, String> entry : formData.entrySet()) {
+                Question question = new Question();
+                question.setId(UUID.fromString(entry.getKey()));
+
+                QuestionOption option = new QuestionOption();
+                option.setText(entry.getValue());
+                option.setQuestion(question);
+
+                selections.put(question, option);
+            }
+
+            // Use existing executeFormFill method
+            return executeFormFill(formUrl, selections, true);
+        } catch (Exception e) {
+            log.error("Error submitting form: {}", e.getMessage(), e);
+            return false;
+        }
+    }
+
+    /**
+     * Update fill request status with transaction
+     */
+    @Transactional
+    private void updateFillRequestStatus(FillRequest fillRequest, String status) {
+        try {
+            // Reload fill request to ensure we have latest state
+            FillRequest current = fillRequestRepository.findById(fillRequest.getId()).orElseThrow(
+                    () -> new ResourceNotFoundException("Fill Request", "id", fillRequest.getId()));
+
+            current.setStatus(status);
+            fillRequestRepository.save(current);
+            log.info("Updated fill request {} status to: {}", current.getId(), status);
+        } catch (Exception e) {
+            log.error("Failed to update fill request status: {}", e.getMessage(), e);
+            throw e;
+        }
+    }
+
+    /**
+     * Update final status for both fill request and session execution
+     */
+    @Transactional
+    private void updateFinalStatus(FillRequest fillRequest, SesstionExecution sessionExecute,
+            int successCount, int failCount) {
+        try {
+            // Update session execution
+            sessionExecute.setEndTime(LocalDateTime.now());
+            sessionExecute.setSuccessfulExecutions(successCount);
+            sessionExecute.setFailedExecutions(failCount);
+            sessionExecute.setStatus(FormStatusEnum.COMPLETED);
+            sessionExecutionRepository.save(sessionExecute);
+
+            // Determine final status based on success/fail counts
+            String finalStatus = (failCount == 0) ? Constants.FILL_REQUEST_STATUS_COMPLETED
+                    : Constants.FILL_REQUEST_STATUS_FAILED;
+
+            // Update fill request status
+            updateFillRequestStatus(fillRequest, finalStatus);
+
+            log.info("Fill request {} completed. Success: {}, Failed: {}, Final status: {}",
+                    fillRequest.getId(), successCount, failCount, finalStatus);
+        } catch (Exception e) {
+            log.error("Failed to update final status: {}", e.getMessage(), e);
+            // Ensure we set failed status even if update fails
+            updateFillRequestStatus(fillRequest, Constants.FILL_REQUEST_STATUS_FAILED);
+            throw e;
         }
     }
 
@@ -453,95 +536,65 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     private boolean executeFormFill(String formUrl, Map<Question, QuestionOption> selections,
             boolean humanLike) {
         WebDriver driver = null;
-
         try {
-            // Setup Chrome driver with WebDriverManager
-            try {
-                log.info("Setting up ChromeDriver using WebDriverManager...");
-                WebDriverManager.chromedriver().setup();
-            } catch (Exception e) {
-                log.warn(
-                        "WebDriverManager failed to setup ChromeDriver: {}. Trying alternative methods...",
-                        e.getMessage());
-                setupChromeDriverManually();
-            }
-
-            // Setup Chrome options
-            ChromeOptions options = new ChromeOptions();
-            options.addArguments("--incognito");
-            options.addArguments("--window-size=1366,768");
-
-            // Add additional options to improve stability
-            options.addArguments("--no-sandbox");
-            options.addArguments("--disable-dev-shm-usage");
-            options.addArguments("--remote-allow-origins=*");
-
-            // If not human-like, run in headless mode
-            if (!humanLike) {
-                options.addArguments("--headless=new");
-            }
-
-            log.info("Creating ChromeDriver instance...");
-            driver = new ChromeDriver(options);
-            log.info("ChromeDriver created successfully");
-
-            // Open the form
-            driver.get(formUrl);
-            log.info("Navigated to form URL: {}", formUrl);
-
-            // Create wait object for waiting for elements
+            driver = openBrowser(formUrl);
             WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(timeoutSeconds));
 
             // Iterate through the selections and fill the form
-            List<WebElement> questionElements =
-                    driver.findElements(By.xpath("//div[@role='listitem']"));
+            log.info("Starting to fill form with {} questions", selections.size());
             for (Map.Entry<Question, QuestionOption> entry : selections.entrySet()) {
                 Question question = entry.getKey();
                 QuestionOption option = entry.getValue();
 
-                // Find the question element have <div role="listitem"> and have containt
-                // question.getTitle()
-                final WebElement questionElement =
-                        findQuestionElement(question.getTitle(), questionElements);
+                // Find the question element
+                WebElement questionElement = findQuestionElement(question.getTitle(),
+                        driver.findElements(By.xpath("//div[@role='listitem']")));
 
                 if (questionElement == null) {
                     log.warn("Question not found: {}", question.getTitle());
                     continue;
                 }
+
                 log.info("Filling question: {} (type: {})", question.getTitle(),
                         question.getType());
 
                 // Fill the question based on its type
-                switch (question.getType().toLowerCase()) {
-                    case "radio":
-                        fillRadioQuestion(driver, questionElement, option.getText());
-                        break;
-                    case "checkbox":
-                        fillCheckboxQuestion(driver, questionElement, option.getText());
-                        break;
-                    case "text":
-                        fillTextQuestion(driver, questionElement, question.getTitle(), selections);
-                        break;
-                    case "combobox":
-                        fillComboboxQuestion(driver, questionElement, question.getTitle(),
-                                option.getText());
-                        break;
-                    default:
-                        log.warn("Unsupported question type: {}", question.getType());
-                        break;
-                }
+                try {
+                    switch (question.getType().toLowerCase()) {
+                        case "radio":
+                            fillRadioQuestion(driver, questionElement, option.getText());
+                            break;
+                        case "checkbox":
+                            fillCheckboxQuestion(driver, questionElement, option.getText());
+                            break;
+                        case "text":
+                            fillTextQuestion(driver, questionElement, question.getTitle(),
+                                    selections);
+                            break;
+                        case "combobox":
+                        case "dropdown":
+                        case "select":
+                            fillComboboxQuestion(driver, questionElement, question.getTitle(),
+                                    option.getText());
+                            break;
+                        default:
+                            log.warn("Unsupported question type: {} for question ID: {}",
+                                    question.getType(), question.getId());
+                    }
 
-                // Add human-like delay between questions
-                if (true) {
-                    int delay = (int) (Math.random() * 1000 + 1000); // 1-2 seconds
-                    Thread.sleep(delay);
+                    // Add human-like delay between questions
+                    if (humanLike) {
+                        Thread.sleep(500 + new Random().nextInt(501)); // Random từ 500-1000ms
+                    }
+                } catch (Exception e) {
+                    log.error("Error filling question {}: {}", question.getTitle(), e.getMessage());
                 }
             }
 
             // If auto-submit is enabled, click the submit button
             if (autoSubmitEnabled) {
                 try {
-
+                    log.info("Attempting to submit form");
                     WebElement submitButton = wait.until(ExpectedConditions.elementToBeClickable(
                             By.xpath("//div[@role='button' and @aria-label='Submit']")));
 
@@ -551,17 +604,15 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                     }
 
                     submitButton.click();
+                    log.info("Form submitted successfully");
 
                     // Wait for submission confirmation
                     wait.until(ExpectedConditions.urlContains("formResponse"));
-
-                    log.info("Form submitted successfully");
-                } catch (NoSuchElementException e) {
-                    log.error("Submit form unsuccessfully: {}", e.getMessage());
+                    return true;
+                } catch (Exception e) {
+                    log.error("Error submitting form: {}", e.getMessage());
                     return false;
                 }
-            } else {
-                log.info("Form filled successfully, auto-submit disabled");
             }
 
             return true;
@@ -570,7 +621,6 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             log.error("Error filling form: {}", e.getMessage(), e);
             return false;
         } finally {
-            // Close the browser window if driver was initialized
             if (driver != null) {
                 try {
                     driver.quit();
@@ -580,40 +630,6 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                 }
             }
         }
-    }
-
-    /**
-     * Attempt to setup ChromeDriver manually if WebDriverManager fails
-     */
-    private void setupChromeDriverManually() {
-        log.info("Attempting to setup ChromeDriver manually...");
-
-        // Try different possible paths for ChromeDriver
-        String[] possiblePaths = {"/usr/local/bin/chromedriver", "/usr/bin/chromedriver",
-                "/opt/homebrew/bin/chromedriver",
-                System.getProperty("user.home") + "/chromedriver"};
-
-        for (String path : possiblePaths) {
-            File chromeDriver = new File(path);
-            if (chromeDriver.exists() && chromeDriver.canExecute()) {
-                System.setProperty("webdriver.chrome.driver", path);
-                log.info("Found ChromeDriver at: {}", path);
-                return;
-            }
-        }
-
-        // Try to use the current directory
-        String currentDir = Paths.get("").toAbsolutePath().toString();
-        String chromeDriverPath = currentDir + "/chromedriver";
-        File chromeDriver = new File(chromeDriverPath);
-        if (chromeDriver.exists() && chromeDriver.canExecute()) {
-            System.setProperty("webdriver.chrome.driver", chromeDriverPath);
-            log.info("Found ChromeDriver in current directory: {}", chromeDriverPath);
-            return;
-        }
-
-        log.warn(
-                "Could not find ChromeDriver in common locations. Make sure ChromeDriver is installed and in PATH");
     }
 
     /**
@@ -640,6 +656,59 @@ public class GoogleFormServiceImpl implements GoogleFormService {
         }
     }
 
+    private WebDriver openBrowser(String formUrl) throws InterruptedException {
+        // Setup Chrome options
+        ChromeOptions options = new ChromeOptions();
+
+        // Essential Chrome options for stability and visibility
+        options.addArguments("--remote-allow-origins=*");
+        options.addArguments("--no-sandbox");
+        options.addArguments("--disable-dev-shm-usage");
+        options.addArguments("--window-size=1920,1080");
+
+        // Set headless mode based on configuration
+        if (headless) {
+            options.addArguments("--headless=new");
+            log.info("Running Chrome in headless mode");
+        }
+
+        // Disable automation flags to prevent detection
+        options.setExperimentalOption("excludeSwitches",
+                Collections.singletonList("enable-automation"));
+        options.setExperimentalOption("useAutomationExtension", false);
+
+        // Setup Chrome driver
+        WebDriverManager.chromedriver().setup();
+        WebDriver driver = new ChromeDriver(options);
+        String sessionId = ((ChromeDriver) driver).getSessionId().toString();
+        log.info("ChromeDriver created successfully with session ID: {}", sessionId);
+
+        // Set timeouts
+        driver.manage().timeouts().pageLoadTimeout(Duration.ofSeconds(timeoutSeconds));
+        driver.manage().timeouts().implicitlyWait(Duration.ofSeconds(timeoutSeconds));
+
+        // Create wait object for waiting for elements
+        WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(timeoutSeconds));
+
+        // Navigate to form URL
+        log.info("Navigating to form URL: {}", formUrl);
+        driver.get(formUrl);
+
+        // Wait for form to load
+        wait.until(
+                ExpectedConditions.presenceOfElementLocated(By.xpath("//div[@role='listitem']")));
+
+        // Wait for form to load with alternative selectors
+        try {
+            wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("form")));
+        } catch (Exception e) {
+            log.warn("Form elements not found with standard selectors, trying alternative...");
+        }
+
+        Thread.sleep(2000);
+        return driver;
+    }
+
     /**
      * Fill a radio button question
      *
@@ -650,23 +719,34 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     private void fillRadioQuestion(WebDriver driver, WebElement questionElement,
             String optionText) {
         try {
-            // Find all option labels within the question container
-            List<WebElement> optionLabels =
-                    questionElement.findElements(By.cssSelector("[role=radio]"));
+            WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(timeoutSeconds));
 
-            // Click on the option that matches the text
+            // Find all option labels within the question container with retry
+            List<WebElement> optionLabels = wait.until(ExpectedConditions
+                    .presenceOfAllElementsLocatedBy(By.cssSelector("[role=radio]")));
+
+            if (optionLabels.isEmpty()) {
+                log.warn("No radio options found for text: {}", optionText);
+                return;
+            }
+
+            // First try exact match
             for (WebElement label : optionLabels) {
-                if (label.getAttribute("aria-label").trim().equals(optionText)
-                        || optionText.contains(label.getAttribute("aria-label").trim())) {
+                String ariaLabel = label.getAttribute("aria-label");
+                if (ariaLabel != null && (ariaLabel.trim().equals(optionText.trim())
+                        || optionText.trim().contains(ariaLabel.trim()))) {
+                    wait.until(ExpectedConditions.elementToBeClickable(label));
                     label.click();
-                    log.debug("Selected radio option: {}", optionText);
+                    log.debug("Selected radio option (exact match): {}", optionText);
                     return;
                 }
             }
 
             // If exact match not found, try contains
             for (WebElement label : optionLabels) {
-                if (label.getText().contains(optionText)) {
+                String labelText = label.getText();
+                if (labelText != null && labelText.contains(optionText)) {
+                    wait.until(ExpectedConditions.elementToBeClickable(label));
                     label.click();
                     log.debug("Selected radio option (partial match): {}", optionText);
                     return;
@@ -690,22 +770,33 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     private void fillCheckboxQuestion(WebDriver driver, WebElement questionElement,
             String optionText) {
         try {
-            // Find all checkbox options within the question container
-            List<WebElement> checkboxOptions =
-                    questionElement.findElements(By.cssSelector("[role=checkbox]"));
+            WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(timeoutSeconds));
 
-            // Click on the checkbox that matches the text
+            // Find all checkbox options within the question container
+            List<WebElement> checkboxOptions = wait.until(ExpectedConditions
+                    .presenceOfAllElementsLocatedBy(By.cssSelector("[role=checkbox]")));
+
+            if (checkboxOptions.isEmpty()) {
+                log.warn("No checkbox options found for text: {}", optionText);
+                return;
+            }
+
+            // First try exact match
             for (WebElement checkbox : checkboxOptions) {
-                if (checkbox.getAttribute("aria-label").trim().equals(optionText)) {
+                String ariaLabel = checkbox.getAttribute("aria-label");
+                if (ariaLabel != null && ariaLabel.trim().equals(optionText.trim())) {
+                    wait.until(ExpectedConditions.elementToBeClickable(checkbox));
                     checkbox.click();
-                    log.debug("Checked checkbox option: {}", optionText);
+                    log.debug("Checked checkbox option (exact match): {}", optionText);
                     return;
                 }
             }
 
             // If exact match not found, try contains
             for (WebElement checkbox : checkboxOptions) {
-                if (checkbox.getText().contains(optionText)) {
+                String checkboxText = checkbox.getText();
+                if (checkboxText != null && checkboxText.contains(optionText)) {
+                    wait.until(ExpectedConditions.elementToBeClickable(checkbox));
                     checkbox.click();
                     log.debug("Checked checkbox option (partial match): {}", optionText);
                     return;
@@ -730,17 +821,22 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     private void fillTextQuestion(WebDriver driver, WebElement questionElement,
             String questionTitle, Map<Question, QuestionOption> selections) {
         try {
+            WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(timeoutSeconds));
             log.info("Processing text question: {}", questionTitle);
 
-            // Try multiple possible selectors to find text inputs
-            List<WebElement> textInputs = questionElement.findElements(By.xpath(
-                    ".//input[@type='text'] | .//textarea | .//input[contains(@class, 'quantumWizTextinputPaperinputInput')]"));
-
-            if (textInputs.isEmpty()) {
-                // Try more generic approach if specific selectors fail
-                textInputs = questionElement.findElements(By.tagName("input"));
-                if (textInputs.isEmpty()) {
-                    textInputs = questionElement.findElements(By.tagName("textarea"));
+            // Try multiple possible selectors to find text inputs with explicit wait
+            List<WebElement> textInputs = new ArrayList<>();
+            try {
+                textInputs = wait.until(ExpectedConditions.presenceOfAllElementsLocatedBy(By.xpath(
+                        ".//input[@type='text'] | .//textarea | .//input[contains(@class, 'quantumWizTextinputPaperinputInput')]")));
+            } catch (Exception e) {
+                log.debug("Failed to find text inputs with primary selectors, trying alternatives");
+                try {
+                    textInputs = wait.until(
+                            ExpectedConditions.presenceOfAllElementsLocatedBy(By.tagName("input")));
+                } catch (Exception e2) {
+                    textInputs = wait.until(ExpectedConditions
+                            .presenceOfAllElementsLocatedBy(By.tagName("textarea")));
                 }
             }
 
@@ -750,39 +846,38 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             }
 
             WebElement textInput = textInputs.get(0);
-            String textToEnter;
+            String textToEnter = null;
 
-            // Tìm option cho câu hỏi này trong selections
+            // Find matching question in selections
             for (Map.Entry<Question, QuestionOption> entry : selections.entrySet()) {
                 if (entry.getKey().getTitle().equals(questionTitle)) {
                     QuestionOption option = entry.getValue();
-                    // Chỉ kiểm tra option có giá trị text hay không
                     if (option != null && option.getText() != null && !option.getText().isEmpty()) {
                         textToEnter = option.getText();
-                        log.info("Using predefined text: {}", textToEnter);
-
-                        // Click vào trường văn bản để focus
-                        textInput.click();
-                        // Xóa nội dung hiện có
-                        textInput.clear();
-                        // Nhập văn bản
-                        textInput.sendKeys(textToEnter);
-                        return;
+                        break;
                     }
-                    break;
                 }
             }
 
-            // Nếu không có text từ người dùng, tạo text ngẫu nhiên phù hợp
-            String textValue = generateTextByQuestionType(questionTitle);
+            // If no text from user selections, generate random text
+            if (textToEnter == null) {
+                textToEnter = generateTextByQuestionType(questionTitle);
+            }
+
+            // Ensure element is interactive before proceeding
+            wait.until(ExpectedConditions.elementToBeClickable(textInput));
 
             // Click on the text field first to ensure focus
             textInput.click();
             // Clear existing text if any
             textInput.clear();
-            // Enter the text
-            textInput.sendKeys(textValue);
-            log.info("Entered generated text: {}", textValue);
+            // Enter the text with small delays between characters for human-like behavior
+            for (char c : textToEnter.toCharArray()) {
+                textInput.sendKeys(String.valueOf(c));
+                Thread.sleep(50 + new Random().nextInt(50)); // 50-100ms delay between characters
+            }
+
+            log.info("Successfully entered text: {}", textToEnter);
         } catch (Exception e) {
             log.error("Error filling text question: {}", e.getMessage(), e);
         }
@@ -798,49 +893,24 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     private void fillComboboxQuestion(WebDriver driver, WebElement questionElement,
             String questionTitle, String optionText) {
         try {
-            List<WebElement> comboboxs =
-                    questionElement.findElements(By.xpath("//div[@role='listbox']"));
-            for (WebElement combobox : comboboxs) {
-                WebElement parentElement =
-                        combobox.findElement(By.xpath("./ancestor::div[@role='listitem']"));
-                if (parentElement.getText().contains(questionTitle)
-                        || questionTitle.contains(parentElement.getText())) {
-                    // wait 500ms before click
-                    Thread.sleep(200);
-                    combobox.click();
+            // Wait for the dropdown to be clickable
+            WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(timeoutSeconds));
 
-                    WebDriverWait wait =
-                            new WebDriverWait(driver, Duration.ofSeconds(timeoutSeconds));
-                    wait.until(webDriver -> !parentElement
-                            .findElements(
-                                    By.xpath(".//div[@role='listbox' and @aria-expanded='true']"))
-                            .isEmpty());
-                    break;
-                }
-            }
+            // Find and click the dropdown trigger
+            WebElement dropdownTrigger = wait.until(ExpectedConditions.elementToBeClickable(
+                    By.xpath(".//div[contains(@role, 'combobox') or contains(@role, 'listbox')]")));
+            dropdownTrigger.click();
 
-            List<WebElement> listboxElements =
-                    driver.findElements(By.xpath("//div[@role='listbox']"));
-            for (WebElement listBoxElement : listboxElements) {
-                if (!listBoxElement.getText().trim().contains(optionText)) {
-                    continue;
-                }
-                List<WebElement> options =
-                        listBoxElement.findElements(By.xpath(".//div[@role='option']"));
-                for (WebElement option : options) {
-                    if (option.getText().trim().contains(optionText)
-                            || optionText.trim().contains(option.getText())) {
-                        option.click();
-                        log.debug("Selected combobox option: {}", optionText);
-                        return;
-                    }
-                }
-            }
-            log.warn("Combobox option not found: {}", optionText);
-            // close
-            questionElement.click();
+            // Wait for dropdown options to appear and select the correct option
+            WebElement option = wait.until(ExpectedConditions.elementToBeClickable(
+                    By.xpath("//div[@role='option' and contains(text(), '" + optionText + "')]")));
+            option.click();
+
+            log.info("Successfully filled combobox question: {} with value: {}", questionTitle,
+                    optionText);
         } catch (Exception e) {
-            log.error("Error filling combobox question: {}", e.getMessage(), e);
+            log.error("Error filling combobox question: {} - {}", questionTitle, e.getMessage());
+            throw e;
         }
     }
 
@@ -853,18 +923,50 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     private String generateTextByQuestionType(String questionTitle) {
         String questionLower = questionTitle.toLowerCase();
 
-        if (questionLower.contains("email")) {
+        // Xử lý các trường hợp email
+        if (questionLower.contains("email") || questionLower.contains("thư điện tử")
+                || questionLower.contains("mail") || questionLower.matches(".*e[-\\s]?mail.*")) {
             return TestDataEnum.getRandomEmail();
-        } else if (questionLower.contains("tên") || questionLower.contains("họ")
-                || questionLower.contains("name")) {
+        }
+
+        // Xử lý các trường hợp tên/họ tên
+        if (questionLower.matches(".*(?:họ|tên|name|full name|họ và tên|họ tên).*")
+                && !questionLower.contains("công ty") && !questionLower.contains("trường")
+                && !questionLower.contains("school") && !questionLower.contains("company")) {
             return TestDataEnum.getRandomName();
-        } else if (questionLower.contains("số điện thoại") || questionLower.contains("phone")) {
+        }
+
+        // Xử lý các trường hợp số điện thoại
+        if (questionLower.matches(".*(?:số điện thoại|phone|sđt|số dt|di động|điện thoại).*")) {
             return TestDataEnum.getRandomPhoneNumber();
-        } else if (questionLower.contains("địa chỉ") || questionLower.contains("address")) {
+        }
+
+        // Xử lý các trường hợp địa chỉ
+        if (questionLower.matches(".*(?:địa chỉ|address|nơi ở|location|place).*")
+                || (questionLower.contains("số") && questionLower.contains("đường"))) {
             return TestDataEnum.getRandomAddress();
-        } else {
+        }
+
+        // Xử lý các trường hợp đánh giá/feedback
+        if (questionLower.matches(".*(?:đánh giá|feedback|góp ý|nhận xét|comment|ý kiến).*")) {
             return TestDataEnum.getRandomFeedback();
         }
+
+        // Nếu không match với các pattern trên, phân tích thêm context
+        if (questionLower.contains("bạn") || questionLower.contains("anh")
+                || questionLower.contains("chị") || questionLower.contains("you")) {
+            // Câu hỏi mang tính cá nhân
+            if (questionLower.matches(".*(?:là ai|who|tên gì).*")) {
+                return TestDataEnum.getRandomName();
+            }
+            if (questionLower.matches(".*(?:ở đâu|where|sống tại).*")) {
+                return TestDataEnum.getRandomAddress();
+            }
+        }
+
+        // Default case: Nếu không match với bất kỳ pattern nào,
+        // trả về feedback ngắn gọn để tránh điền sai context
+        return "ad";
     }
 }
 
