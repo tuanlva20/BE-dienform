@@ -1,0 +1,45 @@
+server:
+  port: 2412
+spring:
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: update
+  datasource:
+    url: jdbc:mysql://localhost:3306/fill_form
+    username: fillform
+    password: admin@
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  mail:
+    host: smtp.gmail.com
+    port: 587
+    username: khaosat.dev@gmail.com
+    password: iyqmpuqjfdqlztos
+    properties:
+      mail.smtp.auth: true
+      mail.smtp.starttls.enable: true
+
+# Google
+google:
+  api:
+    key: AIzaSyBCFk8JZ8OYLVEjs92cSLfcccyFH7VyeU0
+  # Google Form Automation Settings
+  form:
+    auto-submit: true
+    thread-pool-size: 2
+    timeout-seconds: 30
+  # Google OAuth Configuration
+  oauth:
+    client-id: 174305364945-1p8i19sc1gclleccatiirch72r5gdt0b.apps.googleusercontent.com
+
+# Campaign Scheduler Configuration
+campaign:
+  scheduler:
+    fixed-rate: 10000 # Check every 10 seconds (10000ms)
+    enabled: true
+
+# JWT Configuration
+jwt:
+  secret: YourSuperSecretJWTKeyThatShouldBeAtLeast256BitsLongForHS256AlgorithmSecurity
+  expiration: 86400000 # 1 day
+  refresh-expiration: 604800000 # 7 days

@@ -38,7 +38,7 @@ public class FormStatistic extends AuditEntity {
   @Column(name = "error_question", nullable = false)
   private Integer errorQuestion;
 
-  @OneToOne(fetch = FetchType.LAZY, optional = false)
+  @OneToOne(fetch = FetchType.LAZY)
   @JoinColumn(name = "form_id", nullable = false)
   private Form form;
 

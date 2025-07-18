@@ -11,10 +11,13 @@ import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import com.dienform.common.model.ResponseModel;
+import com.dienform.tool.dienformtudong.form.dto.param.FormParam;
 import com.dienform.tool.dienformtudong.form.dto.request.FormRequest;
 import com.dienform.tool.dienformtudong.form.dto.response.FormDetailResponse;
 import com.dienform.tool.dienformtudong.form.dto.response.FormResponse;
@@ -30,21 +33,15 @@ public class FormController {
     private final FormService formService;
 
     @GetMapping
-    public ResponseEntity<Page<FormResponse>> getAllForms(
-            @RequestParam(required = false) String search,
-            @RequestParam(defaultValue = "0") int page, @RequestParam(defaultValue = "10") int size,
-            @RequestParam(defaultValue = "createdAt,desc") String sort) {
+    public ResponseModel<?> getAllForms(@RequestParam(required = false) String search,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "10") int size) {
 
-        String[] sortParams = sort.split(",");
-        String sortField = sortParams[0];
-        Sort.Direction direction =
-                sortParams.length > 1 && sortParams[1].equalsIgnoreCase("asc") ? Sort.Direction.ASC
-                        : Sort.Direction.DESC;
-
-        Pageable pageable = PageRequest.of(page, size, Sort.by(direction, sortField));
-        Page<FormResponse> forms = formService.getAllForms(search, pageable);
-
-        return ResponseEntity.ok(forms);
+        FormParam param = FormParam.builder().search(search).page(page).size(size).build();
+        Pageable pageable = PageRequest.of(page, size, Sort.by("createdAt").descending());
+        Page<FormResponse> forms = formService.getAllForms(param, pageable);
+        return ResponseModel.success(forms.getContent(), forms.getTotalPages(), page, size,
+                forms.getTotalElements(), HttpStatus.OK);
     }
 
     @GetMapping("/{formId}")
@@ -57,6 +54,13 @@ public class FormController {
     public ResponseEntity<FormResponse> createForm(@Valid @RequestBody FormRequest formRequest) {
         FormResponse createdForm = formService.createForm(formRequest);
         return new ResponseEntity<>(createdForm, HttpStatus.CREATED);
+    }
+
+    @PutMapping("/{formId}")
+    public ResponseEntity<FormResponse> updateForm(@PathVariable UUID formId,
+            @Valid @RequestBody FormRequest formRequest) {
+        FormResponse updatedForm = formService.updateForm(formId, formRequest);
+        return ResponseEntity.ok(updatedForm);
     }
 
     @DeleteMapping("/{formId}")

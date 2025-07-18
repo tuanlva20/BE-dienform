@@ -1,61 +1,63 @@
 package com.dienform.tool.dienformtudong.question.entity;
 
+import java.io.Serializable;
+import java.util.List;
+import com.dienform.common.entity.AuditEntity;
 import com.dienform.tool.dienformtudong.form.entity.Form;
-import jakarta.validation.constraints.NotNull;
-import jakarta.validation.constraints.Size;
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.FetchType;
+import jakarta.persistence.JoinColumn;
+import jakarta.persistence.ManyToOne;
+import jakarta.persistence.OneToMany;
+import jakarta.persistence.Table;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
-import lombok.Data;
+import lombok.Getter;
 import lombok.NoArgsConstructor;
-import org.hibernate.annotations.ColumnDefault;
-import org.hibernate.annotations.GenericGenerator;
+import lombok.Setter;
 
-import jakarta.persistence.*;
-import org.hibernate.annotations.OnDelete;
-import org.hibernate.annotations.OnDeleteAction;
-import org.springframework.data.annotation.CreatedDate;
-
-import java.time.Instant;
-import java.time.LocalDateTime;
-import java.util.UUID;
-
-@Data
+@Entity
+@Table(name = "question")
+@Getter
+@Setter
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
-@Entity
-@Table(name = "question")
-public class Question {
-  @Id
-  @GeneratedValue(strategy = GenerationType.UUID)
-  private UUID id;
+public class Question extends AuditEntity implements Serializable {
+  private static final long serialVersionUID = 1L;
 
-  @ManyToOne(fetch = FetchType.LAZY, optional = false)
-  @JoinColumn(name = "form_id", nullable = false)
-  private Form form;
-
-  @Lob
-  @Column(name = "title", nullable = false)
+  @Column(name = "title")
   private String title;
 
-  @Lob
   @Column(name = "description")
   private String description;
 
-  @Size(max = 50)
-  @NotNull
-  @Column(name = "type", nullable = false, length = 50)
+  @Column(name = "type")
   private String type;
 
-  @NotNull
-  @Column(name = "required", nullable = false)
-  private Boolean required = false;
+  @Column(name = "required")
+  private Boolean required;
 
-  @NotNull
-  @Column(name = "position", nullable = false)
+  @Column(name = "position")
   private Integer position;
 
-  @Column(name = "created_at", nullable = false)
-  @CreatedDate
-  private LocalDateTime createdAt;
+  @ManyToOne(fetch = FetchType.LAZY)
+  @JoinColumn(name = "form_id")
+  private Form form;
+
+  @OneToMany(mappedBy = "question", fetch = FetchType.LAZY)
+  private List<QuestionOption> options;
+
+  // Add custom copy constructor for detached copy
+  public Question(Question source) {
+    this.setId(source.getId());
+    this.title = source.getTitle();
+    this.description = source.getDescription();
+    this.type = source.getType();
+    this.required = source.getRequired();
+    this.position = source.getPosition();
+    // Don't copy form to avoid lazy loading issues
+    this.form = null;
+  }
 }

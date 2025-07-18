@@ -16,12 +16,13 @@ import java.util.UUID;
 @AllArgsConstructor
 public class FillRequestResponse {
     private UUID id;
-    private UUID formId;
     private int surveyCount;
     private BigDecimal pricePerSurvey;
     private BigDecimal totalPrice;
     private boolean isHumanLike;
     private LocalDateTime createdAt;
+    private LocalDateTime startDate;
+    private LocalDateTime endDate;
     private String status;
     private List<AnswerDistributionResponse> answerDistributions;
 
@@ -34,6 +35,7 @@ public class FillRequestResponse {
         private UUID optionId;
         private int percentage;
         private int count;
+        private String valueString;
         private OptionInfo option;
 
         @Data

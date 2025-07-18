@@ -18,5 +18,5 @@ public class FormStatisticResponse {
     private int completedSurvey;
     private int failedSurvey;
     private int errorQuestion;
-    private LocalDateTime lastUpdatedAt;
+    private LocalDateTime updatedAt;
 }

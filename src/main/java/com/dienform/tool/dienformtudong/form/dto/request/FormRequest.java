@@ -1,20 +1,19 @@
 package com.dienform.tool.dienformtudong.form.dto.request;
 
-import lombok.AllArgsConstructor;
-import lombok.Builder;
-import lombok.Data;
-import lombok.NoArgsConstructor;
-import jakarta.validation.constraints.NotBlank;
+import com.dienform.tool.dienformtudong.form.entity.Form;
+import jakarta.validation.constraints.NotNull;
+import lombok.*;
 
-@Data
-@Builder
-@NoArgsConstructor
+import java.io.Serializable;
+
+/**
+ * DTO for {@link Form}
+ */
+@Getter
+@Setter
 @AllArgsConstructor
-public class FormRequest {
-
-    @NotBlank(message = "Form name is required")
-    private String name;
-    
-    @NotBlank(message = "Edit link is required")
-    private String editLink;
+@NoArgsConstructor
+public class FormRequest implements Serializable {
+  String name;
+  String editLink;
 }
