@@ -15,9 +15,5 @@ public interface FillRequestService {
 
     void deleteFillRequest(UUID id);
 
-    /**
-     * Create fill request for "Fill-in-data" tab functionality This method handles form filling
-     * based on pre-existing data from Google Sheets
-     */
     FillRequestResponse createDataFillRequest(DataFillRequestDTO dataFillRequestDTO);
 }

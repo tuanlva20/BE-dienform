@@ -11,6 +11,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -81,10 +82,12 @@ public class DataFillCampaignService {
       for (Question q : questions) {
         Question detachedQuestion = CopyUtil.detachedCopy(q, source -> {
           Question copy = new Question(source);
-          List<QuestionOption> detachedOptions =
-              source.getOptions().stream().map(QuestionOption::new).toList();
+          List<QuestionOption> detachedOptions = source.getOptions().stream().map(opt -> {
+            QuestionOption optionCopy = new QuestionOption(opt);
+            optionCopy.setQuestion(copy);
+            return optionCopy;
+          }).collect(Collectors.toList());
           copy.setOptions(detachedOptions);
-          detachedOptions.forEach(opt -> opt.setQuestion(copy));
           return copy;
         });
         questionMap.put(q.getId(), detachedQuestion);

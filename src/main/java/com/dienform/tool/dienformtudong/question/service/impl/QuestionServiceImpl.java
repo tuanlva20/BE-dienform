@@ -48,8 +48,7 @@ public class QuestionServiceImpl implements QuestionService {
 
                 return QuestionResponse.builder().id(question.getId()).title(question.getTitle())
                                 .description(question.getDescription()).type(question.getType())
-                                .required(question.getRequired() != null ? question.getRequired()
-                                                : false)
+                                .required(question.getRequired())
                                 .position(question.getPosition() != null ? question.getPosition()
                                                 : 0)
                                 .options(optionResponses).build();

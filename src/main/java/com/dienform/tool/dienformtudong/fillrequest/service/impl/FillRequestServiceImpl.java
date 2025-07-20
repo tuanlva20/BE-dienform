@@ -71,7 +71,7 @@ public class FillRequestServiceImpl implements FillRequestService {
     List<Question> questions = questionRepository.findByForm(form);
 
     // Validate answer distributions
-    validateAnswerDistributions(fillRequestDTO.getAnswerDistributions());
+    validateAnswerDistributions(fillRequestDTO.getAnswerDistributions(), questions);
 
     // Create fill request
     FillRequest fillRequest = FillRequest.builder().form(form)
@@ -264,7 +264,7 @@ public class FillRequestServiceImpl implements FillRequestService {
         .surveyCount(Math.min(dataFillRequestDTO.getSubmissionCount(), sheetData.size()))
         .pricePerSurvey(dataFillRequestDTO.getPricePerSurvey())
         .totalPrice(dataFillRequestDTO.getPricePerSurvey()
-        .multiply(BigDecimal.valueOf(dataFillRequestDTO.getSubmissionCount())))
+            .multiply(BigDecimal.valueOf(dataFillRequestDTO.getSubmissionCount())))
         .humanLike(Boolean.TRUE.equals(dataFillRequestDTO.getIsHumanLike()))
         .startDate(dataFillRequestDTO.getStartDate()).endDate(dataFillRequestDTO.getEndDate())
         .status(Constants.FILL_REQUEST_STATUS_PENDING).build();
@@ -309,39 +309,81 @@ public class FillRequestServiceImpl implements FillRequestService {
   }
 
   private void validateAnswerDistributions(
-      List<FillRequestDTO.AnswerDistributionRequest> distributions) {
+      List<FillRequestDTO.AnswerDistributionRequest> distributions, List<Question> questions) {
     if (distributions == null || distributions.isEmpty()) {
       throw new BadRequestException("Answer distributions cannot be empty");
     }
 
-    // Check that all question and option IDs exist
-    for (FillRequestDTO.AnswerDistributionRequest distribution : distributions) {
-      // Lấy thông tin question
-      Question question = questionRepository.findById(distribution.getQuestionId()).orElseThrow(
-          () -> new ResourceNotFoundException("Question", "id", distribution.getQuestionId()));
+    // Group distributions by question
+    Map<UUID, List<FillRequestDTO.AnswerDistributionRequest>> distributionsByQuestion =
+        distributions.stream().collect(
+            Collectors.groupingBy(FillRequestDTO.AnswerDistributionRequest::getQuestionId));
 
-      // Với câu hỏi text, optionId có thể null
-      if ("text".equalsIgnoreCase(question.getType())) {
-        continue;
-      }
+    // Check all required questions are included and validate their distributions
+    for (Question question : questions) {
+      List<FillRequestDTO.AnswerDistributionRequest> questionDistributions =
+          distributionsByQuestion.get(question.getId());
 
-      // Với câu hỏi không phải text, kiểm tra optionId
-      if (distribution.getOptionId() == null) {
-        if (distribution.getPercentage() == 0) {
-          continue;
-        } else {
-          throw new BadRequestException(
-              "Option ID is required for non-text questions with non-zero percentage");
+      // For required questions
+      if (Boolean.TRUE.equals(question.getRequired())) {
+        if (questionDistributions == null || questionDistributions.isEmpty()) {
+          throw new BadRequestException(String.format(
+              "Required question '%s' must have answer distributions", question.getTitle()));
+        }
+
+        // Check total percentage for required questions
+        int totalPercentage = questionDistributions.stream()
+            .mapToInt(FillRequestDTO.AnswerDistributionRequest::getPercentage).sum();
+
+        if (totalPercentage != 100) {
+          throw new BadRequestException(String.format(
+              "Total percentage for required question '%s' must be 100%%, but was %d%%",
+              question.getTitle(), totalPercentage));
+        }
+
+        // For required text questions, validate text value
+        if ("text".equalsIgnoreCase(question.getType())) {
+          boolean hasValidText = questionDistributions.stream().anyMatch(
+              dist -> dist.getValueString() != null && !dist.getValueString().trim().isEmpty());
+          if (!hasValidText) {
+            throw new BadRequestException(String.format(
+                "Required text question '%s' must have non-empty text value", question.getTitle()));
+          }
         }
       }
 
-      QuestionOption option = optionRepository.findById(distribution.getOptionId()).orElseThrow(
-          () -> new ResourceNotFoundException("Question Option", "id", distribution.getOptionId()));
+      // Validate each distribution
+      if (questionDistributions != null) {
+        for (FillRequestDTO.AnswerDistributionRequest distribution : questionDistributions) {
+          // Validate percentage range
+          if (distribution.getPercentage() < 0 || distribution.getPercentage() > 100) {
+            throw new BadRequestException(
+                String.format("Percentage for question '%s' must be between 0 and 100, but was %d",
+                    question.getTitle(), distribution.getPercentage()));
+          }
 
-      // Ensure the option belongs to the specified question
-      if (option != null && !option.getQuestion().getId().equals(distribution.getQuestionId())) {
-        throw new BadRequestException(String.format("Option %s does not belong to question %s",
-            distribution.getOptionId(), distribution.getQuestionId()));
+          // For non-text questions, validate option ID
+          if (!"text".equalsIgnoreCase(question.getType())) {
+            if (distribution.getOptionId() == null) {
+              if (distribution.getPercentage() > 0) {
+                throw new BadRequestException(String.format(
+                    "Option ID is required for non-text question '%s' with non-zero percentage",
+                    question.getTitle()));
+              }
+            } else {
+              // Validate option belongs to question
+              QuestionOption option = optionRepository.findById(distribution.getOptionId())
+                  .orElseThrow(() -> new ResourceNotFoundException("Question Option", "id",
+                      distribution.getOptionId()));
+
+              if (!option.getQuestion().getId().equals(question.getId())) {
+                throw new BadRequestException(
+                    String.format("Option '%s' does not belong to question '%s'", option.getText(),
+                        question.getTitle()));
+              }
+            }
+          }
+        }
       }
     }
   }
