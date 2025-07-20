@@ -72,15 +72,23 @@ public class FormServiceImpl implements FormService {
     // Create and save the form
     Form form = formMapper.toEntity(formRequest);
 
-    // If form name is null or empty, extract title from Google Form
+    // If form name is null or empty, extract title from Google Form and append form count
     if (form.getName() == null || form.getName().trim().isEmpty()) {
       // Convert edit link to public link first
       String title = googleFormService.extractTitleFromFormLink(form.getEditLink());
+
+      // Get total form count
+      long formCount = formRepository.count();
+
       if (title != null && !title.trim().isEmpty()) {
-        form.setName(title);
-        log.info("Using extracted title as form name: {}", title);
+        // Append form count to title
+        form.setName(title + " #" + (formCount + 1));
+        log.info("Using extracted title with count as form name: {}", form.getName());
       } else {
-        log.warn("Could not extract title from Google Form, using empty name");
+        // Use default name with count if title extraction fails
+        form.setName("Form #" + (formCount + 1));
+        log.warn("Could not extract title from Google Form, using default name with count: {}",
+            form.getName());
       }
     }
 
@@ -96,18 +104,41 @@ public class FormServiceImpl implements FormService {
     List<ExtractedQuestion> extractedQuestions =
         googleFormService.readGoogleForm(formRequest.getEditLink());
     extractedQuestions.forEach(q -> {
-      Question question =
-          Question.builder().form(savedForm).title(q.getTitle()).description(q.getDescription())
-              .type(q.getType()).required(q.isRequired()).position(q.getPosition()).build();
-      // Save the question to the repository
-      questionRepository.save(question);
+      Question question = Question.builder().form(savedForm).title(q.getTitle())
+          .description(q.getDescription()).type(q.getType()).required(q.isRequired())
+          .position(q.getPosition()).additionalData(q.getAdditionalData()).build();
 
-      // Save the options for the question
-      q.getOptions().forEach(option -> {
-        QuestionOption questionOption = QuestionOption.builder().question(question)
-            .text(option.getText()).value(option.getValue()).position(option.getPosition()).build();
-        optionRepository.save(questionOption);
-      });
+      // Save the question to the repository
+      Question savedQuestion = questionRepository.save(question);
+
+      // Save options based on question type
+      if ("checkbox_grid".equals(q.getType()) || "multiple_choice_grid".equals(q.getType())) {
+        // For grid questions, save row options with their sub-options
+        q.getOptions().forEach(rowOption -> {
+          QuestionOption row = QuestionOption.builder().question(savedQuestion)
+              .text(rowOption.getText()).value(rowOption.getValue())
+              .position(rowOption.getPosition()).isRow(true).build();
+          QuestionOption savedRow = optionRepository.save(row);
+
+          // Save sub-options for each row
+          if (rowOption.getSubOptions() != null) {
+            rowOption.getSubOptions().forEach(subOption -> {
+              QuestionOption option = QuestionOption.builder().question(savedQuestion)
+                  .text(subOption.getText()).value(subOption.getValue())
+                  .position(subOption.getPosition()).parentOption(savedRow).build();
+              optionRepository.save(option);
+            });
+          }
+        });
+      } else {
+        // For regular questions, save options normally
+        q.getOptions().forEach(option -> {
+          QuestionOption questionOption =
+              QuestionOption.builder().question(savedQuestion).text(option.getText())
+                  .value(option.getValue()).position(option.getPosition()).build();
+          optionRepository.save(questionOption);
+        });
+      }
     });
 
     return formMapper.toResponse(savedForm);

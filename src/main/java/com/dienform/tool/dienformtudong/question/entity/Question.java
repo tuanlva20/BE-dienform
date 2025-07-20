@@ -1,12 +1,21 @@
 package com.dienform.tool.dienformtudong.question.entity;
 
 import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 import com.dienform.common.entity.AuditEntity;
 import com.dienform.tool.dienformtudong.form.entity.Form;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.FetchType;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.OneToMany;
@@ -27,6 +36,10 @@ import lombok.Setter;
 public class Question extends AuditEntity implements Serializable {
   private static final long serialVersionUID = 1L;
 
+  @Id
+  @GeneratedValue(strategy = GenerationType.AUTO)
+  private UUID id;
+
   @Column(name = "title")
   private String title;
 
@@ -42,14 +55,18 @@ public class Question extends AuditEntity implements Serializable {
   @Column(name = "position")
   private Integer position;
 
+  @Column(name = "additional_data", columnDefinition = "JSON")
+  @JdbcTypeCode(SqlTypes.JSON)
+  private Map<String, String> additionalData;
+
   @ManyToOne(fetch = FetchType.LAZY)
   @JoinColumn(name = "form_id")
   private Form form;
 
   @OneToMany(mappedBy = "question", fetch = FetchType.LAZY)
-  private List<QuestionOption> options;
+  private List<QuestionOption> options = new ArrayList<>();
 
-  // Add custom copy constructor for detached copy
+  // Copy constructor
   public Question(Question source) {
     this.setId(source.getId());
     this.title = source.getTitle();
@@ -57,7 +74,19 @@ public class Question extends AuditEntity implements Serializable {
     this.type = source.getType();
     this.required = source.getRequired();
     this.position = source.getPosition();
+    this.additionalData =
+        source.getAdditionalData() != null ? new HashMap<>(source.getAdditionalData()) : null;
     // Don't copy form to avoid lazy loading issues
     this.form = null;
+    // Options will be set separately to avoid circular references
+    this.options = new ArrayList<>();
+  }
+
+  public Boolean getRequired() {
+    return required != null ? required : false;
+  }
+
+  public void setRequired(Boolean required) {
+    this.required = required;
   }
 }

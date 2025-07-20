@@ -20,8 +20,10 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Component;
 import org.springframework.util.ObjectUtils;
 import org.springframework.web.client.RestTemplate;
+import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
+import lombok.NoArgsConstructor;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
@@ -38,13 +40,18 @@ public class GoogleFormParser {
      */
     @Data
     @Builder
+    @NoArgsConstructor
+    @AllArgsConstructor
     public static class ExtractedQuestion {
         private String title;
         private String description;
         private String type;
         private boolean required;
         private Integer position;
-        private List<ExtractedOption> options;
+        @Builder.Default
+        private List<ExtractedOption> options = new ArrayList<>();
+        @Builder.Default
+        private Map<String, String> additionalData = new HashMap<>();
     }
 
     /**
@@ -52,10 +59,14 @@ public class GoogleFormParser {
      */
     @Data
     @Builder
+    @NoArgsConstructor
+    @AllArgsConstructor
     public static class ExtractedOption {
         private String text;
         private String value;
         private Integer position;
+        @Builder.Default
+        private List<ExtractedOption> subOptions = new ArrayList<>();
     }
 
     private final RestTemplate restTemplate;
@@ -151,71 +162,34 @@ public class GoogleFormParser {
                     .required(isRequired(questionElement)).position(questionIndex++)
                     .options(new ArrayList<>()).build();
 
-            if ("radio".equals(question.getType())) {
-                // Radio options
-                Elements optionElements =
-                        questionElement.select("[role=radioGroup]").select("[dir=auto]");
-                int optionIndex = 0;
-                for (Element optionElement : optionElements) {
-                    String optionText = optionElement.text().trim();
-                    if (ObjectUtils.isEmpty(optionText)) {
-                        log.warn("Skipping empty option radio text");
-                        continue;
-                    }
-
-                    ExtractedOption option = ExtractedOption.builder().text(optionText)
-                            .value(optionText).position(optionIndex++).build();
-                    question.getOptions().add(option);
-                }
-            } else if ("checkbox".equals(question.getType())) {
-                // Checkbox options
-                Elements optionElements = questionElement.select("span[dir=auto]");
-                int optionIndex = 0;
-                for (Element optionElement : optionElements) {
-                    String optionText = optionElement.text().trim();
-                    if (ObjectUtils.isEmpty(optionText)) {
-                        log.warn("Skipping empty option checkbox text");
-                        continue;
-                    }
-
-                    ExtractedOption option = ExtractedOption.builder().text(optionText)
-                            .value(optionText).position(optionIndex++).build();
-                    question.getOptions().add(option);
-                }
-            } else if ("select".equals(question.getType())) {
-                // Select dropdown options
-                Elements optionElements = questionElement.parent().select("select option");
-                int optionIndex = 0;
-                for (Element optionElement : optionElements) {
-                    String optionText = optionElement.text().trim();
-                    if (ObjectUtils.isEmpty(optionText)) {
-                        log.warn("Skipping empty option select text");
-                        continue;
-                    }
-
-                    ExtractedOption option = ExtractedOption.builder().text(optionText)
-                            .value(optionText).position(optionIndex++).build();
-                    question.getOptions().add(option);
-                }
-            } else if ("combobox".equals(question.getType())) {
-                // Combobox options
-                Elements optionElements = questionElement.select("[role=option]");
-                int optionIndex = 0;
-                for (Element optionElement : optionElements) {
-                    String optionText =
-                            optionElement.hasAttr("data-value") ? optionElement.attr("data-value")
-                                    : null;
-                    if (ObjectUtils.isEmpty(optionText)) {
-                        log.warn("Skipping empty option combobox text");
-                        continue;
-                    }
-
-                    ExtractedOption option = ExtractedOption.builder().text(optionText)
-                            .value(optionText).position(optionIndex++).build();
-                    question.getOptions().add(option);
-                }
+            // Extract options based on question type
+            switch (type.toLowerCase()) {
+                case "radio":
+                    extractRadioOptions(questionElement, question);
+                    break;
+                case "checkbox":
+                    extractCheckboxOptions(questionElement, question);
+                    break;
+                case "combobox":
+                case "select":
+                    extractComboboxOptions(questionElement, question);
+                    break;
+                case "multiple_choice_grid":
+                    extractMultipleChoiceGridOptions(questionElement, question);
+                    break;
+                case "checkbox_grid":
+                    extractCheckboxGridOptions(questionElement, question);
+                    break;
+                case "date":
+                    extractDateOptions(questionElement, question);
+                    break;
+                case "time":
+                    // Time questions don't have options, but might have constraints
+                    break;
+                default:
+                    log.warn("Unsupported question type for options extraction: {}", type);
             }
-            // Add the question to the list of questions
+
             questions.add(question);
         }
         return questions;
@@ -298,6 +272,215 @@ public class GoogleFormParser {
         return "https://docs.google.com/forms/d/e/" + formId + "/viewform";
     }
 
+    private void extractRadioOptions(Element questionElement, ExtractedQuestion question) {
+        Elements optionElements = questionElement.select("[role=radio]");
+        int optionIndex = 0;
+        for (Element optionElement : optionElements) {
+            String optionText = optionElement.attr("data-value").trim();
+            if (ObjectUtils.isEmpty(optionText)) {
+                log.warn("Skipping empty option radio text");
+                continue;
+            }
+
+            ExtractedOption option = ExtractedOption.builder().text(optionText).value(optionText)
+                    .position(optionIndex++).build();
+            question.getOptions().add(option);
+        }
+    }
+
+    private void extractCheckboxOptions(Element questionElement, ExtractedQuestion question) {
+        Elements optionElements = questionElement.select("[role=checkbox]");
+        int optionIndex = 0;
+        for (Element optionElement : optionElements) {
+            String optionText = optionElement.attr("data-answer-value").trim();
+            if (ObjectUtils.isEmpty(optionText)) {
+                log.warn("Skipping empty option checkbox text");
+                continue;
+            }
+
+            ExtractedOption option = ExtractedOption.builder().text(optionText).value(optionText)
+                    .position(optionIndex++).build();
+            question.getOptions().add(option);
+        }
+    }
+
+    private void extractComboboxOptions(Element questionElement, ExtractedQuestion question) {
+        Elements optionElements = questionElement.select("[role=option]");
+        int optionIndex = 0;
+        for (Element optionElement : optionElements) {
+            String optionText = optionElement.attr("data-value").trim();
+            if (ObjectUtils.isEmpty(optionText)) {
+                log.warn("Skipping empty option combobox text");
+                continue;
+            }
+
+            ExtractedOption option = ExtractedOption.builder().text(optionText).value(optionText)
+                    .position(optionIndex++).build();
+            question.getOptions().add(option);
+        }
+    }
+
+    private void extractMultipleChoiceGridOptions(Element questionElement,
+            ExtractedQuestion question) {
+        // Extract row titles
+        Elements rowElements = questionElement.select(".wzWPxe.OIC90c");
+        for (Element rowElement : rowElements) {
+            String rowTitle = rowElement.text().trim();
+            if (ObjectUtils.isEmpty(rowTitle))
+                continue;
+
+            // For each row, find its radio options
+            Element radioGroup = rowElement.parent().select("[role=radiogroup]").first();
+            if (radioGroup != null) {
+                Elements optionElements = radioGroup.select("[role=radio]");
+                for (Element optionElement : optionElements) {
+                    String optionText = optionElement.attr("data-value").trim();
+                    if (!ObjectUtils.isEmpty(optionText)) {
+                        // Format: "row:option"
+                        ExtractedOption option =
+                                ExtractedOption.builder().text(rowTitle + ":" + optionText)
+                                        .value(rowTitle + ":" + optionText)
+                                        .position(question.getOptions().size()).build();
+                        question.getOptions().add(option);
+                    }
+                }
+            }
+        }
+    }
+
+    private void extractCheckboxGridOptions(Element questionElement, ExtractedQuestion question) {
+        try {
+            // Extract data-params which contains the grid structure
+            Element paramsElement = questionElement.select("[data-params]").first();
+            String dataParams = paramsElement != null ? paramsElement.attr("data-params") : "";
+
+            // Parse the data-params to get field IDs and structure
+            Map<String, Object> gridData = parseDataParams(dataParams);
+
+            // Get all groups (rows) that contain checkboxes
+            Elements rowGroups = questionElement.select("[role=group]");
+            List<String> rowLabels = new ArrayList<>();
+            List<String> columnLabels = new ArrayList<>();
+
+            // First, extract column labels from the first visible checkbox group
+            Element firstGroup = rowGroups.first();
+            if (firstGroup != null) {
+                // Find all checkbox elements to get their values
+                Elements checkboxes = firstGroup.select("[role=checkbox]");
+                for (Element checkbox : checkboxes) {
+                    String value = checkbox.attr("data-answer-value");
+                    if (!value.isEmpty()) {
+                        columnLabels.add(value);
+                    }
+                }
+            }
+
+            // Now process each row
+            for (Element rowGroup : rowGroups) {
+                // Get row title from the preceding text element
+                String rowTitle = "";
+                Element rowTitleElement = rowGroup.previousElementSibling();
+                if (rowTitleElement != null) {
+                    rowTitle = rowTitleElement.text().trim();
+                }
+
+                if (!rowTitle.isEmpty()) {
+                    rowLabels.add(rowTitle);
+
+                    // Get the field ID for this row
+                    String fieldId = rowGroup.select("[data-field-id]").attr("data-field-id");
+
+                    ExtractedOption rowOption = ExtractedOption.builder().text(rowTitle)
+                            .value(fieldId).position(rowLabels.size() - 1)
+                            .subOptions(new ArrayList<>()).build();
+
+                    // Add column options
+                    for (int i = 0; i < columnLabels.size(); i++) {
+                        ExtractedOption columnOption =
+                                ExtractedOption.builder().text(columnLabels.get(i))
+                                        .value(columnLabels.get(i)).position(i).build();
+                        rowOption.getSubOptions().add(columnOption);
+                    }
+
+                    question.getOptions().add(rowOption);
+                }
+            }
+
+            // Store grid metadata
+            Map<String, String> additionalData = new HashMap<>();
+            additionalData.put("rowCount", String.valueOf(rowLabels.size()));
+            additionalData.put("columnCount", String.valueOf(columnLabels.size()));
+            additionalData.put("dataParams", dataParams);
+            question.setAdditionalData(additionalData);
+
+        } catch (Exception e) {
+            log.error("Error extracting checkbox grid options: {}", e.getMessage());
+        }
+    }
+
+    private Map<String, Object> parseDataParams(String dataParams) {
+        Map<String, Object> result = new HashMap<>();
+        try {
+            // Remove the %.@. prefix if present
+            dataParams = dataParams.replaceFirst("^%\\.@\\.", "");
+
+            // Parse the JSON-like structure
+            // This is a simplified parser - you might need a more robust solution
+            Pattern pattern = Pattern.compile("\\[(.*?)\\]");
+            Matcher matcher = pattern.matcher(dataParams);
+
+            while (matcher.find()) {
+                String match = matcher.group(1);
+                if (match.contains("data-field-id")) {
+                    result.put("fieldId", match);
+                }
+                // Add more parsing logic as needed
+            }
+        } catch (Exception e) {
+            log.error("Error parsing data-params: {}", e.getMessage());
+        }
+        return result;
+    }
+
+    private void extractDateOptions(Element questionElement, ExtractedQuestion question) {
+        try {
+            Map<String, String> additionalData = new HashMap<>();
+
+            // Get date input element
+            Element dateInput = questionElement.select("input[type=date]").first();
+            if (dateInput != null) {
+                // Extract date constraints
+                String minDate = dateInput.attr("min");
+                String maxDate = dateInput.attr("max");
+                String pattern = dateInput.attr("pattern");
+
+                if (!minDate.isEmpty()) {
+                    additionalData.put("minDate", minDate);
+                }
+                if (!maxDate.isEmpty()) {
+                    additionalData.put("maxDate", maxDate);
+                }
+                if (!pattern.isEmpty()) {
+                    additionalData.put("pattern", pattern);
+                }
+
+                // Check if date is required
+                boolean required = dateInput.hasAttr("required");
+                additionalData.put("required", String.valueOf(required));
+            }
+
+            // Get data-params for additional configuration
+            String dataParams = questionElement.select("[data-params]").attr("data-params");
+            if (!dataParams.isEmpty()) {
+                additionalData.put("dataParams", dataParams);
+            }
+
+            question.setAdditionalData(additionalData);
+        } catch (Exception e) {
+            log.error("Error extracting date options: {}", e.getMessage());
+        }
+    }
+
     /**
      * Extract form ID from an edit URL
      * 
@@ -340,33 +523,45 @@ public class GoogleFormParser {
 
     // Method to dynamically detect the question type
     private String detectQuestionType(Element questionElement) {
+        // Get data-params to check question type
+        String dataParams = questionElement.select("[data-params]").attr("data-params");
+
+        // Check for checkbox grid by data structure
+        if (dataParams.contains("checkbox_grid")
+                || (questionElement.select("[data-field-id]").size() > 0
+                        && questionElement.select("[role=group]").size() > 1)) {
+            return "checkbox_grid";
+        }
+
+        // Check for date input
+        if (questionElement.select("input[type=date]").size() > 0
+                || dataParams.contains("\"date\"")) {
+            return "date";
+        }
+
         // Check for radio button (multiple choice)
-        if (questionElement.select("[role=radioGroup]").size() > 0) {
+        if (questionElement.select("[role=radio]").size() > 0) {
             return "radio";
         }
 
-        // Check for checkbox (multiple choice with checkboxes)
-        if (questionElement.children().select("[role=listitem]").size() > 0) {
+        // Check for checkbox
+        if (questionElement.select("[role=checkbox]").size() > 0) {
             return "checkbox";
         }
 
-        // Check for text input (single line text input)
+        // Check for text input
         if (questionElement.select(
                 "textarea[aria-label], input[type=text], input[type=email], input[type=number]")
                 .size() > 0) {
             return "text";
         }
 
-        // Check for select dropdown (for multiple choices in a dropdown)
-        if (questionElement.select("select").size() > 0) {
+        // Check for select dropdown
+        if (questionElement.select("select, [role=listbox]").size() > 0) {
             return "select";
         }
 
-        if (questionElement.select("[role=option]").size() > 0) {
-            return "combobox";
-        }
-
-        // Default to "text" if no other type is detected
+        // Default to null if no type is detected
         return null;
     }
 
@@ -456,7 +651,7 @@ public class GoogleFormParser {
             Elements optionElements = questionElement.select("option");
 
             for (Element optionElement : optionElements) {
-                String optionText = optionElement.text();
+                String optionText = optionElement.text().trim();
                 String optionValue = optionElement.attr("value");
 
                 // Skip the placeholder option
