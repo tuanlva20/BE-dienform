@@ -4,11 +4,14 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
@@ -20,6 +23,9 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Component;
 import org.springframework.util.ObjectUtils;
 import org.springframework.web.client.RestTemplate;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonParser;
+import com.google.gson.stream.JsonReader;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -67,6 +73,7 @@ public class GoogleFormParser {
         private Integer position;
         @Builder.Default
         private List<ExtractedOption> subOptions = new ArrayList<>();
+        private boolean isRow;
     }
 
     private final RestTemplate restTemplate;
@@ -322,29 +329,237 @@ public class GoogleFormParser {
 
     private void extractMultipleChoiceGridOptions(Element questionElement,
             ExtractedQuestion question) {
-        // Extract row titles
-        Elements rowElements = questionElement.select(".wzWPxe.OIC90c");
-        for (Element rowElement : rowElements) {
-            String rowTitle = rowElement.text().trim();
-            if (ObjectUtils.isEmpty(rowTitle))
-                continue;
+        try {
+            // Get data-params attribute
+            Element dataParamsElement = questionElement.select("[data-params]").first();
+            if (dataParamsElement == null) {
+                log.warn("No data-params found for multiple choice grid question");
+                return;
+            }
 
-            // For each row, find its radio options
-            Element radioGroup = rowElement.parent().select("[role=radiogroup]").first();
-            if (radioGroup != null) {
-                Elements optionElements = radioGroup.select("[role=radio]");
-                for (Element optionElement : optionElements) {
-                    String optionText = optionElement.attr("data-value").trim();
-                    if (!ObjectUtils.isEmpty(optionText)) {
-                        // Format: "row:option"
-                        ExtractedOption option =
-                                ExtractedOption.builder().text(rowTitle + ":" + optionText)
-                                        .value(rowTitle + ":" + optionText)
-                                        .position(question.getOptions().size()).build();
-                        question.getOptions().add(option);
+            String dataParams = dataParamsElement.attr("data-params");
+            if (dataParams.isEmpty()) {
+                log.warn("Empty data-params for multiple choice grid question");
+                return;
+            }
+
+            // Preprocess the data-params string
+            dataParams = preprocessDataParams(dataParams);
+
+            // Try to parse with lenient mode
+            JsonArray outer = null;
+            try {
+                JsonReader reader = new JsonReader(new java.io.StringReader(dataParams));
+                reader.setLenient(true);
+                outer = JsonParser.parseReader(reader).getAsJsonArray();
+            } catch (Exception e) {
+                log.warn("Failed to parse data-params as JSON, trying alternative parsing: {}",
+                        e.getMessage());
+                // Fallback: try to extract rows and columns from HTML structure
+                extractGridFromHtmlStructure(questionElement, question);
+                return;
+            }
+
+            // Safely access array elements
+            if (outer == null || outer.size() < 5) {
+                log.warn("Invalid data-params structure, size: {}",
+                        outer != null ? outer.size() : "null");
+                extractGridFromHtmlStructure(questionElement, question);
+                return;
+            }
+
+            JsonArray rows = null;
+            try {
+                rows = outer.get(4).getAsJsonArray();
+            } catch (Exception e) {
+                log.warn("Failed to get rows from position 4: {}", e.getMessage());
+                extractGridFromHtmlStructure(questionElement, question);
+                return;
+            }
+
+            List<ExtractedOption> rowOptions = new ArrayList<>();
+            List<String> allColumns = new ArrayList<>();
+
+            // First pass: collect all unique columns from all rows
+            for (int i = 0; i < rows.size(); i++) {
+                try {
+                    JsonArray row = rows.get(i).getAsJsonArray();
+                    if (row.size() < 5)
+                        continue;
+                    JsonArray colArr = row.get(1).getAsJsonArray();
+                    for (int j = 0; j < colArr.size(); j++) {
+                        try {
+                            JsonArray colElement = colArr.get(j).getAsJsonArray();
+                            if (colElement.size() > 0) {
+                                String colText = colElement.get(0).getAsString();
+                                if (!allColumns.contains(colText)) {
+                                    allColumns.add(colText);
+                                    log.debug("Found column: {}", colText);
+                                }
+                            }
+                        } catch (Exception e) {
+                        }
+                    }
+                } catch (Exception e) {
+                }
+            }
+
+            // Second pass: build rows with subOptions
+            for (int i = 0; i < rows.size(); i++) {
+                try {
+                    JsonArray row = rows.get(i).getAsJsonArray();
+                    if (row.size() < 5)
+                        continue;
+                    String rowId = row.get(0).getAsString();
+
+                    String rowTitle = "";
+                    try {
+                        JsonArray titleArray = row.get(4).getAsJsonArray();
+                        if (titleArray.size() > 0) {
+                            rowTitle = titleArray.get(0).getAsString();
+                            log.debug("Found row: {}", rowTitle);
+                        }
+                    } catch (Exception e) {
+                        rowTitle = "";
+                    }
+
+                    if (rowTitle != null && !rowTitle.trim().isEmpty()
+                            && !rowTitle.matches("Row \\d+")) {
+                        ExtractedOption rowOption = ExtractedOption.builder().text(rowTitle)
+                                .value(rowId).position(i).isRow(true) // This is a row option
+                                .subOptions(allColumns.stream()
+                                        .map(opt -> ExtractedOption.builder().text(opt).value(opt)
+                                                .isRow(false) // These are column subOptions
+                                                .build())
+                                        .collect(Collectors.toList()))
+                                .build();
+                        rowOptions.add(rowOption);
+                        log.info(
+                                "=== JSON PARSING: Created row option: '{}' with isRow={} and {} subOptions",
+                                rowTitle, rowOption.isRow(), allColumns.size());
+                        for (ExtractedOption subOpt : rowOption.getSubOptions()) {
+                            log.info("  - SubOption: '{}' with isRow={}", subOpt.getText(),
+                                    subOpt.isRow());
+                        }
+                    }
+                } catch (Exception e) {
+                }
+            }
+
+            if (!rowOptions.isEmpty()) {
+                question.setOptions(rowOptions);
+                Map<String, String> additionalData = new HashMap<>();
+                additionalData.put("rowCount", String.valueOf(rowOptions.size()));
+                additionalData.put("columnCount", String.valueOf(allColumns.size()));
+                additionalData.put("dataParams", dataParams);
+                additionalData.put("parsingMethod", "json");
+                question.setAdditionalData(additionalData);
+                log.info("Successfully parsed {} rows with {} columns from JSON", rowOptions.size(),
+                        allColumns.size());
+            } else {
+                log.warn("No valid rows extracted from JSON, falling back to HTML structure");
+                extractGridFromHtmlStructure(questionElement, question);
+            }
+
+        } catch (Exception e) {
+            log.error("Error extracting multiple choice grid options: {}", e.getMessage());
+            // Fallback to HTML structure
+            extractGridFromHtmlStructure(questionElement, question);
+        }
+    }
+
+    private String preprocessDataParams(String dataParams) {
+        // Remove prefix %.@. if present
+        if (dataParams.startsWith("%.@.")) {
+            dataParams = dataParams.substring(4);
+        }
+
+        // Replace HTML entities
+        dataParams = dataParams.replace("&quot;", "\"");
+        dataParams = dataParams.replace("&amp;", "&");
+        dataParams = dataParams.replace("&lt;", "<");
+        dataParams = dataParams.replace("&gt;", ">");
+
+        // Fix common JSON issues
+        dataParams = dataParams.replaceAll(",\\s*]", "]"); // Remove trailing commas
+        dataParams = dataParams.replaceAll(",\\s*}", "}"); // Remove trailing commas in objects
+
+        return dataParams;
+    }
+
+    private void extractGridFromHtmlStructure(Element questionElement, ExtractedQuestion question) {
+        try {
+            // Get all radio groups
+            Elements radioGroups = questionElement.select("[role=radiogroup]");
+            List<String> columnLabels = new ArrayList<>();
+
+            // Only get columns from the first group to avoid duplicates
+            if (!radioGroups.isEmpty()) {
+                Element firstGroup = radioGroups.first();
+                Elements radios = firstGroup.select("[role=radio][data-value]");
+                for (Element radio : radios) {
+                    String colText = radio.attr("data-value").trim();
+                    if (!colText.isEmpty() && !columnLabels.contains(colText)) {
+                        columnLabels.add(colText);
+                        log.debug("Found column from HTML: {}", colText);
                     }
                 }
             }
+
+            // If still empty, try to get from any [data-value] under questionElement
+            if (columnLabels.isEmpty()) {
+                Elements allDataValue = questionElement.select("[data-value]");
+                for (Element col : allDataValue) {
+                    String colText = col.attr("data-value").trim();
+                    if (!colText.isEmpty() && !columnLabels.contains(colText)) {
+                        columnLabels.add(colText);
+                        log.debug("Found column from fallback: {}", colText);
+                    }
+                }
+            }
+
+            // Get rows from [role=radiogroup][aria-label]
+            List<ExtractedOption> rowOptions = new ArrayList<>();
+            int rowIndex = 0;
+            for (Element group : radioGroups) {
+                String rowTitle = group.attr("aria-label").trim();
+                if (!rowTitle.isEmpty() && !rowTitle.matches("Row \\d+")) {
+                    log.debug("Found row from HTML: {}", rowTitle);
+                    ExtractedOption rowOption = ExtractedOption.builder().text(rowTitle)
+                            .value("row_" + rowIndex).position(rowIndex).isRow(true) // This is a
+                                                                                     // row option
+                            .subOptions(columnLabels.stream()
+                                    .map(opt -> ExtractedOption.builder().text(opt).value(opt)
+                                            .isRow(false) // These are column subOptions
+                                            .build())
+                                    .collect(Collectors.toList()))
+                            .build();
+                    rowOptions.add(rowOption);
+                    log.info(
+                            "=== HTML PARSING: Created row option: '{}' with isRow={} and {} subOptions",
+                            rowTitle, rowOption.isRow(), columnLabels.size());
+                    for (ExtractedOption subOpt : rowOption.getSubOptions()) {
+                        log.info("  - SubOption: '{}' with isRow={}", subOpt.getText(),
+                                subOpt.isRow());
+                    }
+                    rowIndex++;
+                }
+            }
+
+            if (!rowOptions.isEmpty()) {
+                question.setOptions(rowOptions);
+                Map<String, String> additionalData = new HashMap<>();
+                additionalData.put("rowCount", String.valueOf(rowOptions.size()));
+                additionalData.put("columnCount", String.valueOf(columnLabels.size()));
+                additionalData.put("parsingMethod", "html_structure");
+                question.setAdditionalData(additionalData);
+                log.info("Successfully parsed {} rows with {} columns from HTML", rowOptions.size(),
+                        columnLabels.size());
+            } else {
+                log.warn("No rows or columns found in HTML structure");
+            }
+        } catch (Exception e) {
+            log.error("Error extracting grid from HTML structure: {}", e.getMessage());
         }
     }
 
@@ -354,67 +569,141 @@ public class GoogleFormParser {
             Element paramsElement = questionElement.select("[data-params]").first();
             String dataParams = paramsElement != null ? paramsElement.attr("data-params") : "";
 
-            // Parse the data-params to get field IDs and structure
-            Map<String, Object> gridData = parseDataParams(dataParams);
-
-            // Get all groups (rows) that contain checkboxes
-            Elements rowGroups = questionElement.select("[role=group]");
-            List<String> rowLabels = new ArrayList<>();
-            List<String> columnLabels = new ArrayList<>();
-
-            // First, extract column labels from the first visible checkbox group
-            Element firstGroup = rowGroups.first();
-            if (firstGroup != null) {
-                // Find all checkbox elements to get their values
-                Elements checkboxes = firstGroup.select("[role=checkbox]");
-                for (Element checkbox : checkboxes) {
-                    String value = checkbox.attr("data-answer-value");
-                    if (!value.isEmpty()) {
-                        columnLabels.add(value);
+            boolean parsed = false;
+            if (dataParams != null && !dataParams.isEmpty()) {
+                try {
+                    String cleanParams = preprocessDataParams(dataParams);
+                    JsonReader reader = new JsonReader(new java.io.StringReader(cleanParams));
+                    reader.setLenient(true);
+                    JsonArray outer = JsonParser.parseReader(reader).getAsJsonArray();
+                    if (outer != null && outer.size() >= 5) {
+                        JsonArray rows = outer.get(4).getAsJsonArray();
+                        List<String> columnLabels = new ArrayList<>();
+                        // Extract columns from the first row that has columns (row[1])
+                        for (int i = 0; i < rows.size(); i++) {
+                            JsonArray row = rows.get(i).getAsJsonArray();
+                            if (row.size() > 1 && columnLabels.isEmpty()) {
+                                JsonArray colArr = row.get(1).getAsJsonArray();
+                                for (int j = 0; j < colArr.size(); j++) {
+                                    JsonArray colElement = colArr.get(j).getAsJsonArray();
+                                    if (colElement.size() > 0) {
+                                        String colText = colElement.get(0).getAsString();
+                                        columnLabels.add(colText);
+                                    }
+                                }
+                            }
+                        }
+                        // Build row options (each row is a QuestionOption with subOptions as
+                        // columns)
+                        List<ExtractedOption> rowOptions = new ArrayList<>();
+                        for (int i = 0; i < rows.size(); i++) {
+                            JsonArray row = rows.get(i).getAsJsonArray();
+                            String rowLabel = null;
+                            // Ưu tiên lấy row label từ row[3][0]
+                            if (row.size() > 3 && row.get(3).isJsonArray()) {
+                                JsonArray rowLabelArr = row.get(3).getAsJsonArray();
+                                if (rowLabelArr.size() > 0 && rowLabelArr.get(0).isJsonPrimitive()
+                                        && rowLabelArr.get(0).getAsJsonPrimitive().isString()) {
+                                    rowLabel = rowLabelArr.get(0).getAsString();
+                                }
+                            }
+                            // Nếu không có, thử lấy từ row[4][0]
+                            if ((rowLabel == null || rowLabel.trim().isEmpty()) && row.size() > 4
+                                    && row.get(4).isJsonArray()) {
+                                JsonArray rowLabelArr = row.get(4).getAsJsonArray();
+                                if (rowLabelArr.size() > 0 && rowLabelArr.get(0).isJsonPrimitive()
+                                        && rowLabelArr.get(0).getAsJsonPrimitive().isString()) {
+                                    rowLabel = rowLabelArr.get(0).getAsString();
+                                }
+                            }
+                            if (rowLabel == null || rowLabel.trim().isEmpty()) {
+                                rowLabel = "row_" + (i + 1);
+                            }
+                            // Build subOptions (columns) with isRow=false
+                            List<ExtractedOption> subOptions = columnLabels.stream()
+                                    .map(opt -> ExtractedOption.builder().text(opt).value(opt)
+                                            .position(columnLabels.indexOf(opt)).isRow(false)
+                                            .build())
+                                    .collect(java.util.stream.Collectors.toList());
+                            // Build row option with isRow=true, value=row_1, row_2, ...
+                            ExtractedOption rowOption =
+                                    ExtractedOption.builder().text(rowLabel).value("row_" + (i + 1))
+                                            .position(i).isRow(true).subOptions(subOptions).build();
+                            rowOptions.add(rowOption);
+                        }
+                        if (!rowOptions.isEmpty()) {
+                            question.setOptions(rowOptions);
+                            Map<String, String> additionalData = new HashMap<>();
+                            additionalData.put("rowCount", String.valueOf(rowOptions.size()));
+                            additionalData.put("columnCount", String.valueOf(columnLabels.size()));
+                            additionalData.put("dataParams", dataParams);
+                            additionalData.put("parsingMethod", "json");
+                            question.setAdditionalData(additionalData);
+                            parsed = true;
+                        }
                     }
+                } catch (Exception e) {
+                    // fallback below
                 }
             }
+            if (!parsed) {
+                // fallback: HTML structure logic KHÔNG dùng class động
+                Elements rowGroups = questionElement.select("div[role=group]");
+                List<String> columnLabels = new ArrayList<>();
 
-            // Now process each row
-            for (Element rowGroup : rowGroups) {
-                // Get row title from the preceding text element
-                String rowTitle = "";
-                Element rowTitleElement = rowGroup.previousElementSibling();
-                if (rowTitleElement != null) {
-                    rowTitle = rowTitleElement.text().trim();
+                // Lấy column label từ checkbox đầu tiên của group đầu tiên
+                if (!rowGroups.isEmpty()) {
+                    Element firstGroup = rowGroups.first();
+                    Elements checkboxes =
+                            firstGroup.select("div[role=checkbox][data-answer-value]");
+                    for (Element checkbox : checkboxes) {
+                        String colLabel = checkbox.attr("data-answer-value").trim();
+                        if (!colLabel.isEmpty())
+                            columnLabels.add(colLabel);
+                    }
                 }
 
-                if (!rowTitle.isEmpty()) {
-                    rowLabels.add(rowTitle);
+                int rowIndex = 0;
+                for (Element rowGroup : rowGroups) {
+                    // Row label: lấy text của phần tử con đầu tiên không phải <label>
+                    String rowLabel = "";
+                    for (Element child : rowGroup.children()) {
+                        if (!child.tagName().equals("label")) {
+                            rowLabel = child.text().trim();
+                            if (!rowLabel.isEmpty())
+                                break;
+                        }
+                    }
+                    // Nếu không có, thử lấy aria-label
+                    if (rowLabel.isEmpty()) {
+                        rowLabel =
+                                rowGroup.hasAttr("aria-label") ? rowGroup.attr("aria-label").trim()
+                                        : "row_" + (rowIndex + 1);
+                    }
 
-                    // Get the field ID for this row
-                    String fieldId = rowGroup.select("[data-field-id]").attr("data-field-id");
-
-                    ExtractedOption rowOption = ExtractedOption.builder().text(rowTitle)
-                            .value(fieldId).position(rowLabels.size() - 1)
+                    ExtractedOption rowOption = ExtractedOption.builder().text(rowLabel)
+                            .value(rowLabel).position(rowIndex).isRow(true)
                             .subOptions(new ArrayList<>()).build();
 
-                    // Add column options
+                    // Thêm column cho row
                     for (int i = 0; i < columnLabels.size(); i++) {
-                        ExtractedOption columnOption =
-                                ExtractedOption.builder().text(columnLabels.get(i))
-                                        .value(columnLabels.get(i)).position(i).build();
-                        rowOption.getSubOptions().add(columnOption);
+                        ExtractedOption colOption = ExtractedOption.builder()
+                                .text(columnLabels.get(i)).value(columnLabels.get(i)).position(i)
+                                .isRow(false).build();
+                        rowOption.getSubOptions().add(colOption);
                     }
-
                     question.getOptions().add(rowOption);
+                    rowIndex++;
                 }
+
+                Map<String, String> additionalData = new HashMap<>();
+                additionalData.put("rowCount", String.valueOf(rowGroups.size()));
+                additionalData.put("columnCount", String.valueOf(columnLabels.size()));
+                additionalData.put("parsingMethod", "html_structure_no_class");
+                question.setAdditionalData(additionalData);
             }
-
-            // Store grid metadata
-            Map<String, String> additionalData = new HashMap<>();
-            additionalData.put("rowCount", String.valueOf(rowLabels.size()));
-            additionalData.put("columnCount", String.valueOf(columnLabels.size()));
-            additionalData.put("dataParams", dataParams);
-            question.setAdditionalData(additionalData);
-
         } catch (Exception e) {
-            log.error("Error extracting checkbox grid options: {}", e.getMessage());
+            log.error("Error extracting checkbox grid options (no class): {}", e.getMessage());
         }
     }
 
@@ -526,6 +815,23 @@ public class GoogleFormParser {
         // Get data-params to check question type
         String dataParams = questionElement.select("[data-params]").attr("data-params");
 
+        // Kiểm tra số lượng radiogroup
+        int radioGroupCount = questionElement.select("[role=radiogroup]").size();
+        // Kiểm tra số lượng data-field-index khác nhau trong các radio
+        Set<String> dataFieldIndexes = new HashSet<>();
+        Elements radios = questionElement.select("[role=radio]");
+        for (Element radio : radios) {
+            String idx = radio.hasAttr("data-field-index") ? radio.attr("data-field-index") : null;
+            if (idx != null && !idx.isEmpty()) {
+                dataFieldIndexes.add(idx);
+            }
+        }
+
+        // Nếu có nhiều radiogroup hoặc nhiều data-field-index khác nhau => multiple_choice_grid
+        if (radioGroupCount > 1 || dataFieldIndexes.size() > 1) {
+            return "multiple_choice_grid";
+        }
+
         // Check for checkbox grid by data structure
         if (dataParams.contains("checkbox_grid")
                 || (questionElement.select("[data-field-id]").size() > 0
@@ -539,8 +845,8 @@ public class GoogleFormParser {
             return "date";
         }
 
-        // Check for radio button (multiple choice)
-        if (questionElement.select("[role=radio]").size() > 0) {
+        // Nếu chỉ có 1 radiogroup và không có đặc điểm của grid => radio
+        if (radioGroupCount == 1) {
             return "radio";
         }
 

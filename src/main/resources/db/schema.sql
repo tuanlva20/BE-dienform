@@ -61,17 +61,20 @@ CREATE TABLE IF NOT EXISTS `question` (
                 REFERENCES `form` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- Tạo bảng question_option
-CREATE TABLE IF NOT EXISTS `question_option` (
-            `id` VARCHAR(36) NOT NULL,
-            `question_id` VARCHAR(36) NOT NULL,
-            `option_text` TEXT NOT NULL,
-            `option_value` VARCHAR(255) NULL,
-            `position` INT NOT NULL DEFAULT 0,
-            `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (`id`),
-            CONSTRAINT `fk_option_question` FOREIGN KEY (`question_id`)
-                REFERENCES `question` (`id`) ON DELETE CASCADE
+-- Drop and recreate question_option table with correct column names
+DROP TABLE IF EXISTS question_option;
+CREATE TABLE question_option (
+    id VARCHAR(36) NOT NULL PRIMARY KEY,
+    option_text VARCHAR(255) NOT NULL,
+    value VARCHAR(255),
+    position INT,
+    is_row BOOLEAN DEFAULT false,
+    parent_option_id VARCHAR(36),
+    question_id VARCHAR(36),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (parent_option_id) REFERENCES question_option(id) ON DELETE CASCADE,
+    FOREIGN KEY (question_id) REFERENCES question(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- Tạo bảng form_statistic
@@ -168,7 +171,7 @@ CREATE TABLE IF NOT EXISTS `fill_request_mapping` (
                 REFERENCES `question` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- Tạo indexes để tăng hiệu suất truy vấn
+-- Create indexes to improve query performance
 CREATE INDEX `idx_question_form` ON `question` (`form_id`);
 CREATE INDEX `idx_option_question` ON `question_option` (`question_id`);
 CREATE INDEX `idx_fill_request_form` ON `fill_request` (`form_id`);
@@ -180,3 +183,6 @@ CREATE INDEX `idx_survey_execution_request` ON `survey_execution` (`fill_request
 CREATE INDEX `idx_fill_request_mapping_request` ON `fill_request_mapping` (`fill_request_id`);
 CREATE INDEX `idx_fill_request_mapping_question` ON `fill_request_mapping` (`question_id`);
 CREATE INDEX `idx_survey_execution_time` ON `survey_execution` (`execution_time`);
+
+-- Add additional_data column to question table
+ALTER TABLE question ADD COLUMN additional_data JSON;

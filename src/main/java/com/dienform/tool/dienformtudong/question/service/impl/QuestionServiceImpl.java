@@ -40,10 +40,12 @@ public class QuestionServiceImpl implements QuestionService {
                 List<QuestionOption> options =
                                 optionRepository.findByQuestionIdOrderByPosition(question.getId());
 
+                // Remove duplicates and map to responses
                 List<QuestionOptionResponse> optionResponses = options.stream()
-                                .map(option -> QuestionOptionResponse.builder().id(option.getId())
-                                                .text(option.getText()).value(option.getValue())
-                                                .position(option.getPosition()).build())
+                                .collect(Collectors.toMap(QuestionOption::getValue,
+                                                option -> option,
+                                                (existing, replacement) -> existing))
+                                .values().stream().map(this::mapToOptionResponse)
                                 .collect(Collectors.toList());
 
                 return QuestionResponse.builder().id(question.getId()).title(question.getTitle())
@@ -51,6 +53,34 @@ public class QuestionServiceImpl implements QuestionService {
                                 .required(question.getRequired())
                                 .position(question.getPosition() != null ? question.getPosition()
                                                 : 0)
-                                .options(optionResponses).build();
+                                .options(optionResponses)
+                                .additionalData(question.getAdditionalData()).build();
+        }
+
+        private QuestionOptionResponse mapToOptionResponse(QuestionOption option) {
+                // debug
+                if (option.getText().equals("Ngày đầu sự kiện")) {
+                        System.out.println("option.getText() = " + option.getText());
+                }
+
+
+                // Set row=true if value starts with "row_"
+                boolean isRow = option.getValue() != null && option.getValue().startsWith("row_");
+
+                if (isRow) {
+                        // For grid rows, collect all column options
+                        List<String> columnOptions = option.getSubOptions().stream()
+                                        .map(QuestionOption::getText).collect(Collectors.toList());
+
+                        return QuestionOptionResponse.builder().id(option.getId())
+                                        .text(option.getText()).value(option.getValue())
+                                        .position(option.getPosition()).isRow(true)
+                                        .columnOptions(columnOptions).build();
+                }
+
+                // For non-grid options
+                return QuestionOptionResponse.builder().id(option.getId()).text(option.getText())
+                                .value(option.getValue()).position(option.getPosition())
+                                .isRow(false).build();
         }
 }

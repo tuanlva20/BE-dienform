@@ -1,6 +1,7 @@
 package com.dienform.tool.dienformtudong.form.service.impl;
 
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -113,23 +114,35 @@ public class FormServiceImpl implements FormService {
 
       // Save options based on question type
       if ("checkbox_grid".equals(q.getType()) || "multiple_choice_grid".equals(q.getType())) {
-        // For grid questions, save row options with their sub-options
-        q.getOptions().forEach(rowOption -> {
+        // Dùng Map để loại trùng row theo value
+        Map<String, Boolean> rowValueMap = new java.util.HashMap<>();
+        Map<String, Boolean> subOptionValueMap = new java.util.HashMap<>();
+        for (var rowOption : q.getOptions()) {
+          if (rowOption.getValue() == null || rowValueMap.containsKey(rowOption.getValue())) {
+            continue;
+          }
+          rowValueMap.put(rowOption.getValue(), true);
           QuestionOption row = QuestionOption.builder().question(savedQuestion)
               .text(rowOption.getText()).value(rowOption.getValue())
               .position(rowOption.getPosition()).isRow(true).build();
           QuestionOption savedRow = optionRepository.save(row);
 
-          // Save sub-options for each row
+          // Dùng Map để loại trùng subOptions theo value
           if (rowOption.getSubOptions() != null) {
-            rowOption.getSubOptions().forEach(subOption -> {
+            
+            for (var subOption : rowOption.getSubOptions()) {
+              if (subOption.getValue() == null
+                  || subOptionValueMap.containsKey(subOption.getValue())) {
+                continue;
+              }
+              subOptionValueMap.put(subOption.getValue(), true);
               QuestionOption option = QuestionOption.builder().question(savedQuestion)
                   .text(subOption.getText()).value(subOption.getValue())
-                  .position(subOption.getPosition()).parentOption(savedRow).build();
+                  .position(subOption.getPosition()).parentOption(savedRow).isRow(false).build();
               optionRepository.save(option);
-            });
+            }
           }
-        });
+        }
       } else {
         // For regular questions, save options normally
         q.getOptions().forEach(option -> {

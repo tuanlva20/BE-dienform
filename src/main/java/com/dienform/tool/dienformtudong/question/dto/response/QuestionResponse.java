@@ -1,12 +1,12 @@
 package com.dienform.tool.dienformtudong.question.dto.response;
 
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
-
-import java.util.List;
-import java.util.UUID;
 
 @Data
 @Builder
@@ -20,4 +20,5 @@ public class QuestionResponse {
     private boolean required;
     private int position;
     private List<QuestionOptionResponse> options;
+    private Map<String, String> additionalData;
 }
