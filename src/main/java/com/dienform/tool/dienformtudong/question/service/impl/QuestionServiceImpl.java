@@ -59,9 +59,9 @@ public class QuestionServiceImpl implements QuestionService {
 
         private QuestionOptionResponse mapToOptionResponse(QuestionOption option) {
                 // debug
-                if (option.getText().equals("Ngày đầu sự kiện")) {
-                        System.out.println("option.getText() = " + option.getText());
-                }
+                // if (option.getText().equals("Ngày đầu sự kiện")) {
+                //         System.out.println("option.getText() = " + option.getText());
+                // }
 
 
                 // Set row=true if value starts with "row_"

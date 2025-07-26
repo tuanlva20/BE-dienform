@@ -107,24 +107,35 @@ public class FillRequestServiceImpl implements FillRequestService {
                 totalPercentage));
       }
 
-      // Calculate count for each option based on percentage
       for (FillRequestDTO.AnswerDistributionRequest dist : questionDistributions) {
         int count;
         QuestionOption option = null;
+        QuestionOption rowOption = null;
 
-        // Xử lý đặc biệt cho câu hỏi text
-        if ("text".equalsIgnoreCase(question.getType())) {
+        // Nếu là ngày/giờ/text
+        if ("text".equalsIgnoreCase(question.getType())
+            || "date".equalsIgnoreCase(question.getType())
+            || "time".equalsIgnoreCase(question.getType())) {
           count =
               (int) Math.round(fillRequestDTO.getSurveyCount() * (dist.getPercentage() / 100.0));
-
-          // Sử dụng builder trực tiếp thay vì factory method
           AnswerDistribution distribution = AnswerDistribution.builder().fillRequest(savedRequest)
               .question(question).option(null).percentage(dist.getPercentage()).count(count)
               .valueString(dist.getValueString()).build();
-
           distributions.add(distribution);
-        } else {
-          // Xử lý câu hỏi không phải text
+        } else if (dist.getRowId() != null) { // Grid/cell
+          // rowId là option row, optionId là option cột
+          rowOption = question.getOptions().stream().filter(o -> o.getId().equals(dist.getRowId()))
+              .findAny().orElse(null);
+          option = question.getOptions().stream().filter(o -> o.getId().equals(dist.getOptionId()))
+              .findAny().orElse(null);
+          count =
+              (int) Math.round(fillRequestDTO.getSurveyCount() * (dist.getPercentage() / 100.0));
+          AnswerDistribution distribution = AnswerDistribution.builder().fillRequest(savedRequest)
+              .question(question).option(option).percentage(dist.getPercentage()).count(count)
+              .valueString(dist.getValueString()).build();
+          // Có thể cần lưu rowId vào valueString hoặc custom field nếu DB chưa có trường riêng
+          distributions.add(distribution);
+        } else { // Câu hỏi thường
           if (dist.getPercentage() == 0 && dist.getOptionId() == null) {
             count = 1;
           } else {
@@ -135,11 +146,9 @@ public class FillRequestServiceImpl implements FillRequestService {
                     .findAny().orElseThrow(() -> new NotFoundException(
                         "Cannot find option with id: " + dist.getOptionId()));
           }
-
-          AnswerDistribution distribution =
-              AnswerDistribution.builder().fillRequest(savedRequest).question(question)
-                  .option(option).percentage(dist.getPercentage()).count(count).build();
-
+          AnswerDistribution distribution = AnswerDistribution.builder().fillRequest(savedRequest)
+              .question(question).option(option).percentage(dist.getPercentage()).count(count)
+              .valueString(dist.getValueString()).build();
           distributions.add(distribution);
         }
       }
