@@ -408,8 +408,10 @@ public class GoogleFormServiceImpl implements GoogleFormService {
 
                 // Đảm bảo câu hỏi bắt buộc phải được điền
                 if (question.getRequired()) {
-                    // Handle text questions
-                    if ("text".equalsIgnoreCase(question.getType())) {
+                    // Handle text questions (text, email, textarea)
+                    if ("text".equalsIgnoreCase(question.getType())
+                            || "email".equalsIgnoreCase(question.getType())
+                            || "textarea".equalsIgnoreCase(question.getType())) {
                         // Lọc ra các distribution có valueString không null và không rỗng
                         List<AnswerDistribution> textDistributions = questionDistributions.stream()
                                 .filter(dist -> dist.getValueString() != null
@@ -445,8 +447,10 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                     }
                 } else {
                     // Handle optional questions as before
-                    // Handle text questions
-                    if ("text".equalsIgnoreCase(question.getType())) {
+                    // Handle text questions (text, email, textarea)
+                    if ("text".equalsIgnoreCase(question.getType())
+                            || "email".equalsIgnoreCase(question.getType())
+                            || "textarea".equalsIgnoreCase(question.getType())) {
                         // Lọc ra các distribution có valueString không null và không rỗng
                         List<AnswerDistribution> textDistributions = questionDistributions.stream()
                                 .filter(dist -> dist.getValueString() != null
@@ -603,6 +607,8 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                             fillCheckboxQuestion(driver, questionElement, option.getText());
                             break;
                         case "text":
+                        case "email":
+                        case "textarea":
                         case "short_answer":
                         case "paragraph":
                             fillTextQuestion(driver, questionElement, question.getTitle(),

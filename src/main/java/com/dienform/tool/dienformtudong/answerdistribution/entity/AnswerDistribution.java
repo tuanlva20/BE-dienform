@@ -41,6 +41,9 @@ public class AnswerDistribution extends AuditEntity {
   @Column(name = "value_string")
   private String valueString;
 
+  @Column(name = "row_id")
+  private String rowId; // For matrix questions
+
   @ManyToOne(fetch = FetchType.LAZY)
   @JoinColumn(name = "fill_request_id", nullable = false)
   private FillRequest fillRequest;

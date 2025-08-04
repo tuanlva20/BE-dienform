@@ -25,9 +25,11 @@ google:
     key: AIzaSyBCFk8JZ8OYLVEjs92cSLfcccyFH7VyeU0
   # Google Form Automation Settings
   form:
-    auto-submit: true
+    auto-submit: false
     thread-pool-size: 2
     timeout-seconds: 30
+    # headless: true # PROD
+    headless: false
   # Google OAuth Configuration
   oauth:
     client-id: 174305364945-1p8i19sc1gclleccatiirch72r5gdt0b.apps.googleusercontent.com

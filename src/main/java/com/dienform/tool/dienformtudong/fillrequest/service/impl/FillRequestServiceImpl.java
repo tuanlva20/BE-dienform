@@ -12,7 +12,6 @@ import java.util.stream.Collectors;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import com.dienform.common.exception.BadRequestException;
-import com.dienform.common.exception.NotFoundException;
 import com.dienform.common.exception.ResourceNotFoundException;
 import com.dienform.common.util.Constants;
 import com.dienform.tool.dienformtudong.answerdistribution.entity.AnswerDistribution;
@@ -67,7 +66,7 @@ public class FillRequestServiceImpl implements FillRequestService {
   public FillRequestResponse createFillRequest(UUID formId, FillRequestDTO fillRequestDTO) {
     // Validate form exists
     Form form = formRepository.findById(formId)
-        .orElseThrow(() -> new NotFoundException("Cannot find form with id: " + formId));
+        .orElseThrow(() -> new ResourceNotFoundException("Form", "id", formId));
     List<Question> questions = questionRepository.findByForm(form);
 
     // Validate answer distributions
@@ -90,6 +89,7 @@ public class FillRequestServiceImpl implements FillRequestService {
         fillRequestDTO.getAnswerDistributions().stream().collect(
             Collectors.groupingBy(FillRequestDTO.AnswerDistributionRequest::getQuestionId));
 
+    // Process questions that have user-provided distributions
     for (Map.Entry<UUID, List<FillRequestDTO.AnswerDistributionRequest>> entry : groupedByQuestion
         .entrySet()) {
       UUID questionId = entry.getKey();
@@ -97,50 +97,109 @@ public class FillRequestServiceImpl implements FillRequestService {
           .orElseThrow(() -> new ResourceNotFoundException("Question", "id", questionId));
       List<FillRequestDTO.AnswerDistributionRequest> questionDistributions = entry.getValue();
 
-      // Validate total percentage for each question is 100%
-      int totalPercentage = questionDistributions.stream()
-          .mapToInt(FillRequestDTO.AnswerDistributionRequest::getPercentage).sum();
+      // Check if this is a matrix question (has rowId)
+      boolean hasRowId = questionDistributions.stream()
+          .anyMatch(dist -> dist.getRowId() != null && !dist.getRowId().isEmpty());
 
-      if (totalPercentage > 100) {
-        throw new BadRequestException(
-            String.format("Total percentage for question %s <= 100%, but" + " was %d%%", questionId,
-                totalPercentage));
-      }
+      if (hasRowId) {
+        // For matrix questions, group by rowId and process each row separately
+        Map<String, List<FillRequestDTO.AnswerDistributionRequest>> distributionsByRow =
+            questionDistributions.stream()
+                .filter(dist -> dist.getRowId() != null && !dist.getRowId().isEmpty())
+                .collect(Collectors.groupingBy(FillRequestDTO.AnswerDistributionRequest::getRowId));
 
-      // Calculate count for each option based on percentage
-      for (FillRequestDTO.AnswerDistributionRequest dist : questionDistributions) {
-        int count;
-        QuestionOption option = null;
+        for (Map.Entry<String, List<FillRequestDTO.AnswerDistributionRequest>> rowEntry : distributionsByRow
+            .entrySet()) {
+          String rowId = rowEntry.getKey();
+          List<FillRequestDTO.AnswerDistributionRequest> rowDistributions = rowEntry.getValue();
 
-        // Xử lý đặc biệt cho câu hỏi text
-        if ("text".equalsIgnoreCase(question.getType())) {
-          count =
-              (int) Math.round(fillRequestDTO.getSurveyCount() * (dist.getPercentage() / 100.0));
+          // Calculate count for each option in this row based on percentage
+          for (FillRequestDTO.AnswerDistributionRequest dist : rowDistributions) {
+            int count;
+            QuestionOption option = null;
 
-          // Sử dụng builder trực tiếp thay vì factory method
-          AnswerDistribution distribution = AnswerDistribution.builder().fillRequest(savedRequest)
-              .question(question).option(null).percentage(dist.getPercentage()).count(count)
-              .valueString(dist.getValueString()).build();
+            if (dist.getPercentage() == 0 && dist.getOptionId() == null) {
+              count = 1;
+            } else {
+              count = (int) Math
+                  .round(fillRequestDTO.getSurveyCount() * (dist.getPercentage() / 100.0));
+              option =
+                  question.getOptions().stream().filter(o -> o.getId().equals(dist.getOptionId()))
+                      .findAny().orElseThrow(() -> new ResourceNotFoundException("Question Option",
+                          "id", dist.getOptionId()));
+            }
 
-          distributions.add(distribution);
-        } else {
-          // Xử lý câu hỏi không phải text
-          if (dist.getPercentage() == 0 && dist.getOptionId() == null) {
-            count = 1;
-          } else {
+            AnswerDistribution distribution = AnswerDistribution.builder().fillRequest(savedRequest)
+                .question(question).option(option).percentage(dist.getPercentage()).count(count)
+                .rowId(rowId).build();
+
+            distributions.add(distribution);
+          }
+        }
+      } else {
+        // For regular questions, process as before
+        // Calculate count for each option based on percentage
+        for (FillRequestDTO.AnswerDistributionRequest dist : questionDistributions) {
+          int count;
+          QuestionOption option = null;
+
+          // Xử lý đặc biệt cho câu hỏi text
+          if ("text".equalsIgnoreCase(question.getType())
+              || "email".equalsIgnoreCase(question.getType())
+              || "textarea".equalsIgnoreCase(question.getType())) {
             count =
                 (int) Math.round(fillRequestDTO.getSurveyCount() * (dist.getPercentage() / 100.0));
-            option =
-                question.getOptions().stream().filter(o -> o.getId().equals(dist.getOptionId()))
-                    .findAny().orElseThrow(() -> new NotFoundException(
-                        "Cannot find option with id: " + dist.getOptionId()));
-          }
 
-          AnswerDistribution distribution =
-              AnswerDistribution.builder().fillRequest(savedRequest).question(question)
-                  .option(option).percentage(dist.getPercentage()).count(count).build();
+            // Sử dụng builder trực tiếp thay vì factory method
+            AnswerDistribution distribution = AnswerDistribution.builder().fillRequest(savedRequest)
+                .question(question).option(null).percentage(dist.getPercentage()).count(count)
+                .valueString(dist.getValueString()).build();
+
+            distributions.add(distribution);
+          } else {
+            // Xử lý câu hỏi không phải text
+            if (dist.getPercentage() == 0 && dist.getOptionId() == null) {
+              count = 1;
+            } else {
+              count = (int) Math
+                  .round(fillRequestDTO.getSurveyCount() * (dist.getPercentage() / 100.0));
+              option =
+                  question.getOptions().stream().filter(o -> o.getId().equals(dist.getOptionId()))
+                      .findAny().orElseThrow(() -> new ResourceNotFoundException("Question Option",
+                          "id", dist.getOptionId()));
+            }
+
+            AnswerDistribution distribution =
+                AnswerDistribution.builder().fillRequest(savedRequest).question(question)
+                    .option(option).percentage(dist.getPercentage()).count(count).build();
+
+            distributions.add(distribution);
+          }
+        }
+      }
+    }
+
+    // Auto-generate distributions for required text questions that don't have user data
+    for (Question question : questions) {
+      if (Boolean.TRUE.equals(question.getRequired())
+          && ("text".equalsIgnoreCase(question.getType())
+              || "email".equalsIgnoreCase(question.getType())
+              || "textarea".equalsIgnoreCase(question.getType()))) {
+
+        // Check if this question already has distributions
+        boolean hasDistribution = groupedByQuestion.containsKey(question.getId());
+
+        if (!hasDistribution) {
+          // Auto-generate a distribution for text questions
+          int count = fillRequestDTO.getSurveyCount();
+          AnswerDistribution distribution = AnswerDistribution.builder().fillRequest(savedRequest)
+              .question(question).option(null).percentage(100) // 100% since it's required
+              .count(count).valueString(null) // Will be auto-generated during form filling
+              .build();
 
           distributions.add(distribution);
+          log.info("Auto-generated distribution for required text question: {}",
+              question.getTitle());
         }
       }
     }
@@ -237,7 +296,7 @@ public class FillRequestServiceImpl implements FillRequestService {
     // Step 2: Get form and questions
     UUID formId = UUID.fromString(dataFillRequestDTO.getFormId());
     Form form = formRepository.findById(formId)
-        .orElseThrow(() -> new NotFoundException("Cannot find form with id: " + formId));
+        .orElseThrow(() -> new ResourceNotFoundException("Form", "id", formId));
 
     List<Question> questions = questionRepository.findByForm(form);
     if (questions.isEmpty()) {
@@ -326,28 +385,53 @@ public class FillRequestServiceImpl implements FillRequestService {
 
       // For required questions
       if (Boolean.TRUE.equals(question.getRequired())) {
+        // For text questions, they don't need user data - BE will auto-generate
+        if ("text".equalsIgnoreCase(question.getType())
+            || "email".equalsIgnoreCase(question.getType())
+            || "textarea".equalsIgnoreCase(question.getType())) {
+          // Skip validation for text questions - they will be auto-generated
+          continue;
+        }
+
         if (questionDistributions == null || questionDistributions.isEmpty()) {
           throw new BadRequestException(String.format(
               "Required question '%s' must have answer distributions", question.getTitle()));
         }
 
-        // Check total percentage for required questions
-        int totalPercentage = questionDistributions.stream()
-            .mapToInt(FillRequestDTO.AnswerDistributionRequest::getPercentage).sum();
+        // Check if this is a matrix question (has rowId)
+        boolean hasRowId = questionDistributions.stream()
+            .anyMatch(dist -> dist.getRowId() != null && !dist.getRowId().isEmpty());
 
-        if (totalPercentage != 100) {
-          throw new BadRequestException(String.format(
-              "Total percentage for required question '%s' must be 100%%, but was %d%%",
-              question.getTitle(), totalPercentage));
-        }
+        if (hasRowId) {
+          // For matrix questions, validate each row separately
+          Map<String, List<FillRequestDTO.AnswerDistributionRequest>> distributionsByRow =
+              questionDistributions.stream()
+                  .filter(dist -> dist.getRowId() != null && !dist.getRowId().isEmpty()).collect(
+                      Collectors.groupingBy(FillRequestDTO.AnswerDistributionRequest::getRowId));
 
-        // For required text questions, validate text value
-        if ("text".equalsIgnoreCase(question.getType())) {
-          boolean hasValidText = questionDistributions.stream().anyMatch(
-              dist -> dist.getValueString() != null && !dist.getValueString().trim().isEmpty());
-          if (!hasValidText) {
+          for (Map.Entry<String, List<FillRequestDTO.AnswerDistributionRequest>> rowEntry : distributionsByRow
+              .entrySet()) {
+            String rowId = rowEntry.getKey();
+            List<FillRequestDTO.AnswerDistributionRequest> rowDistributions = rowEntry.getValue();
+
+            int totalPercentage = rowDistributions.stream()
+                .mapToInt(FillRequestDTO.AnswerDistributionRequest::getPercentage).sum();
+
+            if (totalPercentage > 100) {
+              throw new BadRequestException(String.format(
+                  "Total percentage for question '%s' row '%s' must be <= 100 percent, but was %d",
+                  question.getTitle(), rowId, totalPercentage));
+            }
+          }
+        } else {
+          // For regular questions, check total percentage
+          int totalPercentage = questionDistributions.stream()
+              .mapToInt(FillRequestDTO.AnswerDistributionRequest::getPercentage).sum();
+
+          if (totalPercentage != 100) {
             throw new BadRequestException(String.format(
-                "Required text question '%s' must have non-empty text value", question.getTitle()));
+                "Total percentage for required question '%s' must be 100 percent, but was %d",
+                question.getTitle(), totalPercentage));
           }
         }
       }
@@ -363,7 +447,9 @@ public class FillRequestServiceImpl implements FillRequestService {
           }
 
           // For non-text questions, validate option ID
-          if (!"text".equalsIgnoreCase(question.getType())) {
+          if (!"text".equalsIgnoreCase(question.getType())
+              && !"email".equalsIgnoreCase(question.getType())
+              && !"textarea".equalsIgnoreCase(question.getType())) {
             if (distribution.getOptionId() == null) {
               if (distribution.getPercentage() > 0) {
                 throw new BadRequestException(String.format(
@@ -405,7 +491,7 @@ public class FillRequestServiceImpl implements FillRequestService {
               FillRequestResponse.AnswerDistributionResponse.builder()
                   .questionId(distribution.getQuestion().getId())
                   .percentage(distribution.getPercentage()).count(distribution.getCount())
-                  .valueString(distribution.getValueString());
+                  .valueString(distribution.getValueString()).rowId(distribution.getRowId());
 
           // Add optionId and option info if available
           if (distribution.getOption() != null) {

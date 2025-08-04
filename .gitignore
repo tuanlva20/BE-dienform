@@ -36,3 +36,4 @@ build/
 docker-compose.yml
 logs
 /src/test
+/src/main/resources/fileInstruct/
