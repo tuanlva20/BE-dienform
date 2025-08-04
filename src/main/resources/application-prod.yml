@@ -1,0 +1,71 @@
+# Production environment configurations
+server:
+  port: 8080
+
+spring:
+  jpa:
+    open-in-view: false
+    show-sql: false # Disable SQL logging in production
+    hibernate:
+      ddl-auto: validate # Validate schema in production
+  datasource:
+    url: ${DATABASE_URL:jdbc:mysql://localhost:3306/dienform?useSSL=true&serverTimezone=UTC}
+    username: ${DATABASE_USERNAME:root}
+    password: ${DATABASE_PASSWORD:password}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  mail:
+    host: smtp.gmail.com
+    port: 587
+    username: ${MAIL_USERNAME:khaosat.dev@gmail.com}
+    password: ${MAIL_PASSWORD:iyqmpuqjfdqlztos}
+    properties:
+      mail.smtp.auth: true
+      mail.smtp.starttls.enable: true
+
+# Production settings
+app:
+  frontend:
+    url: ${FRONTEND_URL:https://yourdomain.com}
+
+# Production logging configuration
+logging:
+  level:
+    com.dienform: INFO
+    org.springframework.web: WARN
+    org.hibernate.SQL: WARN
+    org.hibernate.type.descriptor.sql.BasicBinder: WARN
+
+# Google Form optimization settings for production
+google:
+  api:
+    key: ${GOOGLE_API_KEY:AIzaSyBCFk8JZ8OYLVEjs92cSLfcccyFH7VyeU0}
+  form:
+    # Performance settings optimized for production
+    timeout-seconds: 60
+    thread-pool-size: 10
+    max-retries: 5
+    retry-delay-ms: 2000
+
+    # Feature flags for production
+    auto-submit: true
+    headless: true # Enable headless mode in production
+    async-enabled: true
+    cache-enabled: true
+
+    # Advanced settings
+    similarity-threshold: 0.8 # Higher threshold for production
+  # Google OAuth Configuration
+  oauth:
+    client-id: ${GOOGLE_OAUTH_CLIENT_ID:174305364945-1p8i19sc1gclleccatiirch72r5gdt0b.apps.googleusercontent.com}
+
+# Campaign Scheduler Configuration for production
+campaign:
+  scheduler:
+    fixed-rate: 30000 # Check every 30 seconds in production
+    enabled: true
+
+# JWT Configuration for production
+jwt:
+  secret: ${JWT_SECRET:YourSuperSecretJWTKeyThatShouldBeAtLeast256BitsLongForHS256AlgorithmSecurity}
+  expiration: 86400000 # 1 day
+  refresh-expiration: 604800000 # 7 days

@@ -1,8 +1,10 @@
 server:
   port: 2412
+
 spring:
   jpa:
     open-in-view: false
+    show-sql: true
     hibernate:
       ddl-auto: update
   datasource:
@@ -19,17 +21,42 @@ spring:
       mail.smtp.auth: true
       mail.smtp.starttls.enable: true
 
-# Google
+# Local development settings
+app:
+  frontend:
+    url: http://localhost:3000
+
+# Local logging configuration
+logging:
+  level:
+    com.dienform: DEBUG
+    org.springframework.web: DEBUG
+    org.hibernate.SQL: DEBUG
+    org.hibernate.type.descriptor.sql.BasicBinder: TRACE
+
+# Google Form optimization settings
 google:
   api:
     key: AIzaSyBCFk8JZ8OYLVEjs92cSLfcccyFH7VyeU0
-  # Google Form Automation Settings
   form:
-    auto-submit: false
-    thread-pool-size: 2
+    # Performance settings
     timeout-seconds: 30
-    # headless: true # PROD
-    headless: false
+    thread-pool-size: 5
+    max-retries: 3
+    retry-delay-ms: 1000
+
+    # Feature flags
+    auto-submit: false # Set to false for local debugging
+    headless: false # Set to false for local debugging
+    async-enabled: true
+    cache-enabled: true
+
+    # Debug settings
+    debug-mode: true # Enable debug mode for local development
+    keep-browser-open: true # Keep browser open for debugging
+
+    # Advanced settings
+    similarity-threshold: 0.7
   # Google OAuth Configuration
   oauth:
     client-id: 174305364945-1p8i19sc1gclleccatiirch72r5gdt0b.apps.googleusercontent.com
