@@ -37,3 +37,4 @@ docker-compose.yml
 logs
 /src/test
 /src/main/resources/fileInstruct/
+/src/main/resources/db/

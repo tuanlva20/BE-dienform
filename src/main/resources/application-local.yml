@@ -40,7 +40,7 @@ google:
     key: AIzaSyBCFk8JZ8OYLVEjs92cSLfcccyFH7VyeU0
   form:
     # Performance settings
-    timeout-seconds: 30
+    timeout-seconds: 15000
     thread-pool-size: 5
     max-retries: 3
     retry-delay-ms: 1000
@@ -50,10 +50,6 @@ google:
     headless: false # Set to false for local debugging
     async-enabled: true
     cache-enabled: true
-
-    # Debug settings
-    debug-mode: true # Enable debug mode for local development
-    keep-browser-open: true # Keep browser open for debugging
 
     # Advanced settings
     similarity-threshold: 0.7
