@@ -49,6 +49,7 @@ import com.dienform.tool.dienformtudong.form.repository.FormRepository;
 import com.dienform.tool.dienformtudong.googleform.dto.FormSubmissionRequest;
 import com.dienform.tool.dienformtudong.googleform.dto.FormSubmissionResponse;
 import com.dienform.tool.dienformtudong.googleform.service.GoogleFormService;
+import com.dienform.tool.dienformtudong.googleform.util.DataProcessingUtils;
 import com.dienform.tool.dienformtudong.googleform.util.GoogleFormParser;
 import com.dienform.tool.dienformtudong.googleform.util.GoogleFormParser.ExtractedQuestion;
 import com.dienform.tool.dienformtudong.googleform.util.TestDataEnum;
@@ -2161,11 +2162,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
      * @return Normalized title
      */
     private String normalizeQuestionTitle(String title) {
-        if (title == null) {
-            return "";
-        }
-        // Remove extra whitespace, newlines, and normalize spaces
-        return title.replaceAll("\\s+", " ").trim();
+        return DataProcessingUtils.normalizeQuestionTitle(title);
     }
 
     /**

@@ -4,10 +4,8 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -16,12 +14,7 @@ import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
 import org.jsoup.select.Elements;
-import org.springframework.http.HttpEntity;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.MediaType;
-import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Component;
-import org.springframework.util.ObjectUtils;
 import org.springframework.web.client.RestTemplate;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonParser;
@@ -123,14 +116,16 @@ public class GoogleFormParser {
             Map<String, Object> formData = prepareFormData(document, answers);
 
             // Set headers
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
+            org.springframework.http.HttpHeaders headers =
+                    new org.springframework.http.HttpHeaders();
+            headers.setContentType(org.springframework.http.MediaType.APPLICATION_FORM_URLENCODED);
             headers.setOrigin("https://docs.google.com");
             // headers.setReferer(publicFormUrl);
 
             // Make the submission request
-            HttpEntity<Map<String, Object>> request = new HttpEntity<>(formData, headers);
-            ResponseEntity<String> response =
+            org.springframework.http.HttpEntity<Map<String, Object>> request =
+                    new org.springframework.http.HttpEntity<>(formData, headers);
+            org.springframework.http.ResponseEntity<String> response =
                     restTemplate.postForEntity(submitUrl, request, String.class);
 
             return response.getBody();
@@ -152,8 +147,9 @@ public class GoogleFormParser {
         for (Element questionElement : questionElements) {
             Elements questionTitleElement = questionElement.select("[role=heading]");
             String questionTitle = questionTitleElement.text().trim();
-            if (ObjectUtils.isEmpty(questionTitle)
-                    && ObjectUtils.isEmpty(questionTitleElement.select("span strong").text())) {
+            if (org.springframework.util.ObjectUtils.isEmpty(questionTitle)
+                    && org.springframework.util.ObjectUtils
+                            .isEmpty(questionTitleElement.select("span strong").text())) {
                 log.warn("Skipping empty question title");
                 continue;
             }
@@ -165,9 +161,12 @@ public class GoogleFormParser {
                 continue;
             }
 
-            ExtractedQuestion question = ExtractedQuestion.builder().title(questionTitle).type(type)
-                    .required(isRequired(questionElement)).position(questionIndex++)
-                    .options(new ArrayList<>()).build();
+            ExtractedQuestion question = new ExtractedQuestion();
+            question.setTitle(questionTitle);
+            question.setType(type);
+            question.setRequired(isRequired(questionElement));
+            question.setPosition(questionIndex++);
+            question.setOptions(new ArrayList<>());
 
             // Extract options based on question type
             switch (type.toLowerCase()) {
@@ -249,9 +248,13 @@ public class GoogleFormParser {
                 List<ExtractedOption> options = extractOptions(questionElement, type);
 
                 // Create and add the extracted question
-                ExtractedQuestion question =
-                        ExtractedQuestion.builder().title(title).description(description).type(type)
-                                .required(required).position(position).options(options).build();
+                ExtractedQuestion question = new ExtractedQuestion();
+                question.setTitle(title);
+                question.setDescription(description);
+                question.setType(type);
+                question.setRequired(required);
+                question.setPosition(position);
+                question.setOptions(options);
 
                 questions.add(question);
                 log.debug("Added question: {}", question.getTitle());
@@ -284,13 +287,15 @@ public class GoogleFormParser {
         int optionIndex = 0;
         for (Element optionElement : optionElements) {
             String optionText = optionElement.attr("data-value").trim();
-            if (ObjectUtils.isEmpty(optionText)) {
+            if (org.springframework.util.ObjectUtils.isEmpty(optionText)) {
                 log.warn("Skipping empty option radio text");
                 continue;
             }
 
-            ExtractedOption option = ExtractedOption.builder().text(optionText).value(optionText)
-                    .position(optionIndex++).build();
+            ExtractedOption option = new ExtractedOption();
+            option.setText(optionText);
+            option.setValue(optionText);
+            option.setPosition(optionIndex++);
             question.getOptions().add(option);
         }
     }
@@ -300,13 +305,15 @@ public class GoogleFormParser {
         int optionIndex = 0;
         for (Element optionElement : optionElements) {
             String optionText = optionElement.attr("data-answer-value").trim();
-            if (ObjectUtils.isEmpty(optionText)) {
+            if (org.springframework.util.ObjectUtils.isEmpty(optionText)) {
                 log.warn("Skipping empty option checkbox text");
                 continue;
             }
 
-            ExtractedOption option = ExtractedOption.builder().text(optionText).value(optionText)
-                    .position(optionIndex++).build();
+            ExtractedOption option = new ExtractedOption();
+            option.setText(optionText);
+            option.setValue(optionText);
+            option.setPosition(optionIndex++);
             question.getOptions().add(option);
         }
     }
@@ -316,13 +323,15 @@ public class GoogleFormParser {
         int optionIndex = 0;
         for (Element optionElement : optionElements) {
             String optionText = optionElement.attr("data-value").trim();
-            if (ObjectUtils.isEmpty(optionText)) {
+            if (org.springframework.util.ObjectUtils.isEmpty(optionText)) {
                 log.warn("Skipping empty option combobox text");
                 continue;
             }
 
-            ExtractedOption option = ExtractedOption.builder().text(optionText).value(optionText)
-                    .position(optionIndex++).build();
+            ExtractedOption option = new ExtractedOption();
+            option.setText(optionText);
+            option.setValue(optionText);
+            option.setPosition(optionIndex++);
             question.getOptions().add(option);
         }
     }
@@ -344,7 +353,7 @@ public class GoogleFormParser {
             }
 
             // Preprocess the data-params string
-            dataParams = preprocessDataParams(dataParams);
+            dataParams = DataProcessingUtils.preprocessDataParams(dataParams);
 
             // Try to parse with lenient mode
             JsonArray outer = null;
@@ -425,14 +434,18 @@ public class GoogleFormParser {
 
                     if (rowTitle != null && !rowTitle.trim().isEmpty()
                             && !rowTitle.matches("Row \\d+")) {
-                        ExtractedOption rowOption = ExtractedOption.builder().text(rowTitle)
-                                .value(rowId).position(i).isRow(true) // This is a row option
-                                .subOptions(allColumns.stream()
-                                        .map(opt -> ExtractedOption.builder().text(opt).value(opt)
-                                                .isRow(false) // These are column subOptions
-                                                .build())
-                                        .collect(Collectors.toList()))
-                                .build();
+                        ExtractedOption rowOption = new ExtractedOption();
+                        rowOption.setText(rowTitle);
+                        rowOption.setValue(rowId);
+                        rowOption.setPosition(i);
+                        rowOption.setRow(true); // This is a row option
+                        rowOption.setSubOptions(allColumns.stream().map(opt -> {
+                            ExtractedOption subOpt = new ExtractedOption();
+                            subOpt.setText(opt);
+                            subOpt.setValue(opt);
+                            subOpt.setRow(false); // These are column subOptions
+                            return subOpt;
+                        }).collect(Collectors.toList()));
                         rowOptions.add(rowOption);
                         log.info(
                                 "=== JSON PARSING: Created row option: '{}' with isRow={} and {} subOptions",
@@ -466,25 +479,6 @@ public class GoogleFormParser {
             // Fallback to HTML structure
             extractGridFromHtmlStructure(questionElement, question);
         }
-    }
-
-    private String preprocessDataParams(String dataParams) {
-        // Remove prefix %.@. if present
-        if (dataParams.startsWith("%.@.")) {
-            dataParams = dataParams.substring(4);
-        }
-
-        // Replace HTML entities
-        dataParams = dataParams.replace("&quot;", "\"");
-        dataParams = dataParams.replace("&amp;", "&");
-        dataParams = dataParams.replace("&lt;", "<");
-        dataParams = dataParams.replace("&gt;", ">");
-
-        // Fix common JSON issues
-        dataParams = dataParams.replaceAll(",\\s*]", "]"); // Remove trailing commas
-        dataParams = dataParams.replaceAll(",\\s*}", "}"); // Remove trailing commas in objects
-
-        return dataParams;
     }
 
     private void extractGridFromHtmlStructure(Element questionElement, ExtractedQuestion question) {
@@ -525,15 +519,19 @@ public class GoogleFormParser {
                 String rowTitle = group.attr("aria-label").trim();
                 if (!rowTitle.isEmpty() && !rowTitle.matches("Row \\d+")) {
                     log.debug("Found row from HTML: {}", rowTitle);
-                    ExtractedOption rowOption = ExtractedOption.builder().text(rowTitle)
-                            .value("row_" + rowIndex).position(rowIndex).isRow(true) // This is a
-                                                                                     // row option
-                            .subOptions(columnLabels.stream()
-                                    .map(opt -> ExtractedOption.builder().text(opt).value(opt)
-                                            .isRow(false) // These are column subOptions
-                                            .build())
-                                    .collect(Collectors.toList()))
-                            .build();
+                    ExtractedOption rowOption = new ExtractedOption();
+                    rowOption.setText(rowTitle);
+                    rowOption.setValue("row_" + rowIndex);
+                    rowOption.setPosition(rowIndex);
+                    rowOption.setRow(true); // This is a
+                                            // row option
+                    rowOption.setSubOptions(columnLabels.stream().map(opt -> {
+                        ExtractedOption subOpt = new ExtractedOption();
+                        subOpt.setText(opt);
+                        subOpt.setValue(opt);
+                        subOpt.setRow(false); // These are column subOptions
+                        return subOpt;
+                    }).collect(Collectors.toList()));
                     rowOptions.add(rowOption);
                     log.info(
                             "=== HTML PARSING: Created row option: '{}' with isRow={} and {} subOptions",
@@ -572,7 +570,7 @@ public class GoogleFormParser {
             boolean parsed = false;
             if (dataParams != null && !dataParams.isEmpty()) {
                 try {
-                    String cleanParams = preprocessDataParams(dataParams);
+                    String cleanParams = DataProcessingUtils.preprocessDataParams(dataParams);
                     JsonReader reader = new JsonReader(new java.io.StringReader(cleanParams));
                     reader.setLenient(true);
                     JsonArray outer = JsonParser.parseReader(reader).getAsJsonArray();
@@ -620,15 +618,21 @@ public class GoogleFormParser {
                                 rowLabel = "row_" + (i + 1);
                             }
                             // Build subOptions (columns) with isRow=false
-                            List<ExtractedOption> subOptions = columnLabels.stream()
-                                    .map(opt -> ExtractedOption.builder().text(opt).value(opt)
-                                            .position(columnLabels.indexOf(opt)).isRow(false)
-                                            .build())
-                                    .collect(java.util.stream.Collectors.toList());
+                            List<ExtractedOption> subOptions = columnLabels.stream().map(opt -> {
+                                ExtractedOption subOpt = new ExtractedOption();
+                                subOpt.setText(opt);
+                                subOpt.setValue(opt);
+                                subOpt.setPosition(columnLabels.indexOf(opt));
+                                subOpt.setRow(false);
+                                return subOpt;
+                            }).collect(java.util.stream.Collectors.toList());
                             // Build row option with isRow=true, value=row_1, row_2, ...
-                            ExtractedOption rowOption =
-                                    ExtractedOption.builder().text(rowLabel).value("row_" + (i + 1))
-                                            .position(i).isRow(true).subOptions(subOptions).build();
+                            ExtractedOption rowOption = new ExtractedOption();
+                            rowOption.setText(rowLabel);
+                            rowOption.setValue("row_" + (i + 1));
+                            rowOption.setPosition(i);
+                            rowOption.setRow(true);
+                            rowOption.setSubOptions(subOptions);
                             rowOptions.add(rowOption);
                         }
                         if (!rowOptions.isEmpty()) {
@@ -681,15 +685,20 @@ public class GoogleFormParser {
                                         : "row_" + (rowIndex + 1);
                     }
 
-                    ExtractedOption rowOption = ExtractedOption.builder().text(rowLabel)
-                            .value(rowLabel).position(rowIndex).isRow(true)
-                            .subOptions(new ArrayList<>()).build();
+                    ExtractedOption rowOption = new ExtractedOption();
+                    rowOption.setText(rowLabel);
+                    rowOption.setValue(rowLabel);
+                    rowOption.setPosition(rowIndex);
+                    rowOption.setRow(true);
+                    rowOption.setSubOptions(new ArrayList<>());
 
                     // Thêm column cho row
                     for (int i = 0; i < columnLabels.size(); i++) {
-                        ExtractedOption colOption = ExtractedOption.builder()
-                                .text(columnLabels.get(i)).value(columnLabels.get(i)).position(i)
-                                .isRow(false).build();
+                        ExtractedOption colOption = new ExtractedOption();
+                        colOption.setText(columnLabels.get(i));
+                        colOption.setValue(columnLabels.get(i));
+                        colOption.setPosition(i);
+                        colOption.setRow(false);
                         rowOption.getSubOptions().add(colOption);
                     }
                     question.getOptions().add(rowOption);
@@ -818,9 +827,9 @@ public class GoogleFormParser {
         // Kiểm tra số lượng radiogroup
         int radioGroupCount = questionElement.select("[role=radiogroup]").size();
         // Kiểm tra số lượng data-field-index khác nhau trong các radio
-        Set<String> dataFieldIndexes = new HashSet<>();
-        Elements radios = questionElement.select("[role=radio]");
-        for (Element radio : radios) {
+        java.util.Set<String> dataFieldIndexes = new java.util.HashSet<>();
+        org.jsoup.select.Elements radios = questionElement.select("[role=radio]");
+        for (org.jsoup.nodes.Element radio : radios) {
             String idx = radio.hasAttr("data-field-index") ? radio.attr("data-field-index") : null;
             if (idx != null && !idx.isEmpty()) {
                 dataFieldIndexes.add(idx);
@@ -926,44 +935,52 @@ public class GoogleFormParser {
         List<ExtractedOption> options = new ArrayList<>();
 
         if ("Multiple Choice".equals(type)) {
-            Elements optionElements =
+            org.jsoup.select.Elements optionElements =
                     questionElement.select(".freebirdFormviewerComponentsQuestionRadioChoice");
 
-            for (Element optionElement : optionElements) {
-                Element optionTextElement = optionElement.selectFirst(".exportLabel");
+            for (org.jsoup.nodes.Element optionElement : optionElements) {
+                org.jsoup.nodes.Element optionTextElement =
+                        optionElement.selectFirst(".exportLabel");
                 if (optionTextElement != null) {
                     String optionText = optionTextElement.text();
                     String optionValue = extractOptionValue(optionElement);
 
-                    options.add(
-                            ExtractedOption.builder().text(optionText).value(optionValue).build());
+                    ExtractedOption option = new ExtractedOption();
+                    option.setText(optionText);
+                    option.setValue(optionValue);
+                    options.add(option);
                 }
             }
         } else if ("Checkboxes".equals(type)) {
-            Elements optionElements =
+            org.jsoup.select.Elements optionElements =
                     questionElement.select(".freebirdFormviewerComponentsQuestionCheckboxChoice");
 
-            for (Element optionElement : optionElements) {
-                Element optionTextElement = optionElement.selectFirst(".exportLabel");
+            for (org.jsoup.nodes.Element optionElement : optionElements) {
+                org.jsoup.nodes.Element optionTextElement =
+                        optionElement.selectFirst(".exportLabel");
                 if (optionTextElement != null) {
                     String optionText = optionTextElement.text();
                     String optionValue = extractOptionValue(optionElement);
 
-                    options.add(
-                            ExtractedOption.builder().text(optionText).value(optionValue).build());
+                    ExtractedOption option = new ExtractedOption();
+                    option.setText(optionText);
+                    option.setValue(optionValue);
+                    options.add(option);
                 }
             }
         } else if ("Dropdown".equals(type)) {
-            Elements optionElements = questionElement.select("option");
+            org.jsoup.select.Elements optionElements = questionElement.select("option");
 
-            for (Element optionElement : optionElements) {
+            for (org.jsoup.nodes.Element optionElement : optionElements) {
                 String optionText = optionElement.text().trim();
                 String optionValue = optionElement.attr("value");
 
                 // Skip the placeholder option
                 if (!optionText.isEmpty() && !optionValue.isEmpty()) {
-                    options.add(
-                            ExtractedOption.builder().text(optionText).value(optionValue).build());
+                    ExtractedOption option = new ExtractedOption();
+                    option.setText(optionText);
+                    option.setValue(optionValue);
+                    options.add(option);
                 }
             }
         }
@@ -983,7 +1000,7 @@ public class GoogleFormParser {
 
         // If not found, try to extract from an input element
         if (value.isEmpty()) {
-            Element inputElement = optionElement.selectFirst("input");
+            org.jsoup.nodes.Element inputElement = optionElement.selectFirst("input");
             if (inputElement != null) {
                 value = inputElement.attr("value");
             }
@@ -991,7 +1008,7 @@ public class GoogleFormParser {
 
         // If still not found, use the text as a fallback
         if (value.isEmpty()) {
-            Element textElement = optionElement.selectFirst(".exportLabel");
+            org.jsoup.nodes.Element textElement = optionElement.selectFirst(".exportLabel");
             if (textElement != null) {
                 value = textElement.text();
             }
