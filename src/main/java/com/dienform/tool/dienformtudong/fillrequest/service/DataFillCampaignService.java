@@ -263,7 +263,8 @@ public class DataFillCampaignService {
 
       // Submit form using browser automation
       String formUrl = fillRequest.getForm().getEditLink();
-      boolean success = googleFormService.submitFormWithBrowser(formUrl, formData);
+      boolean success =
+          googleFormService.submitFormWithBrowser(fillRequest.getForm().getId(), formUrl, formData);
 
       if (success) {
         log.info("Form submission successful for request: {}, row: {}", fillRequest.getId(),

@@ -11,21 +11,6 @@ import com.dienform.tool.dienformtudong.googleform.util.GoogleFormParser.Extract
  * Service for interacting with Google Forms
  */
 public interface GoogleFormService {
-
-    /**
-     * Parse a Google Form and extract its questions
-     * 
-     * @param request The form request containing the form URL
-     * @return Form response with extracted questions
-     */
-    // FormResponse parseForm(FormRequest request);
-
-    /**
-     * Submit answers to a Google Form
-     * 
-     * @param request The form submission request
-     * @return Form submission response
-     */
     FormSubmissionResponse submitForm(FormSubmissionRequest request);
 
     /**
@@ -59,5 +44,17 @@ public interface GoogleFormService {
      * @param formData Map of question IDs to answers
      * @return true if submission was successful, false otherwise
      */
-    boolean submitFormWithBrowser(String formUrl, Map<String, String> formData);
+    boolean submitFormWithBrowser(UUID formId, String formUrl, Map<String, String> formData);
+
+    /**
+     * Clear all caches to free memory and avoid stale data
+     */
+    void clearCaches();
+
+    /**
+     * Reset fill request status to PENDING if it's stuck in RUNNING state
+     * 
+     * @param fillRequestId The ID of the fill request to reset
+     */
+    void resetFillRequestStatus(UUID fillRequestId);
 }

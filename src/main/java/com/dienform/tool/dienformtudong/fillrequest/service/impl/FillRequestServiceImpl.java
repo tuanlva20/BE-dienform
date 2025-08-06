@@ -246,18 +246,56 @@ public class FillRequestServiceImpl implements FillRequestService {
     FillRequest fillRequest = fillRequestRepository.findById(id)
         .orElseThrow(() -> new ResourceNotFoundException("Fill Request", "id", id));
 
-    // You can add validation here to check if the request is in a valid state to start
+    // Validate fill request status before starting
+    if (!Constants.FILL_REQUEST_STATUS_PENDING.equals(fillRequest.getStatus())
+        && !Constants.FILL_REQUEST_STATUS_RUNNING.equals(fillRequest.getStatus())) {
+      log.warn("Fill request {} is not in valid state to start. Current status: {}", id,
+          fillRequest.getStatus());
 
-    // Update status
+      Map<String, Object> response = new HashMap<>();
+      response.put("id", fillRequest.getId());
+      response.put("status", fillRequest.getStatus());
+      response.put("message", "Fill request is not in valid state to start");
+      response.put("error", true);
+      return response;
+    }
+
+    // If already running, return current status
+    if (Constants.FILL_REQUEST_STATUS_RUNNING.equals(fillRequest.getStatus())) {
+      log.info("Fill request {} is already running", id);
+
+      Map<String, Object> response = new HashMap<>();
+      response.put("id", fillRequest.getId());
+      response.put("status", fillRequest.getStatus());
+      response.put("message", "Fill request is already running");
+      return response;
+    }
+
+    // Update status to RUNNING
     fillRequest.setStatus(Constants.FILL_REQUEST_STATUS_RUNNING);
     fillRequestRepository.save(fillRequest);
 
     // Start form filling process asynchronously
     CompletableFuture.runAsync(() -> {
       try {
-        googleFormService.fillForm(id);
+        log.info("Starting form filling process for request ID: {}", id);
+        int successCount = googleFormService.fillForm(id);
+        log.info("Form filling process completed for request ID: {}. Success count: {}", id,
+            successCount);
       } catch (Exception e) {
         log.error("Error in form filling process for request ID {}: {}", id, e.getMessage(), e);
+        // Update status to FAILED if there's an error
+        try {
+          FillRequest failedRequest = fillRequestRepository.findById(id).orElse(null);
+          if (failedRequest != null) {
+            failedRequest.setStatus(Constants.FILL_REQUEST_STATUS_FAILED);
+            fillRequestRepository.save(failedRequest);
+            log.info("Updated fill request {} status to FAILED due to error", id);
+          }
+        } catch (Exception updateException) {
+          log.error("Failed to update fill request status to FAILED: {}",
+              updateException.getMessage());
+        }
       }
     });
 
@@ -266,6 +304,39 @@ public class FillRequestServiceImpl implements FillRequestService {
     response.put("id", fillRequest.getId());
     response.put("status", fillRequest.getStatus());
     response.put("message", "Fill request started successfully");
+
+    return response;
+  }
+
+  @Override
+  @Transactional
+  public Map<String, Object> resetFillRequest(UUID id) {
+    FillRequest fillRequest = fillRequestRepository.findById(id)
+        .orElseThrow(() -> new ResourceNotFoundException("Fill Request", "id", id));
+
+    // Only allow reset if status is RUNNING or FAILED
+    if (!Constants.FILL_REQUEST_STATUS_RUNNING.equals(fillRequest.getStatus())
+        && !Constants.FILL_REQUEST_STATUS_FAILED.equals(fillRequest.getStatus())) {
+      log.warn("Fill request {} cannot be reset. Current status: {}", id, fillRequest.getStatus());
+
+      Map<String, Object> response = new HashMap<>();
+      response.put("id", fillRequest.getId());
+      response.put("status", fillRequest.getStatus());
+      response.put("message", "Fill request cannot be reset from current status");
+      response.put("error", true);
+      return response;
+    }
+
+    // Reset status to PENDING
+    fillRequest.setStatus(Constants.FILL_REQUEST_STATUS_PENDING);
+    fillRequestRepository.save(fillRequest);
+
+    log.info("Reset fill request {} status to PENDING", id);
+
+    Map<String, Object> response = new HashMap<>();
+    response.put("id", fillRequest.getId());
+    response.put("status", fillRequest.getStatus());
+    response.put("message", "Fill request reset successfully");
 
     return response;
   }
@@ -365,6 +436,29 @@ public class FillRequestServiceImpl implements FillRequestService {
     }
 
     return fillRequestMapper.toReponse(savedRequest);
+  }
+
+  @Override
+  public Map<String, Object> clearCaches() {
+    try {
+      // Clear GoogleFormService caches
+      googleFormService.clearCaches();
+
+      log.info("All caches cleared successfully");
+
+      Map<String, Object> response = new HashMap<>();
+      response.put("message", "All caches cleared successfully");
+      response.put("success", true);
+      return response;
+    } catch (Exception e) {
+      log.error("Error clearing caches: {}", e.getMessage(), e);
+
+      Map<String, Object> response = new HashMap<>();
+      response.put("message", "Error clearing caches: " + e.getMessage());
+      response.put("success", false);
+      response.put("error", true);
+      return response;
+    }
   }
 
   private void validateAnswerDistributions(

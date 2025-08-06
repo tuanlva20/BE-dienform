@@ -13,6 +13,10 @@ public interface FillRequestService {
 
     Map<String, Object> startFillRequest(UUID id);
 
+    Map<String, Object> resetFillRequest(UUID id);
+
+    Map<String, Object> clearCaches();
+
     void deleteFillRequest(UUID id);
 
     FillRequestResponse createDataFillRequest(DataFillRequestDTO dataFillRequestDTO);

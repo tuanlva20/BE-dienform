@@ -224,6 +224,17 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                 fillRequestRepository.findByIdWithFetchForm(fillRequestId).orElseThrow(
                         () -> new ResourceNotFoundException("Fill Request", "id", fillRequestId));
 
+        // Validate fill request status before starting
+        if (!Constants.FILL_REQUEST_STATUS_PENDING.equals(fillRequest.getStatus())
+                && !Constants.FILL_REQUEST_STATUS_RUNNING.equals(fillRequest.getStatus())) {
+            log.warn("Fill request {} is not in valid state to start. Current status: {}",
+                    fillRequestId, fillRequest.getStatus());
+            return 0;
+        }
+
+        // Clear caches before starting new execution to avoid stale data
+        clearCaches();
+
         // Find the form
         Form form = formRepository.findById(fillRequest.getForm().getId()).orElseThrow(
                 () -> new ResourceNotFoundException("Form", "id", fillRequest.getForm().getId()));
@@ -267,65 +278,87 @@ public class GoogleFormServiceImpl implements GoogleFormService {
         AtomicInteger failCount = new AtomicInteger(0);
         AtomicInteger totalProcessed = new AtomicInteger(0);
 
-        ExecutorService executor = Executors.newFixedThreadPool(threadPoolSize);
+        // Create a new executor for this specific fill request to avoid conflicts
+        ExecutorService executor = null;
         List<CompletableFuture<Void>> futures = new ArrayList<>();
         Random random = new Random();
 
-        // Execute form filling tasks
-        for (Map<Question, QuestionOption> plan : executionPlans) {
-            try {
-                if (fillRequest.isHumanLike()) {
-                    // Human-like behavior: random delay between 0.5-2s
-                    int delayMillis = 500 + random.nextInt(1501);
-                    Thread.sleep(delayMillis);
-                    log.debug("Human-like mode: Scheduled task with delay of {}ms", delayMillis);
-                } else {
-                    // Fast mode: only 1 second delay between forms, no delay during filling
-                    if (totalProcessed.get() > 0) {
-                        Thread.sleep(1000); // 1 second between forms
-                        log.debug("Fast mode: 1 second delay between forms");
-                    }
-                }
-
-                futures.add(CompletableFuture.runAsync(() -> {
-                    boolean result = executeFormFill(link, plan, fillRequest.isHumanLike());
-                    if (result) {
-                        successCount.incrementAndGet();
-                    } else {
-                        failCount.incrementAndGet();
-                    }
-                }, executor));
-
-            } catch (Exception e) {
-                log.error("Error during form filling: {}", e.getMessage(), e);
-                failCount.incrementAndGet();
-            } finally {
-                // Update progress after each task
-                int processed = totalProcessed.incrementAndGet();
-                if (processed == fillRequest.getSurveyCount()) {
-                    // All tasks completed, update final status
-                    updateFinalStatus(fillRequest, sessionExecute, successCount.get(),
-                            failCount.get());
-                }
-            }
-        }
-
-        // Shut down executor and wait for completion
-        CompletableFuture<Void> allTasks =
-                CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
         try {
-            // Wait for all tasks with timeout
-            allTasks.get(300, TimeUnit.SECONDS); // Increased timeout to 300 seconds (5 minutes)
-            executor.shutdown();
-            executor.awaitTermination(30, TimeUnit.SECONDS);
-        } catch (Exception e) {
-            log.error("Form filling execution was interrupted or timed out", e);
-            updateFillRequestStatus(fillRequest, Constants.FILL_REQUEST_STATUS_FAILED);
-            return 0;
-        } finally {
-            if (!executor.isShutdown()) {
-                executor.shutdownNow();
+            executor = Executors.newFixedThreadPool(threadPoolSize);
+
+            // Execute form filling tasks
+            for (Map<Question, QuestionOption> plan : executionPlans) {
+                try {
+                    if (fillRequest.isHumanLike()) {
+                        // Human-like behavior: random delay between 0.5-2s
+                        int delayMillis = 500 + random.nextInt(1501);
+                        Thread.sleep(delayMillis);
+                        log.debug("Human-like mode: Scheduled task with delay of {}ms",
+                                delayMillis);
+                    } else {
+                        // Fast mode: only 1 second delay between forms, no delay during filling
+                        if (totalProcessed.get() > 0) {
+                            Thread.sleep(1000); // 1 second between forms
+                            log.debug("Fast mode: 1 second delay between forms");
+                        }
+                    }
+
+                    futures.add(CompletableFuture.runAsync(() -> {
+                        boolean result = executeFormFill(form.getId().toString(), link, plan,
+                                fillRequest.isHumanLike());
+                        if (result) {
+                            successCount.incrementAndGet();
+                        } else {
+                            failCount.incrementAndGet();
+                        }
+                    }, executor));
+
+                } catch (Exception e) {
+                    log.error("Error during form filling: {}", e.getMessage(), e);
+                    failCount.incrementAndGet();
+                } finally {
+                    // Update progress after each task
+                    int processed = totalProcessed.incrementAndGet();
+                    if (processed == fillRequest.getSurveyCount()) {
+                        // All tasks completed, update final status
+                        updateFinalStatus(fillRequest, sessionExecute, successCount.get(),
+                                failCount.get());
+                    }
+                }
             }
+
+            // Shut down executor and wait for completion
+            CompletableFuture<Void> allTasks =
+                    CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
+            try {
+                // Wait for all tasks with timeout
+                allTasks.get(300, TimeUnit.SECONDS); // Increased timeout to 300 seconds (5 minutes)
+                log.info("All form filling tasks completed successfully");
+            } catch (Exception e) {
+                log.error("Form filling execution was interrupted or timed out", e);
+                updateFillRequestStatus(fillRequest, Constants.FILL_REQUEST_STATUS_FAILED);
+                return 0;
+            }
+
+        } finally {
+            // Ensure executor is properly shutdown
+            if (executor != null) {
+                try {
+                    executor.shutdown();
+                    if (!executor.awaitTermination(30, TimeUnit.SECONDS)) {
+                        executor.shutdownNow();
+                        if (!executor.awaitTermination(30, TimeUnit.SECONDS)) {
+                            log.error("Executor did not terminate");
+                        }
+                    }
+                } catch (InterruptedException e) {
+                    executor.shutdownNow();
+                    Thread.currentThread().interrupt();
+                }
+            }
+
+            // Clear caches after execution to free memory
+            clearCaches();
         }
 
         return successCount.get();
@@ -378,7 +411,8 @@ public class GoogleFormServiceImpl implements GoogleFormService {
      * Submit form data using browser automation
      */
     @Override
-    public boolean submitFormWithBrowser(String formUrl, Map<String, String> formData) {
+    public boolean submitFormWithBrowser(UUID formId, String formUrl,
+            Map<String, String> formData) {
         try {
             // Convert formData to Map<Question, QuestionOption>
             Map<Question, QuestionOption> selections = new HashMap<>();
@@ -394,7 +428,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             }
 
             // Use existing executeFormFill method
-            return executeFormFill(formUrl, selections, true);
+            return executeFormFill(formId.toString(), formUrl, selections, true);
         } catch (Exception e) {
             log.error("Error submitting form: {}", e.getMessage(), e);
             return false;
@@ -463,6 +497,45 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     }
 
     /**
+     * Reset fill request status to PENDING if it's stuck in RUNNING state
+     */
+    @Transactional
+    public void resetFillRequestStatus(UUID fillRequestId) {
+        try {
+            FillRequest fillRequest = fillRequestRepository.findById(fillRequestId).orElseThrow(
+                    () -> new ResourceNotFoundException("Fill Request", "id", fillRequestId));
+
+            if (Constants.FILL_REQUEST_STATUS_RUNNING.equals(fillRequest.getStatus())) {
+                fillRequest.setStatus(Constants.FILL_REQUEST_STATUS_PENDING);
+                fillRequestRepository.save(fillRequest);
+                log.info("Reset fill request {} status from RUNNING to PENDING", fillRequestId);
+            } else {
+                log.info("Fill request {} is not in RUNNING state, current status: {}",
+                        fillRequestId, fillRequest.getStatus());
+            }
+        } catch (Exception e) {
+            log.error("Failed to reset fill request status: {}", e.getMessage(), e);
+            throw e;
+        }
+    }
+
+    public Map<String, List<WebElement>> getQuestionElementsCache() {
+        return questionElementsCache;
+    }
+
+    public Map<String, Map<String, WebElement>> getFormQuestionMapCache() {
+        return formQuestionMapCache;
+    }
+
+    public Map<String, WebElement> getQuestionMappingCache() {
+        return questionMappingCache;
+    }
+
+    public Map<String, List<ExtractedQuestion>> getFormQuestionsCache() {
+        return formQuestionsCache;
+    }
+
+    /**
      * Update fill request status with transaction
      */
     @Transactional
@@ -515,12 +588,9 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     /**
      * OPTIMIZED: Get question elements with caching and retry mechanism
      */
-    private List<WebElement> getQuestionElementsWithRetry(WebDriver driver) {
-        String cacheKey = driver.getCurrentUrl();
-
-        // Check cache first
+    private List<WebElement> getQuestionElementsWithRetry(WebDriver driver, String formIdKey) {
         if (cacheEnabled) {
-            List<WebElement> cachedElements = questionElementsCache.get(cacheKey);
+            List<WebElement> cachedElements = questionElementsCache.get(formIdKey);
             if (cachedElements != null && !cachedElements.isEmpty()) {
                 log.info("Using cached question elements: {}", cachedElements.size());
                 return cachedElements;
@@ -538,7 +608,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                 if (!questionElements.isEmpty()) {
                     // Cache the result
                     if (cacheEnabled) {
-                        questionElementsCache.put(cacheKey, questionElements);
+                        questionElementsCache.put(formIdKey, questionElements);
                     }
                     log.info("Found {} question elements (attempt {})", questionElements.size(),
                             retryCount + 1);
@@ -738,8 +808,8 @@ public class GoogleFormServiceImpl implements GoogleFormService {
      * @param humanLike Whether to simulate human-like behavior
      * @return True if successful, false otherwise
      */
-    private boolean executeFormFill(String formUrl, Map<Question, QuestionOption> selections,
-            boolean humanLike) {
+    private boolean executeFormFill(String formIdKey, String formUrl,
+            Map<Question, QuestionOption> selections, boolean humanLike) {
         WebDriver driver = null;
         try {
             log.info("Starting to fill form with {} questions", selections.size());
@@ -757,7 +827,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
 
             // OPTIMIZED: Get all question elements once and cache them with retry mechanism
             log.info("Finding question elements...");
-            List<WebElement> questionElements = getQuestionElementsWithRetry(driver);
+            List<WebElement> questionElements = getQuestionElementsWithRetry(driver, formIdKey);
 
             if (questionElements.isEmpty()) {
                 log.error("Failed to find question elements");
@@ -770,13 +840,13 @@ public class GoogleFormServiceImpl implements GoogleFormService {
 
             // OPTIMIZED: Check cache first for question map
             if (cacheEnabled) {
-                questionMap = formQuestionMapCache.get(formUrl);
+                questionMap = formQuestionMapCache.get(formIdKey);
                 if (questionMap != null) {
                     log.info("Using cached question map with {} questions", questionMap.size());
                 } else {
                     questionMap = buildQuestionMap(questionElements);
                     // Cache the question map for future use
-                    formQuestionMapCache.put(formUrl, questionMap);
+                    formQuestionMapCache.put(formIdKey, questionMap);
                     log.info("Built and cached question map with {} valid questions in {}ms",
                             questionMap.size(), System.currentTimeMillis() - mapStartTime);
                 }
@@ -879,12 +949,20 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             log.error("Error filling form: {}", e.getMessage(), e);
             return false;
         } finally {
+            // Ensure WebDriver is properly closed
             if (driver != null) {
                 try {
+                    // Close all windows and quit driver
                     driver.quit();
                     log.info("WebDriver closed successfully");
                 } catch (Exception e) {
                     log.error("Error closing WebDriver: {}", e.getMessage());
+                    // Force quit if normal quit fails
+                    try {
+                        driver.close();
+                    } catch (Exception closeException) {
+                        log.error("Error force closing WebDriver: {}", closeException.getMessage());
+                    }
                 }
             }
         }
@@ -1025,6 +1103,16 @@ public class GoogleFormServiceImpl implements GoogleFormService {
         options.addArguments("--disable-web-security");
         options.addArguments("--disable-features=VizDisplayCompositor");
 
+        // Additional options to prevent detection and improve stability
+        options.addArguments("--disable-blink-features=AutomationControlled");
+        options.addArguments("--disable-infobars");
+        options.addArguments("--disable-notifications");
+        options.addArguments("--disable-popup-blocking");
+        options.addArguments("--disable-save-password-bubble");
+        options.addArguments("--disable-translate");
+        options.addArguments("--no-first-run");
+        options.addArguments("--no-default-browser-check");
+
         // Set headless mode based on configuration
         if (headless) {
             options.addArguments("--headless=new");
@@ -1036,11 +1124,36 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                 Collections.singletonList("enable-automation"));
         options.setExperimentalOption("useAutomationExtension", false);
 
-        // Setup Chrome driver
-        WebDriverManager.chromedriver().setup();
-        WebDriver driver = new ChromeDriver(options);
-        String sessionId = ((ChromeDriver) driver).getSessionId().toString();
-        log.info("ChromeDriver created successfully with session ID: {}", sessionId);
+        // Setup Chrome driver with retry mechanism
+        WebDriver driver = null;
+        int maxRetries = 3;
+        int retryCount = 0;
+
+        while (retryCount < maxRetries) {
+            try {
+                WebDriverManager.chromedriver().setup();
+                driver = new ChromeDriver(options);
+                String sessionId = ((ChromeDriver) driver).getSessionId().toString();
+                log.info("ChromeDriver created successfully with session ID: {}", sessionId);
+                break;
+            } catch (Exception e) {
+                retryCount++;
+                log.warn("Failed to create ChromeDriver (attempt {}/{}): {}", retryCount,
+                        maxRetries, e.getMessage());
+
+                if (retryCount >= maxRetries) {
+                    throw new RuntimeException(
+                            "Failed to create ChromeDriver after " + maxRetries + " attempts", e);
+                }
+
+                // Wait before retry
+                Thread.sleep(1000 * retryCount);
+            }
+        }
+
+        if (driver == null) {
+            throw new RuntimeException("Failed to create ChromeDriver");
+        }
 
         // Set optimized timeouts - reduced from 180s to 30s
         int optimizedTimeout = Math.min(timeoutSeconds, 30); // Cap at 30 seconds
@@ -1051,9 +1164,29 @@ public class GoogleFormServiceImpl implements GoogleFormService {
         WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(15)); // Reduced from 180s
                                                                                 // to 15s
 
-        // Navigate to form URL
+        // Navigate to form URL with retry mechanism
         log.info("Navigating to form URL: {}", formUrl);
-        driver.get(formUrl);
+        int navigationRetries = 3;
+        int navigationRetryCount = 0;
+
+        while (navigationRetryCount < navigationRetries) {
+            try {
+                driver.get(formUrl);
+                break;
+            } catch (Exception e) {
+                navigationRetryCount++;
+                log.warn("Failed to navigate to form URL (attempt {}/{}): {}", navigationRetryCount,
+                        navigationRetries, e.getMessage());
+
+                if (navigationRetryCount >= navigationRetries) {
+                    throw new RuntimeException("Failed to navigate to form URL after "
+                            + navigationRetries + " attempts", e);
+                }
+
+                // Wait before retry
+                Thread.sleep(2000 * navigationRetryCount);
+            }
+        }
 
         // OPTIMIZED: Wait only for essential elements with shorter timeout
         try {
@@ -1443,10 +1576,9 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                 return;
             }
 
-            // Find and click the dropdown trigger - try only stable selectors
+            // Find and click the dropdown trigger - use only stable selector
             WebElement dropdownTrigger = null;
             try {
-                // Use role='listbox' as the most stable selector
                 dropdownTrigger = questionElement.findElement(By.cssSelector("[role='listbox']"));
             } catch (Exception e) {
                 log.error("No dropdown trigger found for question: {}", questionTitle);
@@ -1458,15 +1590,35 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             dropdownTrigger.click();
             log.info("Clicked dropdown trigger for question: {}", questionTitle);
 
-            // Wait for dropdown to expand
-            Thread.sleep(humanLike ? 1000 : 500);
+            // Chờ một chút để dropdown render
+            Thread.sleep(500);
 
-            // Find all options by role='option'
+            // Chờ cho đến khi có ít nhất 2 option (1 placeholder + 1 option thực)
+            wait.until(d -> driver.findElements(By.cssSelector("[role='option']")).size() >= 2);
+
+            // Tìm tất cả option trong toàn bộ trang (Google Form thường render option bên ngoài
+            // container)
             List<WebElement> options = driver.findElements(By.cssSelector("[role='option']"));
-            boolean found = false;
-            for (WebElement option : options) {
+
+            // Lọc bỏ option placeholder (có data-value rỗng)
+            options = options.stream().filter(option -> {
                 String dataValue = option.getAttribute("data-value");
-                if (dataValue != null && dataValue.trim().equalsIgnoreCase(optionText.trim())) {
+                return dataValue != null && !dataValue.trim().isEmpty();
+            }).collect(java.util.stream.Collectors.toList());
+
+            if (options.isEmpty()) {
+                log.error("No valid options found after filtering placeholders for question: {}",
+                        questionTitle);
+                return;
+            }
+
+            boolean found = false;
+            String normalizedOptionText = normalize(optionText);
+
+            // Ưu tiên so sánh data-value
+            for (WebElement option : options) {
+                String dataValue = normalize(option.getAttribute("data-value"));
+                if (!dataValue.isEmpty() && dataValue.equals(normalizedOptionText)) {
                     wait.until(ExpectedConditions.elementToBeClickable(option));
                     option.click();
                     log.info("Selected option (by data-value) '{}' for question: {}", optionText,
@@ -1475,13 +1627,14 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                     break;
                 }
             }
-            // Fallback: try by visible text in span if not found by data-value
+
+            // Nếu chưa tìm thấy, so sánh text trong span
             if (!found) {
                 for (WebElement option : options) {
                     try {
                         WebElement span = option.findElement(By.tagName("span"));
-                        String spanText = span.getText().trim();
-                        if (spanText.equalsIgnoreCase(optionText.trim())) {
+                        String spanText = normalize(span.getText());
+                        if (!spanText.isEmpty() && spanText.equals(normalizedOptionText)) {
                             wait.until(ExpectedConditions.elementToBeClickable(option));
                             option.click();
                             log.info("Selected option (by span text) '{}' for question: {}",
@@ -1493,19 +1646,38 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                     }
                 }
             }
+
             if (!found) {
+                // Log tất cả option để debug
+                log.error("Available options for question '{}':", questionTitle);
+                for (int i = 0; i < options.size(); i++) {
+                    WebElement option = options.get(i);
+                    String dataValue = option.getAttribute("data-value");
+                    String spanText = "";
+                    try {
+                        spanText = option.findElement(By.tagName("span")).getText();
+                    } catch (Exception ignore) {
+                    }
+                    log.error("Option {}: data-value='{}', spanText='{}'", i + 1, dataValue,
+                            spanText);
+                }
                 log.error("Option '{}' not found in dropdown for question: {}", optionText,
                         questionTitle);
-                return;
             }
 
-            // Wait a bit for the selection to register
             Thread.sleep(humanLike ? 500 : 200);
-
         } catch (Exception e) {
             log.error("Error filling combobox question '{}': {}", questionTitle, e.getMessage());
             throw e;
         }
+    }
+
+    // Hàm chuẩn hóa unicode, loại bỏ khoảng trắng thừa, không phân biệt hoa thường
+    private String normalize(String s) {
+        if (s == null)
+            return "";
+        return java.text.Normalizer.normalize(s.trim(), java.text.Normalizer.Form.NFC)
+                .toLowerCase();
     }
 
     /**

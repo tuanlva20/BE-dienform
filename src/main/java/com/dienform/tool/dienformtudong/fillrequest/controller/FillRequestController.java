@@ -46,6 +46,18 @@ public class FillRequestController {
         return ResponseEntity.ok(response);
     }
 
+    @PostMapping("/fill-request/{requestId}/reset")
+    public ResponseEntity<Map<String, Object>> resetFillRequest(@PathVariable UUID requestId) {
+        Map<String, Object> response = fillRequestService.resetFillRequest(requestId);
+        return ResponseEntity.ok(response);
+    }
+
+    @PostMapping("/fill-request/clear-caches")
+    public ResponseEntity<Map<String, Object>> clearCaches() {
+        Map<String, Object> response = fillRequestService.clearCaches();
+        return ResponseEntity.ok(response);
+    }
+
     @DeleteMapping("/fill-request/{requestId}")
     public ResponseEntity<Void> deleteFillRequest(@PathVariable UUID requestId) {
         fillRequestService.deleteFillRequest(requestId);
