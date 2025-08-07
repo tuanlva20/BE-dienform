@@ -18,11 +18,13 @@ import com.dienform.tool.dienformtudong.fillrequest.dto.response.FillRequestResp
 import com.dienform.tool.dienformtudong.fillrequest.service.FillRequestService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 
 @RestController
 @RequestMapping("/api")
 @RequiredArgsConstructor
 @CrossOrigin(origins = "*")
+@Slf4j
 public class FillRequestController {
 
     private final FillRequestService fillRequestService;
@@ -30,20 +32,37 @@ public class FillRequestController {
     @PostMapping("/form/{formId}/fill-request")
     public ResponseEntity<FillRequestResponse> createFillRequest(@PathVariable UUID formId,
             @Valid @RequestBody FillRequestDTO fillRequestDTO) {
-        FillRequestResponse response = fillRequestService.createFillRequest(formId, fillRequestDTO);
-        return new ResponseEntity<>(response, HttpStatus.CREATED);
+        try {
+            FillRequestResponse response =
+                    fillRequestService.createFillRequest(formId, fillRequestDTO);
+            return new ResponseEntity<>(response, HttpStatus.CREATED);
+        } catch (Exception e) {
+            // Log the error for debugging
+            log.error("Error creating fill request for form {}: {}", formId, e.getMessage(), e);
+            throw e; // Re-throw to let GlobalExceptionHandler handle it
+        }
     }
 
     @GetMapping("/fill-request/{requestId}")
     public ResponseEntity<FillRequestResponse> getFillRequest(@PathVariable UUID requestId) {
-        FillRequestResponse response = fillRequestService.getFillRequestById(requestId);
-        return ResponseEntity.ok(response);
+        try {
+            FillRequestResponse response = fillRequestService.getFillRequestById(requestId);
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            log.error("Error getting fill request {}: {}", requestId, e.getMessage(), e);
+            throw e; // Re-throw to let GlobalExceptionHandler handle it
+        }
     }
 
     @PostMapping("/fill-request/{requestId}/start")
     public ResponseEntity<Map<String, Object>> startFillRequest(@PathVariable UUID requestId) {
-        Map<String, Object> response = fillRequestService.startFillRequest(requestId);
-        return ResponseEntity.ok(response);
+        try {
+            Map<String, Object> response = fillRequestService.startFillRequest(requestId);
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            log.error("Error starting fill request {}: {}", requestId, e.getMessage(), e);
+            throw e; // Re-throw to let GlobalExceptionHandler handle it
+        }
     }
 
     @PostMapping("/fill-request/{requestId}/reset")

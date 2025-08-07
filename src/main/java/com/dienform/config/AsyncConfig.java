@@ -15,8 +15,8 @@ public class AsyncConfig {
     ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
     executor.setCorePoolSize(5);
     executor.setMaxPoolSize(10);
-    executor.setQueueCapacity(25);
-    executor.setThreadNamePrefix("DienForm-");
+    executor.setQueueCapacity(100);
+    executor.setThreadNamePrefix("Async-");
     executor.initialize();
     return executor;
   }

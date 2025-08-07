@@ -9,18 +9,23 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.event.TransactionPhase;
+import org.springframework.transaction.event.TransactionalEventListener;
 import com.dienform.common.exception.BadRequestException;
 import com.dienform.common.exception.ResourceNotFoundException;
 import com.dienform.common.util.Constants;
 import com.dienform.tool.dienformtudong.answerdistribution.entity.AnswerDistribution;
 import com.dienform.tool.dienformtudong.answerdistribution.repository.AnswerDistributionRepository;
 import com.dienform.tool.dienformtudong.datamapping.dto.request.DataFillRequestDTO;
+import com.dienform.tool.dienformtudong.datamapping.service.GoogleSheetsService;
 import com.dienform.tool.dienformtudong.fillrequest.dto.request.FillRequestDTO;
 import com.dienform.tool.dienformtudong.fillrequest.dto.response.FillRequestResponse;
 import com.dienform.tool.dienformtudong.fillrequest.entity.FillRequest;
 import com.dienform.tool.dienformtudong.fillrequest.entity.FillRequestMapping;
+import com.dienform.tool.dienformtudong.fillrequest.event.FillRequestCreatedEvent;
 import com.dienform.tool.dienformtudong.fillrequest.mapper.FillRequestMapper;
 import com.dienform.tool.dienformtudong.fillrequest.repository.FillRequestMappingRepository;
 import com.dienform.tool.dienformtudong.fillrequest.repository.FillRequestRepository;
@@ -55,8 +60,9 @@ public class FillRequestServiceImpl implements FillRequestService {
   private final GoogleFormService googleFormService;
   private final DataFillValidator dataFillValidator;
   private final ScheduleDistributionService scheduleDistributionService;
-  private final com.dienform.tool.dienformtudong.datamapping.service.GoogleSheetsService googleSheetsService;
+  private final GoogleSheetsService googleSheetsService;
   private final DataFillCampaignService dataFillCampaignService;
+  private final ApplicationEventPublisher eventPublisher;
 
   @PersistenceContext
   private EntityManager entityManager;
@@ -64,6 +70,9 @@ public class FillRequestServiceImpl implements FillRequestService {
   @Override
   @Transactional
   public FillRequestResponse createFillRequest(UUID formId, FillRequestDTO fillRequestDTO) {
+    log.info("Creating fill request for form ID: {} with {} surveys", formId,
+        fillRequestDTO.getSurveyCount());
+
     // Validate form exists
     Form form = formRepository.findById(formId)
         .orElseThrow(() -> new ResourceNotFoundException("Form", "id", formId));
@@ -82,6 +91,7 @@ public class FillRequestServiceImpl implements FillRequestService {
         .endDate(fillRequestDTO.getEndDate()).status(Constants.FILL_REQUEST_STATUS_PENDING).build();
 
     FillRequest savedRequest = fillRequestRepository.save(fillRequest);
+    log.info("Fill request saved with ID: {}", savedRequest.getId());
 
     // Create answer distributions
     List<AnswerDistribution> distributions = new ArrayList<>();
@@ -208,26 +218,49 @@ public class FillRequestServiceImpl implements FillRequestService {
 
     entityManager.flush();
 
-    // Start the form filling process asynchronously
-    CompletableFuture.runAsync(() -> {
-      try {
-        log.info("Starting automated form filling for request ID: {}", savedRequest.getId());
-        googleFormService.fillForm(savedRequest.getId());
-      } catch (Exception e) {
-        log.error("Error starting form filling process: {}", e.getMessage(), e);
-        // Update request status to failed if there's an error
+    // CRITICAL FIX: Sử dụng event để đảm bảo transaction commit trước khi chạy async task
+    FillRequestResponse response = fillRequestMapper.toReponse(savedRequest);
+
+    // Publish event để trigger form filling sau khi transaction commit
+    eventPublisher.publishEvent(new FillRequestCreatedEvent(this, savedRequest.getId()));
+
+    return response;
+  }
+
+  /**
+   * Event listener để start form filling sau khi transaction commit Đảm bảo không có race condition
+   */
+  @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+  public void handleFillRequestCreated(FillRequestCreatedEvent event) {
+    try {
+      log.info("Fill request created event received for ID: {}", event.getFillRequestId());
+
+      // Start the form filling process asynchronously
+      CompletableFuture.runAsync(() -> {
         try {
-          FillRequest request = fillRequestRepository.findById(savedRequest.getId()).orElse(null);
-          if (request != null) {
-            request.setStatus(Constants.FILL_REQUEST_STATUS_FAILED);
-            fillRequestRepository.save(request);
+          // Thêm delay nhỏ để đảm bảo database transaction đã hoàn toàn commit
+          Thread.sleep(200);
+
+          log.info("Starting automated form filling for request ID: {}", event.getFillRequestId());
+          googleFormService.fillForm(event.getFillRequestId());
+        } catch (Exception e) {
+          log.error("Error starting form filling process: {}", e.getMessage(), e);
+          // Update request status to failed if there's an error
+          try {
+            FillRequest request =
+                fillRequestRepository.findById(event.getFillRequestId()).orElse(null);
+            if (request != null) {
+              request.setStatus(Constants.FILL_REQUEST_STATUS_FAILED);
+              fillRequestRepository.save(request);
+            }
+          } catch (Exception ex) {
+            log.error("Error updating fill request status: {}", ex.getMessage(), ex);
           }
-        } catch (Exception ex) {
-          log.error("Error updating fill request status: {}", ex.getMessage(), ex);
         }
-      }
-    });
-    return fillRequestMapper.toReponse(savedRequest);
+      });
+    } catch (Exception e) {
+      log.error("Error handling fill request created event: {}", e.getMessage(), e);
+    }
   }
 
   @Override

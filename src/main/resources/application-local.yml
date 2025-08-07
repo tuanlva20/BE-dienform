@@ -40,7 +40,7 @@ google:
     key: AIzaSyBCFk8JZ8OYLVEjs92cSLfcccyFH7VyeU0
   form:
     # Performance settings
-    timeout-seconds: 15000
+    timeout-seconds: 30
     thread-pool-size: 5
     max-retries: 3
     retry-delay-ms: 1000

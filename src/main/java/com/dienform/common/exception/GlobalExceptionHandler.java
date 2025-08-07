@@ -1,9 +1,8 @@
 package com.dienform.common.exception;
 
-import jakarta.validation.ConstraintViolationException;
-import lombok.AllArgsConstructor;
-import lombok.Data;
-import lombok.extern.slf4j.Slf4j;
+import java.time.LocalDateTime;
+import java.util.HashMap;
+import java.util.Map;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.BindException;
@@ -12,19 +11,44 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.WebRequest;
-
-import java.time.LocalDateTime;
-import java.util.HashMap;
-import java.util.Map;
+import jakarta.validation.ConstraintViolationException;
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.extern.slf4j.Slf4j;
 
 @Slf4j
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
+  @Data
+  @AllArgsConstructor
+  public static class ErrorResponse {
+    private int status;
+    private String message;
+    private String path;
+    private LocalDateTime timestamp;
+  }
+
+  @Data
+  @AllArgsConstructor
+  public static class ValidationErrorResponse {
+    private int status;
+    private String message;
+    private String path;
+    private LocalDateTime timestamp;
+    private Map<String, String> errors;
+  }
+
   @ExceptionHandler(ResourceNotFoundException.class)
   public ResponseEntity<ErrorResponse> handleResourceNotFoundException(ResourceNotFoundException ex,
       WebRequest request) {
-    ErrorResponse errorResponse = new ErrorResponse(HttpStatus.NOT_FOUND.value(), ex.getMessage(),
+    log.warn("Resource not found: {} - {}", ex.getResourceName(), ex.getMessage());
+
+    // Create a more user-friendly error message
+    String userMessage = String.format("Không tìm thấy %s với %s: '%s'", ex.getResourceName(),
+        ex.getFieldName(), ex.getFieldValue());
+
+    ErrorResponse errorResponse = new ErrorResponse(HttpStatus.NOT_FOUND.value(), userMessage,
         request.getDescription(false), LocalDateTime.now());
     return new ResponseEntity<>(errorResponse, HttpStatus.NOT_FOUND);
   }
@@ -83,24 +107,5 @@ public class GlobalExceptionHandler {
     ErrorResponse errorResponse = new ErrorResponse(HttpStatus.INTERNAL_SERVER_ERROR.value(),
         "An unexpected error occurred", request.getDescription(false), LocalDateTime.now());
     return new ResponseEntity<>(errorResponse, HttpStatus.INTERNAL_SERVER_ERROR);
-  }
-
-  @Data
-  @AllArgsConstructor
-  public static class ErrorResponse {
-    private int status;
-    private String message;
-    private String path;
-    private LocalDateTime timestamp;
-  }
-
-  @Data
-  @AllArgsConstructor
-  public static class ValidationErrorResponse {
-    private int status;
-    private String message;
-    private String path;
-    private LocalDateTime timestamp;
-    private Map<String, String> errors;
   }
 }

@@ -15,7 +15,6 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Random;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -24,9 +23,12 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import org.openqa.selenium.By;
 import org.openqa.selenium.JavascriptExecutor;
+import org.openqa.selenium.Keys;
 import org.openqa.selenium.WebDriver;
 import org.openqa.selenium.WebElement;
 import org.openqa.selenium.chrome.ChromeDriver;
@@ -48,6 +50,8 @@ import com.dienform.tool.dienformtudong.form.enums.FormStatusEnum;
 import com.dienform.tool.dienformtudong.form.repository.FormRepository;
 import com.dienform.tool.dienformtudong.googleform.dto.FormSubmissionRequest;
 import com.dienform.tool.dienformtudong.googleform.dto.FormSubmissionResponse;
+import com.dienform.tool.dienformtudong.googleform.handler.ComboboxHandler;
+import com.dienform.tool.dienformtudong.googleform.handler.GridQuestionHandler;
 import com.dienform.tool.dienformtudong.googleform.service.GoogleFormService;
 import com.dienform.tool.dienformtudong.googleform.util.DataProcessingUtils;
 import com.dienform.tool.dienformtudong.googleform.util.GoogleFormParser;
@@ -70,11 +74,39 @@ import lombok.extern.slf4j.Slf4j;
 @Slf4j
 public class GoogleFormServiceImpl implements GoogleFormService {
 
+    /**
+     * Inner class for checkbox grid answer
+     */
+    private static class CheckboxGridAnswer {
+        private final String row;
+        private final List<String> options;
+
+        public CheckboxGridAnswer(String row, List<String> options) {
+            this.row = row;
+            this.options = options != null ? options : List.of();
+        }
+
+        public String getRow() {
+            return row;
+        }
+
+        public List<String> getOptions() {
+            return options;
+        }
+
+        public boolean hasSpecificRow() {
+            return row != null && !row.trim().isEmpty();
+        }
+    }
+
     private final GoogleFormParser googleFormParser;
     private final FillRequestRepository fillRequestRepository;
     private final FormRepository formRepository;
     private final AnswerDistributionRepository answerDistributionRepository;
+
     private final SessionExecutionRepository sessionExecutionRepository;
+
+    private final ComboboxHandler comboboxHandler;
 
     // In-memory cache of form questions (URL -> Questions)
     private final Map<String, List<ExtractedQuestion>> formQuestionsCache =
@@ -150,6 +182,20 @@ public class GoogleFormServiceImpl implements GoogleFormService {
         log.info("All caches cleared");
     }
 
+    /**
+     * Clear caches for a specific fill request
+     */
+    public void clearCachesForFillRequest(UUID fillRequestId) {
+        String cacheKey = fillRequestId.toString();
+        log.info("Clearing caches for fillRequest: {}", fillRequestId);
+
+        questionElementsCache.remove(cacheKey);
+        questionMappingCache.remove(cacheKey);
+        formQuestionMapCache.remove(cacheKey);
+
+        log.info("Caches cleared for fillRequest: {}", fillRequestId);
+    }
+
     @Override
     public FormSubmissionResponse submitForm(FormSubmissionRequest request) {
         // TODO: Implement form submission logic
@@ -219,10 +265,8 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     public int fillForm(UUID fillRequestId) {
         log.info("Starting automated form filling for request ID: {}", fillRequestId);
 
-        // Find the fill request
-        FillRequest fillRequest =
-                fillRequestRepository.findByIdWithFetchForm(fillRequestId).orElseThrow(
-                        () -> new ResourceNotFoundException("Fill Request", "id", fillRequestId));
+        // CRITICAL FIX: Add retry mechanism for finding fill request
+        final FillRequest fillRequest = findFillRequestWithRetry(fillRequestId);
 
         // Validate fill request status before starting
         if (!Constants.FILL_REQUEST_STATUS_PENDING.equals(fillRequest.getStatus())
@@ -232,8 +276,9 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             return 0;
         }
 
-        // Clear caches before starting new execution to avoid stale data
-        clearCaches();
+        // Clear caches for this specific fill request before starting new execution to avoid stale
+        // data
+        clearCachesForFillRequest(fillRequestId);
 
         // Find the form
         Form form = formRepository.findById(fillRequest.getForm().getId()).orElseThrow(
@@ -304,13 +349,8 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                     }
 
                     futures.add(CompletableFuture.runAsync(() -> {
-                        boolean result = executeFormFill(form.getId().toString(), link, plan,
-                                fillRequest.isHumanLike());
-                        if (result) {
-                            successCount.incrementAndGet();
-                        } else {
-                            failCount.incrementAndGet();
-                        }
+                        executeFormFillTask(fillRequestId, link, plan, fillRequest.isHumanLike(),
+                                successCount, failCount);
                     }, executor));
 
                 } catch (Exception e) {
@@ -357,8 +397,8 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                 }
             }
 
-            // Clear caches after execution to free memory
-            clearCaches();
+            // Clear caches for this specific fill request after execution to free memory
+            clearCachesForFillRequest(fillRequestId);
         }
 
         return successCount.get();
@@ -427,8 +467,8 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                 selections.put(question, option);
             }
 
-            // Use existing executeFormFill method
-            return executeFormFill(formId.toString(), formUrl, selections, true);
+            // Use existing executeFormFill method with formId as cache key
+            return executeFormFill(formId, formUrl, selections, true);
         } catch (Exception e) {
             log.error("Error submitting form: {}", e.getMessage(), e);
             return false;
@@ -459,7 +499,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                 debug.append("  - Class: ").append(input.getAttribute("class")).append("\n");
                 debug.append("  - Aria-label: ").append(input.getAttribute("aria-label"))
                         .append("\n");
-                debug.append("  - Jsname: ").append(input.getAttribute("jsname")).append("\n");
+                debug.append("  - Tag name: ").append(input.getTagName()).append("\n");
             }
 
             // Test secondary selector (textarea)
@@ -467,10 +507,9 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             debug.append("Secondary selector (textarea): ").append(secondaryInputs.size())
                     .append(" elements\n");
 
-            // Test tertiary selector (jsname attribute)
-            List<WebElement> tertiaryInputs =
-                    questionElement.findElements(By.cssSelector("input[jsname]"));
-            debug.append("Tertiary selector (jsname attribute): ").append(tertiaryInputs.size())
+            // Test tertiary selector (any input element)
+            List<WebElement> tertiaryInputs = questionElement.findElements(By.tagName("input"));
+            debug.append("Tertiary selector (any input element): ").append(tertiaryInputs.size())
                     .append(" elements\n");
 
             // Test quaternary selector (fallback)
@@ -493,6 +532,139 @@ public class GoogleFormServiceImpl implements GoogleFormService {
 
         } catch (Exception e) {
             return "Error in debug: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Debug method to test combobox detection and structure
+     * 
+     * @param questionElement The question container element
+     * @param driver WebDriver instance
+     * @return Debug information about the combobox structure
+     */
+    public String debugComboboxDetection(WebElement questionElement, WebDriver driver) {
+        try {
+            StringBuilder debug = new StringBuilder();
+            debug.append("=== Combobox Detection Debug ===\n");
+
+            // Test dropdown trigger
+            List<WebElement> dropdownTriggers =
+                    questionElement.findElements(By.cssSelector("[role='listbox']"));
+            debug.append("Dropdown triggers found: ").append(dropdownTriggers.size()).append("\n");
+
+            if (!dropdownTriggers.isEmpty()) {
+                WebElement trigger = dropdownTriggers.get(0);
+                debug.append("  - Trigger class: ").append(trigger.getAttribute("class"))
+                        .append("\n");
+                debug.append("  - Trigger aria-expanded: ")
+                        .append(trigger.getAttribute("aria-expanded")).append("\n");
+                debug.append("  - Trigger role: ").append(trigger.getAttribute("role"))
+                        .append("\n");
+            }
+
+            // Test popup containers using stable selectors based on HTML structure
+            List<WebElement> popupContainers = driver.findElements(By.xpath(
+                    "//div[@role='presentation' and .//div[@role='option'] and not(contains(@style, 'display: none')) and not(contains(@style, 'visibility: hidden'))]"));
+            debug.append("Popup containers found (primary selector): ")
+                    .append(popupContainers.size()).append("\n");
+
+            for (int i = 0; i < popupContainers.size(); i++) {
+                WebElement container = popupContainers.get(i);
+                String style = container.getAttribute("style");
+                String display = container.getCssValue("display");
+                String role = container.getAttribute("role");
+                debug.append("  Container ").append(i + 1).append(":\n");
+                debug.append("    - Role: ").append(role).append("\n");
+                debug.append("    - Style: ").append(style).append("\n");
+                debug.append("    - Display: ").append(display).append("\n");
+                debug.append("    - Visible: ").append(container.isDisplayed()).append("\n");
+            }
+
+            // Test alternative popup selectors
+            List<WebElement> altContainers = driver.findElements(By.xpath(
+                    "//div[.//div[@role='option'] and not(contains(@style, 'display: none')) and not(contains(@style, 'visibility: hidden'))]"));
+            debug.append("Alternative popup containers found: ").append(altContainers.size())
+                    .append("\n");
+
+            // Test options in page
+            List<WebElement> allOptions = driver.findElements(By.cssSelector("[role='option']"));
+            debug.append("All options in page: ").append(allOptions.size()).append("\n");
+
+            // Test options in specific popup container
+            List<WebElement> popupOptions = new ArrayList<>();
+            if (!popupContainers.isEmpty()) {
+                popupOptions =
+                        popupContainers.get(0).findElements(By.cssSelector("[role='option']"));
+                debug.append("Options in first popup container: ").append(popupOptions.size())
+                        .append("\n");
+            }
+
+            for (int i = 0; i < Math.min(allOptions.size(), 5); i++) {
+                WebElement option = allOptions.get(i);
+                String dataValue = option.getAttribute("data-value");
+                String ariaSelected = option.getAttribute("aria-selected");
+                String text = option.getText();
+                String spanText = "";
+                try {
+                    // First try: direct span child
+                    WebElement span = option.findElement(By.tagName("span"));
+                    spanText = span.getText();
+                    if (spanText.isEmpty()) {
+                        // Second try: any span with text content
+                        span = option.findElement(By.xpath(".//span[text()]"));
+                        spanText = span.getText();
+                    }
+                    if (spanText.isEmpty()) {
+                        // Third try: any element with text content
+                        span = option.findElement(By.xpath(".//*[text()]"));
+                        spanText = span.getText();
+                    }
+                } catch (Exception ignore) {
+                }
+                debug.append("  Option ").append(i + 1).append(":\n");
+                debug.append("    - Data-value: '").append(dataValue).append("'\n");
+                debug.append("    - Aria-selected: ").append(ariaSelected).append("\n");
+                debug.append("    - Text: '").append(text).append("'\n");
+                debug.append("    - Span text: '").append(spanText).append("'\n");
+            }
+
+            // Also show options from popup container if available
+            if (!popupOptions.isEmpty()) {
+                debug.append("Options from popup container:\n");
+                for (int i = 0; i < Math.min(popupOptions.size(), 5); i++) {
+                    WebElement option = popupOptions.get(i);
+                    String dataValue = option.getAttribute("data-value");
+                    String ariaSelected = option.getAttribute("aria-selected");
+                    String text = option.getText();
+                    String spanText = "";
+                    try {
+                        // First try: direct span child
+                        WebElement span = option.findElement(By.tagName("span"));
+                        spanText = span.getText();
+                        if (spanText.isEmpty()) {
+                            // Second try: any span with text content
+                            span = option.findElement(By.xpath(".//span[text()]"));
+                            spanText = span.getText();
+                        }
+                        if (spanText.isEmpty()) {
+                            // Third try: any element with text content
+                            span = option.findElement(By.xpath(".//*[text()]"));
+                            spanText = span.getText();
+                        }
+                    } catch (Exception ignore) {
+                    }
+                    debug.append("  Popup Option ").append(i + 1).append(":\n");
+                    debug.append("    - Data-value: '").append(dataValue).append("'\n");
+                    debug.append("    - Aria-selected: ").append(ariaSelected).append("\n");
+                    debug.append("    - Text: '").append(text).append("'\n");
+                    debug.append("    - Span text: '").append(spanText).append("'\n");
+                }
+            }
+
+            return debug.toString();
+
+        } catch (Exception e) {
+            return "Error in combobox debug: " + e.getMessage();
         }
     }
 
@@ -529,6 +701,20 @@ public class GoogleFormServiceImpl implements GoogleFormService {
 
     public Map<String, WebElement> getQuestionMappingCache() {
         return questionMappingCache;
+    }
+
+    /**
+     * Get cached question elements for a specific fill request
+     */
+    public List<WebElement> getQuestionElementsCacheForFillRequest(UUID fillRequestId) {
+        return questionElementsCache.get(fillRequestId.toString());
+    }
+
+    /**
+     * Get cached question map for a specific fill request
+     */
+    public Map<String, WebElement> getFormQuestionMapCacheForFillRequest(UUID fillRequestId) {
+        return formQuestionMapCache.get(fillRequestId.toString());
     }
 
     public Map<String, List<ExtractedQuestion>> getFormQuestionsCache() {
@@ -586,13 +772,137 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     }
 
     /**
+     * Verify that popup container contains the correct options for the question
+     */
+    private boolean verifyPopupContainerOptions(WebElement popupContainer, String questionTitle) {
+        try {
+            // Get all options in the popup container
+            List<WebElement> options =
+                    popupContainer.findElements(By.cssSelector("[role='option']"));
+
+            if (options.isEmpty()) {
+                log.debug("No options found in popup container for question: {}", questionTitle);
+                return false;
+            }
+
+            // Log the first few options for debugging
+            log.debug("Popup container options for question '{}':", questionTitle);
+            for (int i = 0; i < Math.min(3, options.size()); i++) {
+                WebElement option = options.get(i);
+                String dataValue = option.getAttribute("data-value");
+                String spanText = "";
+                try {
+                    WebElement span = option.findElement(By.tagName("span"));
+                    spanText = span.getText();
+                } catch (Exception ignore) {
+                }
+                log.debug("Option {}: data-value='{}', spanText='{}'", i + 1, dataValue, spanText);
+            }
+
+            // For now, just check if we have valid options (not empty data-value)
+            long validOptions = options.stream().map(option -> option.getAttribute("data-value"))
+                    .filter(dataValue -> dataValue != null && !dataValue.trim().isEmpty()).count();
+
+            log.debug("Found {} valid options in popup container for question: {}", validOptions,
+                    questionTitle);
+
+            return validOptions > 0;
+
+        } catch (Exception e) {
+            log.debug("Error verifying popup container options: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Verify that popup container belongs to the correct dropdown
+     * 
+     * @param popupContainer The popup container element
+     * @param dropdownTrigger The dropdown trigger element
+     * @param questionTitle The question title
+     * @return True if popup container belongs to the dropdown, false otherwise
+     */
+    private boolean verifyPopupContainerBelongsToDropdown(WebElement popupContainer,
+            WebElement dropdownTrigger, String questionTitle) {
+        try {
+            // Method 1: Check if popup container contains the expected options for this question
+            // This is a simple verification - if the options don't match the question, it's wrong
+            List<WebElement> options =
+                    popupContainer.findElements(By.cssSelector("[role='option']"));
+
+            // Get the dropdown's aria-labelledby to identify which question it belongs to
+            String dropdownAriaLabelledBy = dropdownTrigger.getAttribute("aria-labelledby");
+            log.debug("Verifying popup container for dropdown with aria-labelledby: {}",
+                    dropdownAriaLabelledBy);
+
+            // For now, just log the options and let the calling code decide
+            log.debug("Popup container has {} options", options.size());
+            for (int i = 0; i < Math.min(options.size(), 3); i++) {
+                WebElement option = options.get(i);
+                String dataValue = option.getAttribute("data-value");
+                log.debug("Option {}: data-value='{}'", i + 1, dataValue);
+            }
+
+            // If we have options, assume it's correct for now
+            // The real verification will be done when trying to find the target option
+            return !options.isEmpty();
+
+        } catch (Exception e) {
+            log.error("Error verifying popup container belongs to dropdown: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Verify that dropdown trigger belongs to the correct question
+     * 
+     * @param dropdownTrigger The dropdown trigger element
+     * @param questionElement The question container element
+     * @param questionTitle The question title
+     * @return True if dropdown belongs to the question, false otherwise
+     */
+    private boolean verifyDropdownBelongsToQuestion(WebElement dropdownTrigger,
+            WebElement questionElement, String questionTitle) {
+        try {
+            // Simple verification: check if dropdown is within the question element
+            // Since we found the dropdown using questionElement.findElement(), it should be correct
+            // But let's add some additional logging for debugging
+
+            String dropdownAriaLabelledBy = dropdownTrigger.getAttribute("aria-labelledby");
+            String dropdownAriaDescribedBy = dropdownTrigger.getAttribute("aria-describedby");
+
+            log.debug("Dropdown verification for question '{}':", questionTitle);
+            log.debug("  - aria-labelledby: {}", dropdownAriaLabelledBy);
+            log.debug("  - aria-describedby: {}", dropdownAriaDescribedBy);
+            log.debug("  - aria-expanded: {}", dropdownTrigger.getAttribute("aria-expanded"));
+
+            // Since we found the dropdown within the question element, it should be correct
+            // But let's verify by checking if the question element contains this dropdown
+            try {
+                questionElement.findElement(By.cssSelector("[role='listbox']"));
+                log.debug("Dropdown trigger verified to belong to question: {}", questionTitle);
+                return true;
+            } catch (Exception e) {
+                log.warn("Dropdown trigger not found within question element: {}", questionTitle);
+                return false;
+            }
+
+        } catch (Exception e) {
+            log.error("Error verifying dropdown belongs to question: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    /**
      * OPTIMIZED: Get question elements with caching and retry mechanism
      */
-    private List<WebElement> getQuestionElementsWithRetry(WebDriver driver, String formIdKey) {
+    private List<WebElement> getQuestionElementsWithRetry(WebDriver driver, UUID fillRequestId) {
+        String cacheKey = fillRequestId.toString();
         if (cacheEnabled) {
-            List<WebElement> cachedElements = questionElementsCache.get(formIdKey);
+            List<WebElement> cachedElements = questionElementsCache.get(cacheKey);
             if (cachedElements != null && !cachedElements.isEmpty()) {
-                log.info("Using cached question elements: {}", cachedElements.size());
+                log.info("Using cached question elements for fillRequest {}: {}", fillRequestId,
+                        cachedElements.size());
                 return cachedElements;
             }
         }
@@ -608,15 +918,15 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                 if (!questionElements.isEmpty()) {
                     // Cache the result
                     if (cacheEnabled) {
-                        questionElementsCache.put(formIdKey, questionElements);
+                        questionElementsCache.put(cacheKey, questionElements);
                     }
-                    log.info("Found {} question elements (attempt {})", questionElements.size(),
-                            retryCount + 1);
+                    log.info("Found {} question elements for fillRequest {} (attempt {})",
+                            questionElements.size(), fillRequestId, retryCount + 1);
                     break;
                 }
             } catch (Exception e) {
-                log.warn("Failed to find question elements (attempt {}): {}", retryCount + 1,
-                        e.getMessage());
+                log.warn("Failed to find question elements for fillRequest {} (attempt {}): {}",
+                        fillRequestId, retryCount + 1, e.getMessage());
             }
 
             retryCount++;
@@ -631,7 +941,8 @@ public class GoogleFormServiceImpl implements GoogleFormService {
         }
 
         if (questionElements.isEmpty()) {
-            log.error("Failed to find question elements after {} attempts", maxRetries);
+            log.error("Failed to find question elements for fillRequest {} after {} attempts",
+                    fillRequestId, maxRetries);
         }
 
         return questionElements;
@@ -641,17 +952,19 @@ public class GoogleFormServiceImpl implements GoogleFormService {
      * OPTIMIZED: Find question element with performance monitoring
      */
     private WebElement findQuestionWithPerformanceMonitoring(String questionTitle,
-            Map<String, WebElement> questionMap) {
+            Map<String, WebElement> questionMap, UUID fillRequestId) {
         long startTime = System.currentTimeMillis();
 
-        WebElement result = findQuestionElementFromMap(questionTitle, questionMap);
+        WebElement result = findQuestionElementFromMap(questionTitle, questionMap, fillRequestId);
 
         long duration = System.currentTimeMillis() - startTime;
 
         if (result != null) {
-            log.info("Found question '{}' in {}ms", questionTitle, duration);
+            log.info("Found question '{}' for fillRequest {} in {}ms", questionTitle, fillRequestId,
+                    duration);
         } else {
-            log.warn("Question '{}' not found after {}ms", questionTitle, duration);
+            log.warn("Question '{}' for fillRequest {} not found after {}ms", questionTitle,
+                    fillRequestId, duration);
         }
 
         return result;
@@ -803,12 +1116,13 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     /**
      * Execute a form fill using Selenium
      *
+     * @param fillRequestId The ID of the fill request for caching
      * @param formUrl The URL of the form to fill
      * @param selections Map of questions to selected options
      * @param humanLike Whether to simulate human-like behavior
      * @return True if successful, false otherwise
      */
-    private boolean executeFormFill(String formIdKey, String formUrl,
+    private boolean executeFormFill(UUID fillRequestId, String formUrl,
             Map<Question, QuestionOption> selections, boolean humanLike) {
         WebDriver driver = null;
         try {
@@ -827,7 +1141,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
 
             // OPTIMIZED: Get all question elements once and cache them with retry mechanism
             log.info("Finding question elements...");
-            List<WebElement> questionElements = getQuestionElementsWithRetry(driver, formIdKey);
+            List<WebElement> questionElements = getQuestionElementsWithRetry(driver, fillRequestId);
 
             if (questionElements.isEmpty()) {
                 log.error("Failed to find question elements");
@@ -840,13 +1154,13 @@ public class GoogleFormServiceImpl implements GoogleFormService {
 
             // OPTIMIZED: Check cache first for question map
             if (cacheEnabled) {
-                questionMap = formQuestionMapCache.get(formIdKey);
+                questionMap = formQuestionMapCache.get(fillRequestId.toString());
                 if (questionMap != null) {
                     log.info("Using cached question map with {} questions", questionMap.size());
                 } else {
                     questionMap = buildQuestionMap(questionElements);
                     // Cache the question map for future use
-                    formQuestionMapCache.put(formIdKey, questionMap);
+                    formQuestionMapCache.put(fillRequestId.toString(), questionMap);
                     log.info("Built and cached question map with {} valid questions in {}ms",
                             questionMap.size(), System.currentTimeMillis() - mapStartTime);
                 }
@@ -875,8 +1189,8 @@ public class GoogleFormServiceImpl implements GoogleFormService {
 
                     // OPTIMIZED: Find question element using pre-built map with performance
                     // monitoring
-                    WebElement questionElement =
-                            findQuestionWithPerformanceMonitoring(question.getTitle(), questionMap);
+                    WebElement questionElement = findQuestionWithPerformanceMonitoring(
+                            question.getTitle(), questionMap, fillRequestId);
                     long questionFoundTime = System.currentTimeMillis();
 
                     if (questionElement == null) {
@@ -947,19 +1261,26 @@ public class GoogleFormServiceImpl implements GoogleFormService {
 
         } catch (Exception e) {
             log.error("Error filling form: {}", e.getMessage(), e);
+            // Don't quit driver here, let finally block handle it
             return false;
         } finally {
             // Ensure WebDriver is properly closed
             if (driver != null) {
                 try {
-                    // Close all windows and quit driver
-                    driver.quit();
-                    log.info("WebDriver closed successfully");
+                    // Check if driver is still active before quitting
+                    if (!isWebDriverQuit(driver)) {
+                        driver.quit();
+                        log.info("WebDriver closed successfully");
+                    } else {
+                        log.info("WebDriver was already quit");
+                    }
                 } catch (Exception e) {
                     log.error("Error closing WebDriver: {}", e.getMessage());
                     // Force quit if normal quit fails
                     try {
-                        driver.close();
+                        if (!isWebDriverQuit(driver)) {
+                            driver.close();
+                        }
                     } catch (Exception closeException) {
                         log.error("Error force closing WebDriver: {}", closeException.getMessage());
                     }
@@ -974,6 +1295,13 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     private boolean fillQuestionByType(WebDriver driver, WebElement questionElement,
             Question question, QuestionOption option, boolean humanLike) {
         try {
+            // Check if WebDriver is still active
+            if (driver == null || isWebDriverQuit(driver)) {
+                log.error("WebDriver is null or has been quit, cannot fill question: {}",
+                        question.getTitle());
+                return false;
+            }
+
             // Debug: Log the question type and option text
             log.info("Processing question: '{}' (type: {}) with option: '{}'", question.getTitle(),
                     question.getType(), option.getText());
@@ -1099,7 +1427,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
         options.addArguments("--disable-extensions");
         options.addArguments("--disable-plugins");
         options.addArguments("--disable-images");
-        options.addArguments("--disable-javascript"); // Disable JS for faster loading
+        // options.addArguments("--disable-javascript");
         options.addArguments("--disable-web-security");
         options.addArguments("--disable-features=VizDisplayCompositor");
 
@@ -1188,24 +1516,42 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             }
         }
 
-        // OPTIMIZED: Wait only for essential elements with shorter timeout
+        // Wait for form to load completely with multiple strategies
         try {
-            // Wait for form to load with optimized selector and shorter timeout
+            log.info("Waiting for form to load completely...");
+
+            // Strategy 1: Wait for Google Forms specific elements
             wait.until(ExpectedConditions
                     .presenceOfElementLocated(By.xpath("//div[@role='listitem']")));
-            log.info("Form elements found successfully");
+            log.info("Form elements found successfully with primary selector");
+
+            // Strategy 2: Wait for form container
+            wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("form")));
+            log.info("Form container found successfully");
+
+            // Strategy 3: Wait for at least one question to be fully loaded
+            wait.until(ExpectedConditions
+                    .presenceOfElementLocated(By.cssSelector("[role='heading']")));
+            log.info("Question headings found successfully");
+
+            // Additional wait to ensure JavaScript is fully executed
+            Thread.sleep(2000);
+            log.info("Form loading completed successfully");
+
         } catch (Exception e) {
-            log.warn("Primary selector failed, trying alternative: {}", e.getMessage());
-            // Fallback: try alternative selector with even shorter timeout
+            log.warn("Primary selectors failed, trying alternative: {}", e.getMessage());
+            // Fallback: try alternative selector with shorter timeout
             try {
-                WebDriverWait shortWait = new WebDriverWait(driver, Duration.ofSeconds(5));
+                WebDriverWait shortWait = new WebDriverWait(driver, Duration.ofSeconds(10));
                 shortWait
                         .until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("form")));
                 log.info("Form elements found with alternative selector");
+                // Thread.sleep(1000); // Additional wait
             } catch (Exception e2) {
                 log.warn("Alternative selector also failed, proceeding anyway: {}",
                         e2.getMessage());
                 // Continue anyway - elements might be loaded but not detected by selectors
+                // Thread.sleep(2000); // Wait a bit more before proceeding
             }
         }
 
@@ -1227,6 +1573,12 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     private void fillRadioQuestion(WebDriver driver, WebElement questionElement, String optionText,
             boolean humanLike) {
         try {
+            // Check if WebDriver is still active
+            if (driver == null || isWebDriverQuit(driver)) {
+                log.error("WebDriver is null or has been quit, cannot fill radio question");
+                return;
+            }
+
             // OPTIMIZED: Use shorter timeout for radio operations
             WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(10)); // Reduced from
                                                                                     // 180s to 10s
@@ -1311,6 +1663,12 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     private void fillCheckboxQuestion(WebDriver driver, WebElement questionElement,
             String optionText, boolean humanLike) {
         try {
+            // Check if WebDriver is still active
+            if (driver == null || isWebDriverQuit(driver)) {
+                log.error("WebDriver is null or has been quit, cannot fill checkbox question");
+                return;
+            }
+
             WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(timeoutSeconds));
 
             // First verify this is the correct question by checking its title
@@ -1415,6 +1773,13 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             String questionTitle, Map<Question, QuestionOption> selections, boolean humanLike)
             throws InterruptedException {
         try {
+            // Check if WebDriver is still active
+            if (driver == null || isWebDriverQuit(driver)) {
+                log.error("WebDriver is null or has been quit, cannot fill text question: {}",
+                        questionTitle);
+                return;
+            }
+
             WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(15));
             log.info("Processing text question: {}", questionTitle);
 
@@ -1498,12 +1863,11 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                 return textareas.get(0);
             }
 
-            // Tertiary selector: Look for any input element with jsname attribute (Google Form
-            // specific)
-            textInputs = questionElement.findElements(By.cssSelector("input[jsname]"));
+            // Tertiary selector: Look for any input element (fallback)
+            textInputs = questionElement.findElements(By.tagName("input"));
 
             if (!textInputs.isEmpty()) {
-                log.debug("Found text input using tertiary selector (jsname attribute)");
+                log.debug("Found text input using tertiary selector (fallback)");
                 return textInputs.get(0);
             }
 
@@ -1558,504 +1922,23 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             String questionTitle, String optionText, boolean humanLike)
             throws InterruptedException {
         try {
-            WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(15));
+            log.info("Filling combobox question: '{}' with option: '{}'", questionTitle,
+                    optionText);
 
-            // Verify this is the correct question by checking its title with normalized comparison
-            String actualQuestionTitle =
-                    questionElement.findElement(By.cssSelector("[role='heading']")).getText();
+            // Use the dedicated ComboboxHandler to avoid affecting other question types
+            boolean success = comboboxHandler.fillComboboxQuestion(driver, questionElement,
+                    questionTitle, optionText, humanLike);
 
-            // Normalize both titles for comparison (remove extra whitespace and newlines)
-            String normalizedExpectedTitle = normalizeQuestionTitle(questionTitle);
-            String normalizedActualTitle = normalizeQuestionTitle(actualQuestionTitle);
-
-            if (!normalizedActualTitle.equals(normalizedExpectedTitle)) {
-                log.warn(
-                        "Question mismatch. Expected: '{}', Found: '{}' (Normalized: '{}' vs '{}')",
-                        questionTitle, actualQuestionTitle, normalizedExpectedTitle,
-                        normalizedActualTitle);
-                return;
+            if (!success) {
+                log.error("Failed to fill combobox question: '{}'", questionTitle);
+            } else {
+                log.info("Successfully filled combobox question: '{}'", questionTitle);
             }
 
-            // Find and click the dropdown trigger - use only stable selector
-            WebElement dropdownTrigger = null;
-            try {
-                dropdownTrigger = questionElement.findElement(By.cssSelector("[role='listbox']"));
-            } catch (Exception e) {
-                log.error("No dropdown trigger found for question: {}", questionTitle);
-                return;
-            }
-
-            // Click to expand the dropdown
-            wait.until(ExpectedConditions.elementToBeClickable(dropdownTrigger));
-            dropdownTrigger.click();
-            log.info("Clicked dropdown trigger for question: {}", questionTitle);
-
-            // Chờ một chút để dropdown render
-            Thread.sleep(500);
-
-            // Chờ cho đến khi có ít nhất 2 option (1 placeholder + 1 option thực)
-            wait.until(d -> driver.findElements(By.cssSelector("[role='option']")).size() >= 2);
-
-            // Tìm tất cả option trong toàn bộ trang (Google Form thường render option bên ngoài
-            // container)
-            List<WebElement> options = driver.findElements(By.cssSelector("[role='option']"));
-
-            // Lọc bỏ option placeholder (có data-value rỗng)
-            options = options.stream().filter(option -> {
-                String dataValue = option.getAttribute("data-value");
-                return dataValue != null && !dataValue.trim().isEmpty();
-            }).collect(java.util.stream.Collectors.toList());
-
-            if (options.isEmpty()) {
-                log.error("No valid options found after filtering placeholders for question: {}",
-                        questionTitle);
-                return;
-            }
-
-            boolean found = false;
-            String normalizedOptionText = normalize(optionText);
-
-            // Ưu tiên so sánh data-value
-            for (WebElement option : options) {
-                String dataValue = normalize(option.getAttribute("data-value"));
-                if (!dataValue.isEmpty() && dataValue.equals(normalizedOptionText)) {
-                    wait.until(ExpectedConditions.elementToBeClickable(option));
-                    option.click();
-                    log.info("Selected option (by data-value) '{}' for question: {}", optionText,
-                            questionTitle);
-                    found = true;
-                    break;
-                }
-            }
-
-            // Nếu chưa tìm thấy, so sánh text trong span
-            if (!found) {
-                for (WebElement option : options) {
-                    try {
-                        WebElement span = option.findElement(By.tagName("span"));
-                        String spanText = normalize(span.getText());
-                        if (!spanText.isEmpty() && spanText.equals(normalizedOptionText)) {
-                            wait.until(ExpectedConditions.elementToBeClickable(option));
-                            option.click();
-                            log.info("Selected option (by span text) '{}' for question: {}",
-                                    optionText, questionTitle);
-                            found = true;
-                            break;
-                        }
-                    } catch (Exception ignore) {
-                    }
-                }
-            }
-
-            if (!found) {
-                // Log tất cả option để debug
-                log.error("Available options for question '{}':", questionTitle);
-                for (int i = 0; i < options.size(); i++) {
-                    WebElement option = options.get(i);
-                    String dataValue = option.getAttribute("data-value");
-                    String spanText = "";
-                    try {
-                        spanText = option.findElement(By.tagName("span")).getText();
-                    } catch (Exception ignore) {
-                    }
-                    log.error("Option {}: data-value='{}', spanText='{}'", i + 1, dataValue,
-                            spanText);
-                }
-                log.error("Option '{}' not found in dropdown for question: {}", optionText,
-                        questionTitle);
-            }
-
-            Thread.sleep(humanLike ? 500 : 200);
         } catch (Exception e) {
             log.error("Error filling combobox question '{}': {}", questionTitle, e.getMessage());
             throw e;
         }
-    }
-
-    // Hàm chuẩn hóa unicode, loại bỏ khoảng trắng thừa, không phân biệt hoa thường
-    private String normalize(String s) {
-        if (s == null)
-            return "";
-        return java.text.Normalizer.normalize(s.trim(), java.text.Normalizer.Form.NFC)
-                .toLowerCase();
-    }
-
-    /**
-     * Determine the type of question based on the WebElement using stable Google Form selectors
-     *
-     * @param questionElement The WebElement containing the question
-     * @return The type of question (text, radio, checkbox, combobox, etc.)
-     */
-    private String determineQuestionType(WebElement questionElement) {
-        try {
-            // Check for date input
-            if (!questionElement.findElements(By.cssSelector("input[type='date']")).isEmpty()
-                    || !questionElement.findElements(By.cssSelector("[data-includesyear='true']"))
-                            .isEmpty()) {
-                return "date";
-            }
-
-            // Check for checkbox grid using multiple selectors
-            List<WebElement> checkboxGroups =
-                    questionElement.findElements(By.cssSelector("[role='group']"));
-            List<WebElement> checkboxes =
-                    questionElement.findElements(By.cssSelector("[role='checkbox']"));
-            List<WebElement> fieldIds =
-                    questionElement.findElements(By.cssSelector("[data-field-id]"));
-
-            if ((!checkboxGroups.isEmpty() && !checkboxes.isEmpty())
-                    || (!fieldIds.isEmpty() && !checkboxes.isEmpty())) {
-                log.info("Detected checkbox grid - Groups: {}, Checkboxes: {}, Field IDs: {}",
-                        checkboxGroups.size(), checkboxes.size(), fieldIds.size());
-                return "checkbox_grid";
-            }
-
-            // Check for multiple choice grid using multiple selectors
-            List<WebElement> radioGroups =
-                    questionElement.findElements(By.cssSelector("[role='radiogroup']"));
-            List<WebElement> radios =
-                    questionElement.findElements(By.cssSelector("[role='radio']"));
-
-            if ((!radioGroups.isEmpty() && !radios.isEmpty())
-                    || (!fieldIds.isEmpty() && !radios.isEmpty())) {
-                log.info("Detected multiple choice grid - Groups: {}, Radios: {}, Field IDs: {}",
-                        radioGroups.size(), radios.size(), fieldIds.size());
-                return "multiple_choice_grid";
-            }
-
-            // Check for time input
-            if (!questionElement
-                    .findElements(By.cssSelector("input[type='number'][aria-label*='Giờ']"))
-                    .isEmpty()
-                    || !questionElement
-                            .findElements(
-                                    By.cssSelector("input[type='number'][aria-label*='Phút']"))
-                            .isEmpty()) {
-                return "time";
-            }
-
-            // Check for radio buttons (single choice, not grid)
-            if (!radios.isEmpty() && radioGroups.isEmpty() && fieldIds.isEmpty()) {
-                log.info("Detected single radio question");
-                return "radio";
-            }
-
-            // Check for checkboxes (single choice, not grid)
-            if (!checkboxes.isEmpty() && checkboxGroups.isEmpty() && fieldIds.isEmpty()) {
-                log.info("Detected single checkbox question");
-                return "checkbox";
-            }
-
-            // Check for combobox/dropdown
-            if (!questionElement.findElements(By.cssSelector("[role='listbox']")).isEmpty()
-                    || !questionElement.findElements(By.cssSelector("[role='combobox']"))
-                            .isEmpty()) {
-                return "combobox";
-            }
-
-            // Check for text inputs using stable attributes
-            // Primary: Check for input with type attribute (most stable)
-            if (!questionElement
-                    .findElements(By.cssSelector("input[type='text'], input[type='email']"))
-                    .isEmpty()) {
-                List<WebElement> textInputs = questionElement
-                        .findElements(By.cssSelector("input[type='text'], input[type='email']"));
-                if (!textInputs.isEmpty()) {
-                    WebElement input = textInputs.get(0);
-                    String inputType = input.getAttribute("type");
-                    if ("email".equals(inputType)) {
-                        return "email";
-                    } else {
-                        return "text";
-                    }
-                }
-            }
-
-            // Secondary: Check for input with jsname attribute (Google Form specific)
-            if (!questionElement.findElements(By.cssSelector("input[jsname]")).isEmpty()) {
-                List<WebElement> textInputs =
-                        questionElement.findElements(By.cssSelector("input[jsname]"));
-                if (!textInputs.isEmpty()) {
-                    WebElement input = textInputs.get(0);
-                    String inputType = input.getAttribute("type");
-                    if ("email".equals(inputType)) {
-                        return "email";
-                    } else {
-                        return "text";
-                    }
-                }
-            }
-
-            // Tertiary: Check for any input element (fallback)
-            if (!questionElement.findElements(By.tagName("input")).isEmpty()) {
-                return "text";
-            }
-
-            // Check for paragraph (multi-line text)
-            if (!questionElement.findElements(By.tagName("textarea")).isEmpty()) {
-                return "paragraph";
-            }
-
-            // Default fallback
-            return "unknown";
-        } catch (Exception e) {
-            log.debug("Error determining question type: {}", e.getMessage());
-            return "unknown";
-        }
-    }
-
-    /**
-     * Generate appropriate text based on question type/content
-     *
-     * @param questionTitle The title of the question to analyze
-     * @return Generated text appropriate for the question
-     */
-    private String generateTextByQuestionType(String questionTitle) {
-        String questionLower = questionTitle.toLowerCase();
-
-        // Xử lý các trường hợp email
-        if (questionLower.contains("email") || questionLower.contains("thư điện tử")
-                || questionLower.contains("mail") || questionLower.matches(".*e[-\\s]?mail.*")) {
-            return TestDataEnum.getRandomEmail();
-        }
-
-        // Xử lý các trường hợp tên/họ tên
-        if (questionLower.matches(".*(?:họ|tên|name|full name|họ và tên|họ tên).*")
-                && !questionLower.contains("công ty") && !questionLower.contains("trường")
-                && !questionLower.contains("school") && !questionLower.contains("company")) {
-            return TestDataEnum.getRandomName();
-        }
-
-        // Xử lý các trường hợp số điện thoại
-        if (questionLower.matches(".*(?:số điện thoại|phone|sđt|số dt|di động|điện thoại).*")) {
-            return TestDataEnum.getRandomPhoneNumber();
-        }
-
-        // Xử lý các trường hợp địa chỉ
-        if (questionLower.matches(".*(?:địa chỉ|address|nơi ở|location|place).*")
-                || (questionLower.contains("số") && questionLower.contains("đường"))) {
-            return TestDataEnum.getRandomAddress();
-        }
-
-        // Xử lý các trường hợp đánh giá/feedback
-        if (questionLower
-                .matches(".*(?:đánh giá|feedback|góp ý|nhận xét|comment|ý kiến|cải thiện).*")) {
-            return TestDataEnum.getRandomFeedback();
-        }
-
-        // Nếu không match với các pattern trên, phân tích thêm context
-        if (questionLower.contains("bạn") || questionLower.contains("anh")
-                || questionLower.contains("chị") || questionLower.contains("you")) {
-            // Câu hỏi mang tính cá nhân
-            if (questionLower.matches(".*(?:là ai|who|tên gì).*")) {
-                return TestDataEnum.getRandomName();
-            }
-            if (questionLower.matches(".*(?:ở đâu|where|sống tại).*")) {
-                return TestDataEnum.getRandomAddress();
-            }
-        }
-
-        // Default case: Nếu không match với bất kỳ pattern nào,
-        // trả về feedback ngắn gọn để tránh điền sai context
-        return "ad";
-    }
-
-    /**
-     * Builds a map of question titles to their corresponding WebElement containers. This is a
-     * helper method to optimize the findQuestionElementFromMap method.
-     *
-     * @param questionElements The list of WebElement containers for all questions.
-     * @return A map of question titles to their corresponding WebElement containers.
-     */
-    private Map<String, WebElement> buildQuestionMap(List<WebElement> questionElements) {
-        Map<String, WebElement> questionMap = new HashMap<>();
-
-        // OPTIMIZED: Use parallel processing for large element lists with CompletableFuture
-        if (questionElements.size() > 5) {
-            log.info("Using parallel processing for {} question elements with pool size 5",
-                    questionElements.size());
-
-            // Process elements in parallel with CompletableFuture
-            List<CompletableFuture<Map.Entry<String, WebElement>>> futures =
-                    questionElements.stream().map(element -> CompletableFuture.supplyAsync(() -> {
-                        try {
-                            // OPTIMIZED: Use more efficient selector
-                            WebElement heading =
-                                    element.findElement(By.cssSelector("[role='heading']"));
-                            if (heading != null) {
-                                String title = heading.getText().replace("*", "").trim();
-                                if (!title.isEmpty()) {
-                                    String normalizedTitle = title.toLowerCase();
-                                    log.debug("Mapped question: '{}' -> element", title);
-                                    return Map.entry(normalizedTitle, element);
-                                }
-                            }
-                        } catch (Exception e) {
-                            // Skip elements without headings silently
-                            log.debug("Skipping element without heading: {}", e.getMessage());
-                        }
-                        return null;
-                    }, questionProcessingExecutor)).collect(Collectors.toList());
-
-            // Wait for all futures to complete and collect results
-            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
-
-            // Collect results
-            for (CompletableFuture<Map.Entry<String, WebElement>> future : futures) {
-                try {
-                    Map.Entry<String, WebElement> entry = future.get();
-                    if (entry != null) {
-                        questionMap.put(entry.getKey(), entry.getValue());
-                    }
-                } catch (Exception e) {
-                    log.debug("Error getting future result: {}", e.getMessage());
-                }
-            }
-        } else {
-            // For small lists, use sequential processing
-            for (WebElement element : questionElements) {
-                try {
-                    // OPTIMIZED: Use more efficient selector
-                    WebElement heading = element.findElement(By.cssSelector("[role='heading']"));
-                    if (heading != null) {
-                        String title = heading.getText();
-                        String normalizedTitle = normalizeQuestionTitle(title).toLowerCase();
-                        if (!normalizedTitle.isEmpty()) {
-                            questionMap.put(normalizedTitle, element);
-                            log.debug("Mapped question: '{}' -> element", title);
-                        }
-                    }
-                } catch (Exception e) {
-                    // Skip elements without headings silently
-                    log.debug("Skipping element without heading: {}", e.getMessage());
-                }
-            }
-        }
-
-        log.info("Built question map with {} valid questions from {} total elements",
-                questionMap.size(), questionElements.size());
-        return questionMap;
-    }
-
-    /**
-     * Finds a WebElement by its title using a pre-built question map with caching.
-     *
-     * @param questionTitle The title of the question to find.
-     * @param questionMap The pre-built map of question titles to WebElements.
-     * @return The WebElement for the question container, or null if not found.
-     */
-    private WebElement findQuestionElementFromMap(String questionTitle,
-            Map<String, WebElement> questionMap) {
-        String normalizedSearchTitle = normalizeQuestionTitle(questionTitle).toLowerCase();
-
-        // OPTIMIZED: Check cache first for faster lookup
-        if (cacheEnabled) {
-            WebElement cachedElement = questionMappingCache.get(normalizedSearchTitle);
-            if (cachedElement != null) {
-                log.info("Found matching question from cache: '{}'", questionTitle);
-                return cachedElement;
-            }
-        }
-
-        // Search in the provided map
-        WebElement foundElement = questionMap.get(normalizedSearchTitle);
-        if (foundElement != null) {
-            // OPTIMIZED: Cache the result for future lookups
-            if (cacheEnabled) {
-                questionMappingCache.put(normalizedSearchTitle, foundElement);
-            }
-            log.info("Found matching question: '{}'", questionTitle);
-            return foundElement;
-        }
-
-        // OPTIMIZED: Try fuzzy matching if exact match not found
-        WebElement fuzzyMatch = findQuestionWithFuzzyMatching(normalizedSearchTitle, questionMap);
-        if (fuzzyMatch != null) {
-            // Cache the fuzzy match result
-            if (cacheEnabled) {
-                questionMappingCache.put(normalizedSearchTitle, fuzzyMatch);
-            }
-            return fuzzyMatch;
-        }
-
-        log.warn("Question not found: '{}'", questionTitle);
-        return null;
-    }
-
-    /**
-     * Find question using fuzzy matching for better accuracy
-     */
-    private WebElement findQuestionWithFuzzyMatching(String normalizedSearchTitle,
-            Map<String, WebElement> questionMap) {
-        // OPTIMIZED: Use CompletableFuture for parallel similarity calculation
-        List<CompletableFuture<Map.Entry<String, Double>>> similarityFutures =
-                questionMap.entrySet().stream().map(entry -> CompletableFuture.supplyAsync(() -> {
-                    double similarity = calculateSimilarity(normalizedSearchTitle, entry.getKey());
-                    return Map.entry(entry.getKey(), similarity);
-                }, questionProcessingExecutor)).collect(Collectors.toList());
-
-        // Wait for all similarity calculations to complete
-        CompletableFuture.allOf(similarityFutures.toArray(new CompletableFuture[0])).join();
-
-        // Find the best match with similarity threshold
-        Optional<Map.Entry<String, Double>> bestMatch = similarityFutures.stream().map(future -> {
-            try {
-                return future.get();
-            } catch (Exception e) {
-                return Map.entry("", 0.0);
-            }
-        }).filter(entry -> entry.getValue() > 0.7) // 70% similarity threshold
-                .max(Map.Entry.comparingByValue());
-
-        if (bestMatch.isPresent()) {
-            String bestMatchKey = bestMatch.get().getKey();
-            WebElement foundElement = questionMap.get(bestMatchKey);
-            log.info("Found matching question with fuzzy matching ({}% similarity): '{}'",
-                    (int) (bestMatch.get().getValue() * 100), normalizedSearchTitle);
-            return foundElement;
-        }
-
-        return null;
-    }
-
-    /**
-     * Calculate similarity between two strings using Levenshtein distance
-     */
-    private double calculateSimilarity(String str1, String str2) {
-        if (str1.equals(str2))
-            return 1.0;
-        if (str1.isEmpty() || str2.isEmpty())
-            return 0.0;
-
-        int distance = levenshteinDistance(str1, str2);
-        int maxLength = Math.max(str1.length(), str2.length());
-        return (double) (maxLength - distance) / maxLength;
-    }
-
-    /**
-     * Calculate Levenshtein distance between two strings
-     */
-    private int levenshteinDistance(String str1, String str2) {
-        int[][] dp = new int[str1.length() + 1][str2.length() + 1];
-
-        for (int i = 0; i <= str1.length(); i++) {
-            dp[i][0] = i;
-        }
-        for (int j = 0; j <= str2.length(); j++) {
-            dp[0][j] = j;
-        }
-
-        for (int i = 1; i <= str1.length(); i++) {
-            for (int j = 1; j <= str2.length(); j++) {
-                if (str1.charAt(i - 1) == str2.charAt(j - 1)) {
-                    dp[i][j] = dp[i - 1][j - 1];
-                } else {
-                    dp[i][j] = 1 + Math.min(dp[i - 1][j - 1], Math.min(dp[i - 1][j], dp[i][j - 1]));
-                }
-            }
-        }
-
-        return dp[str1.length()][str2.length()];
     }
 
     /**
@@ -2064,87 +1947,10 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     private void fillMultipleChoiceGridQuestion(WebDriver driver, WebElement questionElement,
             Question question, QuestionOption option, boolean humanLike) {
         try {
-            WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(15));
-
-            // For grid questions, we need to find the row and option
-            // The option text might be just the option value, not "row:option" format
-            String optionText = option.getText();
-
-            log.info("Filling multiple choice grid question: '{}' with option: '{}'",
-                    question.getTitle(), optionText);
-
-            // Debug: Log grid structure
-            debugGridStructure(questionElement, "radiogroup", "radio");
-
-            // Try to find all available rows first
-            List<WebElement> radioGroups =
-                    questionElement.findElements(By.cssSelector("[role='radiogroup']"));
-            log.info("Found {} radio groups in multiple choice grid", radioGroups.size());
-
-            if (radioGroups.isEmpty()) {
-                log.error("No radio groups found in multiple choice grid");
-                return;
-            }
-
-            // For now, let's try to fill the first available row with the option
-            // This is a simplified approach - in a real scenario, you'd need to map rows to options
-            WebElement firstRow = radioGroups.get(0);
-            String rowAriaLabel = firstRow.getAttribute("aria-label");
-            log.info("Filling first row: '{}' with option: '{}'", rowAriaLabel, optionText);
-
-            // Find and click the radio button for this option in the row
-            WebElement radioButton = null;
-            try {
-                // First try: find by data-value attribute
-                radioButton = firstRow.findElement(
-                        By.xpath(".//div[@role='radio' and @data-value='" + optionText + "']"));
-                log.info("Found radio button by data-value");
-            } catch (Exception e) {
-                try {
-                    // Second try: find by aria-label containing the option text
-                    radioButton = firstRow
-                            .findElement(By.xpath(".//div[@role='radio' and contains(@aria-label, '"
-                                    + optionText + "')]"));
-                    log.info("Found radio button by aria-label");
-                } catch (Exception e2) {
-                    try {
-                        // Third try: find by any descendant containing the option text
-                        radioButton = firstRow.findElement(
-                                By.xpath(".//div[@role='radio' and .//*[contains(text(), '"
-                                        + optionText + "')]]"));
-                        log.info("Found radio button by text content");
-                    } catch (Exception e3) {
-                        try {
-                            // Fourth try: find any radio button (fallback)
-                            List<WebElement> radioButtons =
-                                    firstRow.findElements(By.cssSelector("[role='radio']"));
-                            if (!radioButtons.isEmpty()) {
-                                radioButton = radioButtons.get(0);
-                                log.info("Using first available radio button as fallback");
-                            }
-                        } catch (Exception e4) {
-                            log.error("No radio button found for option '{}' in row '{}'",
-                                    optionText, rowAriaLabel);
-                            return;
-                        }
-                    }
-                }
-            }
-
-            if (radioButton != null) {
-                // Wait for element to be clickable
-                wait.until(ExpectedConditions.elementToBeClickable(radioButton));
-                radioButton.click();
-                log.info("Selected option '{}' for row '{}' in multiple choice grid", optionText,
-                        rowAriaLabel);
-
-                // Wait a bit for the selection to register
-                Thread.sleep(humanLike ? 300 : 100);
-            } else {
-                log.error("Radio button is null for option '{}' in row '{}'", optionText,
-                        rowAriaLabel);
-            }
-
+            // Use the new GridQuestionHandler for comprehensive grid question handling
+            GridQuestionHandler gridHandler = new GridQuestionHandler();
+            gridHandler.fillMultipleChoiceGridQuestion(driver, questionElement, question, option,
+                    humanLike);
         } catch (Exception e) {
             log.error("Error filling multiple choice grid question: {}", e.getMessage());
         }
@@ -2156,21 +1962,48 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     private void fillCheckboxGridQuestion(WebDriver driver, WebElement questionElement,
             Question question, QuestionOption option, boolean humanLike) {
         try {
-            WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(15));
+            // Try the new GridQuestionHandler first
+            try {
+                GridQuestionHandler gridHandler = new GridQuestionHandler();
+                gridHandler.fillCheckboxGridQuestion(driver, questionElement, question, option,
+                        humanLike);
+                return;
+            } catch (Exception e) {
+                log.warn("GridQuestionHandler failed for checkbox grid, trying fallback method: {}",
+                        e.getMessage());
+            }
 
-            // For grid questions, we need to find the row and option
-            // The option text might be just the option value, not "row:option1,option2,..." format
+            // Fallback: Direct checkbox grid handling
+            fillCheckboxGridQuestionDirect(driver, questionElement, question, option, humanLike);
+        } catch (Exception e) {
+            log.error("Error filling checkbox grid question: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Direct checkbox grid question handling (fallback method)
+     */
+    private void fillCheckboxGridQuestionDirect(WebDriver driver, WebElement questionElement,
+            Question question, QuestionOption option, boolean humanLike) {
+        try {
+            WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(15));
             String optionText = option.getText();
 
-            log.info("Filling checkbox grid question: '{}' with option: '{}'", question.getTitle(),
-                    optionText);
+            log.info("Filling checkbox grid question directly: '{}' with option: '{}'",
+                    question.getTitle(), optionText);
 
-            // Debug: Log grid structure
-            debugGridStructure(questionElement, "group", "checkbox");
+            // Parse the option text to extract row and option information
+            CheckboxGridAnswer gridAnswer = parseCheckboxGridAnswer(optionText);
 
-            // Try to find all available rows first
+            // Find all checkbox groups (rows) in the grid using stable selectors
             List<WebElement> checkboxGroups =
                     questionElement.findElements(By.cssSelector("[role='group']"));
+
+            // Filter out groups that don't contain checkboxes to ensure we have the right elements
+            checkboxGroups = checkboxGroups.stream().filter(
+                    group -> !group.findElements(By.cssSelector("[role='checkbox']")).isEmpty())
+                    .collect(Collectors.toList());
+
             log.info("Found {} checkbox groups in checkbox grid", checkboxGroups.size());
 
             if (checkboxGroups.isEmpty()) {
@@ -2178,67 +2011,330 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                 return;
             }
 
-            // For now, let's try to fill the first available row with the option
-            // This is a simplified approach - in a real scenario, you'd need to map rows to options
-            WebElement firstRow = checkboxGroups.get(0);
-            String rowAriaLabel = firstRow.getAttribute("aria-label");
-            log.info("Filling first row: '{}' with option: '{}'", rowAriaLabel, optionText);
-
-            // Find and click the checkbox for this option in the row
-            WebElement checkbox = null;
-            try {
-                // First try: find by data-answer-value attribute
-                checkbox = firstRow.findElement(By.xpath(
-                        ".//div[@role='checkbox' and @data-answer-value='" + optionText + "']"));
-                log.info("Found checkbox by data-answer-value");
-            } catch (Exception e) {
-                try {
-                    // Second try: find by aria-label containing the option text
-                    checkbox = firstRow.findElement(
-                            By.xpath(".//div[@role='checkbox' and contains(@aria-label, '"
-                                    + optionText + "')]"));
-                    log.info("Found checkbox by aria-label");
-                } catch (Exception e2) {
-                    try {
-                        // Third try: find by any descendant containing the option text
-                        checkbox = firstRow.findElement(
-                                By.xpath(".//div[@role='checkbox' and .//*[contains(text(), '"
-                                        + optionText + "')]]"));
-                        log.info("Found checkbox by text content");
-                    } catch (Exception e3) {
-                        try {
-                            // Fourth try: find any checkbox (fallback)
-                            List<WebElement> checkboxes =
-                                    firstRow.findElements(By.cssSelector("[role='checkbox']"));
-                            if (!checkboxes.isEmpty()) {
-                                checkbox = checkboxes.get(0);
-                                log.info("Using first available checkbox as fallback");
-                            }
-                        } catch (Exception e4) {
-                            log.error("No checkbox found for option '{}' in row '{}'", optionText,
-                                    rowAriaLabel);
-                            return;
-                        }
-                    }
-                }
-            }
-
-            if (checkbox != null) {
-                // Wait for element to be clickable
-                wait.until(ExpectedConditions.elementToBeClickable(checkbox));
-                checkbox.click();
-                log.info("Selected option '{}' for row '{}' in checkbox grid", optionText,
-                        rowAriaLabel);
-
-                // Wait a bit for the selection to register
-                Thread.sleep(humanLike ? 200 : 100);
+            // If we have specific row information, fill only that row
+            if (gridAnswer.hasSpecificRow()) {
+                fillSpecificCheckboxGridRow(driver, checkboxGroups, gridAnswer, wait, humanLike);
             } else {
-                log.error("Checkbox is null for option '{}' in row '{}'", optionText, rowAriaLabel);
+                // Fill all rows with the same options
+                fillAllCheckboxGridRows(driver, checkboxGroups, gridAnswer.getOptions(), wait,
+                        humanLike);
             }
 
         } catch (Exception e) {
-            log.error("Error filling checkbox grid question: {}", e.getMessage());
+            log.error("Error filling checkbox grid question directly: {}", e.getMessage());
         }
+    }
+
+    /**
+     * Parse checkbox grid answer text
+     */
+    private CheckboxGridAnswer parseCheckboxGridAnswer(String optionText) {
+        if (optionText == null || optionText.trim().isEmpty()) {
+            return new CheckboxGridAnswer(null, List.of());
+        }
+
+        String normalizedText = optionText.trim();
+
+        // Check if it contains row information (format: "row:option1,option2")
+        Pattern gridPattern = Pattern.compile("(.+?):(.+)");
+        Matcher gridMatcher = gridPattern.matcher(normalizedText);
+
+        if (gridMatcher.matches()) {
+            String row = gridMatcher.group(1).trim();
+            String optionsPart = gridMatcher.group(2).trim();
+            List<String> options = parseMultipleOptions(optionsPart);
+            return new CheckboxGridAnswer(row, options);
+        }
+
+        // No row specified, check if it contains multiple options
+        if (normalizedText.contains(",")) {
+            List<String> options = parseMultipleOptions(normalizedText);
+            return new CheckboxGridAnswer(null, options);
+        }
+
+        // Single option for all rows
+        return new CheckboxGridAnswer(null, List.of(normalizedText));
+    }
+
+    /**
+     * Parse multiple options separated by commas
+     */
+    private List<String> parseMultipleOptions(String optionsText) {
+        List<String> options = new ArrayList<>();
+        String[] parts = optionsText.split(",");
+        for (String part : parts) {
+            String trimmed = part.trim();
+            if (!trimmed.isEmpty()) {
+                options.add(trimmed);
+            }
+        }
+        return options;
+    }
+
+    /**
+     * Fill a specific row in checkbox grid
+     */
+    private void fillSpecificCheckboxGridRow(WebDriver driver, List<WebElement> checkboxGroups,
+            CheckboxGridAnswer gridAnswer, WebDriverWait wait, boolean humanLike) {
+        try {
+            String targetRow = gridAnswer.getRow();
+            List<String> targetOptions = gridAnswer.getOptions();
+
+            // Find the matching row
+            WebElement targetRowElement = findCheckboxRowByLabel(checkboxGroups, targetRow);
+            if (targetRowElement == null) {
+                log.warn("Row '{}' not found, using first available row", targetRow);
+                targetRowElement = checkboxGroups.get(0);
+            }
+
+            // Fill the row with the specified options
+            fillCheckboxGridRow(driver, targetRowElement, targetOptions, wait, humanLike);
+
+        } catch (Exception e) {
+            log.error("Error filling specific checkbox grid row: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Fill all rows in checkbox grid with the same options
+     */
+    private void fillAllCheckboxGridRows(WebDriver driver, List<WebElement> checkboxGroups,
+            List<String> options, WebDriverWait wait, boolean humanLike) {
+        try {
+            for (int i = 0; i < checkboxGroups.size(); i++) {
+                WebElement row = checkboxGroups.get(i);
+                String rowLabel = getRowLabel(row);
+                log.info("Filling row {}: '{}' with options: {}", i + 1, rowLabel, options);
+
+                fillCheckboxGridRow(driver, row, options, wait, humanLike);
+
+                // Add delay between rows in human-like mode
+                if (humanLike && i < checkboxGroups.size() - 1) {
+                    Thread.sleep(100 + new Random().nextInt(200));
+                }
+            }
+        } catch (Exception e) {
+            log.error("Error filling all checkbox grid rows: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Find checkbox row by label
+     */
+    private WebElement findCheckboxRowByLabel(List<WebElement> rows, String targetLabel) {
+        String normalizedTargetLabel = normalizeText(targetLabel);
+
+        for (WebElement row : rows) {
+            try {
+                // Look for the row label in the first div with specific classes
+                List<WebElement> labelElements =
+                        row.findElements(By.cssSelector(".V4d7Ke.wzWPxe.OIC90c"));
+
+                for (WebElement labelElement : labelElements) {
+                    String labelText = labelElement.getText().trim();
+                    if (normalizeText(labelText).equals(normalizedTargetLabel)) {
+                        log.debug("Found row with label: {}", labelText);
+                        return row;
+                    }
+                }
+
+                // Alternative: look for any div containing the label text
+                List<WebElement> allDivs = row.findElements(By.cssSelector("div"));
+                for (WebElement div : allDivs) {
+                    String divText = div.getText().trim();
+                    if (normalizeText(divText).equals(normalizedTargetLabel)) {
+                        log.debug("Found row with label (alternative method): {}", divText);
+                        return row;
+                    }
+                }
+
+                // Try finding text in any element within the row
+                String rowText = row.getText();
+                if (normalizeText(rowText).contains(normalizedTargetLabel)) {
+                    log.debug("Found row containing label text: {}", targetLabel);
+                    return row;
+                }
+
+            } catch (Exception e) {
+                log.debug("Error processing row: {}", e.getMessage());
+                // Continue searching other rows
+                continue;
+            }
+        }
+
+        log.warn("Row with label '{}' not found", targetLabel);
+        return null;
+    }
+
+    /**
+     * Get row label from checkbox group using stable selectors
+     */
+    private String getRowLabel(WebElement row) {
+        try {
+            // Look for row label using stable selectors
+            // First try: find div that contains text but is not a checkbox
+            List<WebElement> divs = row.findElements(By.tagName("div"));
+            for (WebElement div : divs) {
+                String text = div.getText().trim();
+                if (!text.isEmpty()
+                        && !div.findElements(By.cssSelector("[role='checkbox']")).isEmpty()) {
+                    // This div contains checkboxes, skip it
+                    continue;
+                }
+                if (!text.isEmpty()) {
+                    return text;
+                }
+            }
+
+            // Second try: look for any text content that's not in a checkbox
+            String rowText = row.getText();
+            if (!rowText.trim().isEmpty()) {
+                // Extract the first line as row label
+                String[] lines = rowText.split("\n");
+                if (lines.length > 0) {
+                    return lines[0].trim();
+                }
+            }
+
+            return null;
+        } catch (Exception e) {
+            log.debug("Error getting row label: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Fill a single checkbox grid row with the specified options
+     */
+    private void fillCheckboxGridRow(WebDriver driver, WebElement rowElement,
+            List<String> optionTexts, WebDriverWait wait, boolean humanLike) {
+        try {
+            // Find all checkboxes in the row - use more specific selector
+            List<WebElement> checkboxes = rowElement
+                    .findElements(By.cssSelector("[role='checkbox']:not([aria-disabled='true'])"));
+
+            if (checkboxes.isEmpty()) {
+                log.warn("No checkboxes found in row");
+                return;
+            }
+
+            log.debug("Found {} checkboxes in row", checkboxes.size());
+
+            // Fill each specified option
+            for (String optionText : optionTexts) {
+                WebElement targetCheckbox = findCheckboxGridOption(checkboxes, optionText);
+
+                if (targetCheckbox != null) {
+                    try {
+                        // Check if checkbox is already selected
+                        String ariaChecked = targetCheckbox.getAttribute("aria-checked");
+                        if ("true".equals(ariaChecked)) {
+                            log.debug("Checkbox for option '{}' is already selected", optionText);
+                            continue;
+                        }
+
+                        // Scroll to the element to ensure it's visible
+                        ((JavascriptExecutor) driver).executeScript(
+                                "arguments[0].scrollIntoView({block: 'center'});", targetCheckbox);
+
+                        // Wait for element to be clickable
+                        wait.until(ExpectedConditions.elementToBeClickable(targetCheckbox));
+
+                        // Try JavaScript click first for better reliability
+                        try {
+                            ((JavascriptExecutor) driver).executeScript("arguments[0].click();",
+                                    targetCheckbox);
+                            log.debug("Clicked checkbox for option '{}' using JavaScript",
+                                    optionText);
+                        } catch (Exception jsError) {
+                            log.debug("JavaScript click failed, trying regular click: {}",
+                                    jsError.getMessage());
+                            targetCheckbox.click();
+                            log.debug("Clicked checkbox for option '{}' using regular click",
+                                    optionText);
+                        }
+
+                        log.info("Selected checkbox option '{}' in row", optionText);
+
+                        // Add delay in human-like mode
+                        if (humanLike) {
+                            Thread.sleep(50 + new Random().nextInt(100));
+                        }
+                    } catch (Exception e) {
+                        log.error("Error clicking checkbox for option '{}': {}", optionText,
+                                e.getMessage());
+                    }
+                } else {
+                    log.warn("Checkbox option '{}' not found in row", optionText);
+                }
+            }
+
+        } catch (Exception e) {
+            log.error("Error filling checkbox grid row: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Find a checkbox by option text in checkbox grid
+     */
+    private WebElement findCheckboxGridOption(List<WebElement> checkboxes, String optionText) {
+        String normalizedOptionText = normalizeText(optionText);
+
+        for (WebElement checkbox : checkboxes) {
+            try {
+                // Try data-answer-value attribute first (Google Forms specific)
+                String dataAnswerValue = checkbox.getAttribute("data-answer-value");
+                if (dataAnswerValue != null
+                        && normalizeText(dataAnswerValue).equals(normalizedOptionText)) {
+                    log.debug("Found checkbox using data-answer-value: {}", dataAnswerValue);
+                    return checkbox;
+                }
+
+                // Try aria-label attribute
+                String ariaLabel = checkbox.getAttribute("aria-label");
+                if (ariaLabel != null && normalizeText(ariaLabel).contains(normalizedOptionText)) {
+                    log.debug("Found checkbox using aria-label: {}", ariaLabel);
+                    return checkbox;
+                }
+
+                // Try text content
+                String checkboxText = checkbox.getText();
+                if (checkboxText != null
+                        && normalizeText(checkboxText).contains(normalizedOptionText)) {
+                    log.debug("Found checkbox using text content: {}", checkboxText);
+                    return checkbox;
+                }
+
+                // Try finding text in child elements
+                List<WebElement> childElements = checkbox.findElements(By.cssSelector("*"));
+                for (WebElement child : childElements) {
+                    String childText = child.getText();
+                    if (childText != null
+                            && normalizeText(childText).contains(normalizedOptionText)) {
+                        log.debug("Found checkbox using child element text: {}", childText);
+                        return checkbox;
+                    }
+                }
+
+            } catch (Exception e) {
+                log.debug("Error processing checkbox: {}", e.getMessage());
+                // Continue to next checkbox
+                continue;
+            }
+        }
+
+        log.debug("No checkbox found for option: {}", optionText);
+        return null;
+    }
+
+    /**
+     * Normalize text for comparison
+     */
+    private String normalizeText(String text) {
+        if (text == null) {
+            return "";
+        }
+        return text.trim().toLowerCase().replaceAll("\\s+", " ");
     }
 
     /**
@@ -2328,6 +2424,28 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     }
 
     /**
+     * Check if WebDriver has been quit
+     * 
+     * @param driver The WebDriver instance to check
+     * @return True if WebDriver is quit, false otherwise
+     */
+    private boolean isWebDriverQuit(WebDriver driver) {
+        if (driver == null) {
+            return true;
+        }
+
+        try {
+            // Try to get current URL - this will throw exception if driver is quit
+            String currentUrl = driver.getCurrentUrl();
+            return currentUrl == null;
+        } catch (Exception e) {
+            // If we get any exception, driver is likely quit
+            log.debug("WebDriver appears to be quit: {}", e.getMessage());
+            return true;
+        }
+    }
+
+    /**
      * Normalize question title for comparison by removing extra whitespace and newlines
      * 
      * @param title The question title to normalize
@@ -2347,6 +2465,12 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     private void debugGridStructure(WebElement questionElement, String rowRole, String optionRole) {
         try {
             log.info("=== Grid Structure Debug ===");
+
+            // Check if questionElement is still valid
+            if (questionElement == null) {
+                log.error("Question element is null, cannot debug grid structure");
+                return;
+            }
 
             // Find all rows
             List<WebElement> rows =
@@ -2381,5 +2505,813 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             log.error("Error in debugGridStructure: {}", e.getMessage());
         }
     }
+
+    /**
+     * Find popup container near the dropdown trigger using proximity and structure
+     */
+    private WebElement findPopupContainerNearDropdown(WebDriver driver, WebElement dropdownTrigger,
+            WebDriverWait wait) {
+        try {
+            // Get dropdown position
+            org.openqa.selenium.Point dropdownLocation = dropdownTrigger.getLocation();
+            int dropdownX = dropdownLocation.getX();
+            int dropdownY = dropdownLocation.getY();
+
+            log.debug("Dropdown location: x={}, y={}", dropdownX, dropdownY);
+
+            // Find all popup containers
+            List<WebElement> allPopupContainers = driver.findElements(By.xpath(
+                    "//div[@role='presentation' and .//div[@role='option'] and not(contains(@style, 'display: none')) and not(contains(@style, 'visibility: hidden'))]"));
+
+            // Find the closest popup container to the dropdown
+            WebElement closestContainer = null;
+            int minDistance = Integer.MAX_VALUE;
+
+            for (WebElement container : allPopupContainers) {
+                try {
+                    org.openqa.selenium.Point containerLocation = container.getLocation();
+                    int containerX = containerLocation.getX();
+                    int containerY = containerLocation.getY();
+
+                    // Calculate distance (Manhattan distance for simplicity)
+                    int distance =
+                            Math.abs(containerX - dropdownX) + Math.abs(containerY - dropdownY);
+
+                    log.debug("Popup container at x={}, y={}, distance={}", containerX, containerY,
+                            distance);
+
+                    if (distance < minDistance) {
+                        minDistance = distance;
+                        closestContainer = container;
+                    }
+                } catch (Exception e) {
+                    log.debug("Could not get location for popup container: {}", e.getMessage());
+                    continue;
+                }
+            }
+
+            if (closestContainer != null) {
+                log.debug("Found closest popup container at distance: {}", minDistance);
+                return closestContainer;
+            }
+
+            return null;
+        } catch (Exception e) {
+            log.debug("Error finding popup container near dropdown: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Find popup container by question-specific attributes
+     */
+    private WebElement findPopupContainerByQuestionAttributes(WebDriver driver,
+            WebElement dropdownTrigger, String questionTitle, WebDriverWait wait) {
+        try {
+            // Get the dropdown's aria-labelledby and aria-describedby
+            String dropdownAriaLabelledBy = dropdownTrigger.getAttribute("aria-labelledby");
+            String dropdownAriaDescribedBy = dropdownTrigger.getAttribute("aria-describedby");
+
+            log.debug(
+                    "Looking for popup container for question '{}' with aria-labelledby: {} and aria-describedby: {}",
+                    questionTitle, dropdownAriaLabelledBy, dropdownAriaDescribedBy);
+
+            // Find all popup containers
+            List<WebElement> allPopupContainers = driver.findElements(By.xpath(
+                    "//div[@role='presentation' and .//div[@role='option'] and not(contains(@style, 'display: none')) and not(contains(@style, 'visibility: hidden'))]"));
+
+            // Look for popup container that contains options with matching attributes
+            for (WebElement container : allPopupContainers) {
+                try {
+                    List<WebElement> options =
+                            container.findElements(By.cssSelector("[role='option']"));
+
+                    // Check if any option has matching aria-labelledby or aria-describedby
+                    for (WebElement option : options) {
+                        String optionAriaLabelledBy = option.getAttribute("aria-labelledby");
+                        String optionAriaDescribedBy = option.getAttribute("aria-describedby");
+
+                        boolean labelledByMatches = dropdownAriaLabelledBy != null
+                                && dropdownAriaLabelledBy.equals(optionAriaLabelledBy);
+                        boolean describedByMatches = dropdownAriaDescribedBy != null
+                                && dropdownAriaDescribedBy.equals(optionAriaDescribedBy);
+
+                        if (labelledByMatches || describedByMatches) {
+                            log.debug(
+                                    "Found popup container with matching attributes for question: {}",
+                                    questionTitle);
+                            return container;
+                        }
+                    }
+
+                    // Additional check: Look for options that contain the question title in their
+                    // attributes
+                    for (WebElement option : options) {
+                        String optionAriaLabel = option.getAttribute("aria-label");
+                        if (optionAriaLabel != null && optionAriaLabel.contains(questionTitle)) {
+                            log.debug(
+                                    "Found popup container with question title in aria-label for question: {}",
+                                    questionTitle);
+                            return container;
+                        }
+                    }
+
+                } catch (Exception e) {
+                    log.debug("Error checking popup container options: {}", e.getMessage());
+                    continue;
+                }
+            }
+
+            return null;
+        } catch (Exception e) {
+            log.debug("Error finding popup container by question attributes: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Find popup container by jsname attribute (Google Forms specific)
+     */
+    private WebElement findPopupContainerByJsname(WebDriver driver, WebElement dropdownTrigger,
+            WebDriverWait wait) {
+        try {
+            // Get the jsname from the dropdown trigger
+            String dropdownJsname = dropdownTrigger.getAttribute("jsname");
+            if (dropdownJsname == null || dropdownJsname.trim().isEmpty()) {
+                log.debug("Dropdown has no jsname attribute");
+                return null;
+            }
+
+            log.debug("Looking for popup container with jsname: {}", dropdownJsname);
+
+            // Enhanced popup container finding with multiple strategies
+            // Strategy 1: Look for popup container with specific jsname V68bde (Google Forms
+            // specific)
+            try {
+                WebElement popupContainer =
+                        wait.until(ExpectedConditions.visibilityOfElementLocated(By.xpath(
+                                "//div[@jsname='V68bde' and @role='presentation' and .//div[@role='option'] and not(contains(@style, 'display: none')) and not(contains(@style, 'visibility: hidden'))]")));
+                log.debug("Found popup container with jsname V68bde");
+                return popupContainer;
+            } catch (Exception e) {
+                log.debug("Could not find popup container with jsname V68bde: {}", e.getMessage());
+            }
+
+            // Strategy 2: Look for popup container with stable attributes (no dynamic classes)
+            try {
+                WebElement popupContainer =
+                        wait.until(ExpectedConditions.visibilityOfElementLocated(By.xpath(
+                                "//div[@role='presentation' and .//div[@role='option'] and .//span[@jsslot] and not(contains(@style, 'display: none')) and not(contains(@style, 'visibility: hidden'))]")));
+                log.debug("Found popup container with jsslot span structure");
+                return popupContainer;
+            } catch (Exception e) {
+                log.debug("Could not find popup container with jsslot span structure: {}",
+                        e.getMessage());
+            }
+
+            // Strategy 3: Look for popup container with data-value attributes
+            try {
+                WebElement popupContainer =
+                        wait.until(ExpectedConditions.visibilityOfElementLocated(By.xpath(
+                                "//div[@role='presentation' and .//div[@role='option' and @data-value] and not(contains(@style, 'display: none')) and not(contains(@style, 'visibility: hidden'))]")));
+                log.debug("Found popup container with data-value options");
+                return popupContainer;
+            } catch (Exception e) {
+                log.debug("Could not find popup container with data-value options: {}",
+                        e.getMessage());
+            }
+
+            // Strategy 4: Look for any visible popup container with options
+            try {
+                List<WebElement> popupContainers = driver.findElements(By.xpath(
+                        "//div[@role='presentation' and .//div[@role='option'] and not(contains(@style, 'display: none')) and not(contains(@style, 'visibility: hidden'))]"));
+
+                // Find the most recently appeared popup container (likely the one we just opened)
+                if (!popupContainers.isEmpty()) {
+                    log.debug("Found {} popup containers, using the first visible one",
+                            popupContainers.size());
+                    return popupContainers.get(0);
+                }
+            } catch (Exception e) {
+                log.debug("Could not find any popup containers: {}", e.getMessage());
+            }
+
+            return null;
+        } catch (Exception e) {
+            log.debug("Error finding popup container by jsname: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Find popup container by matching aria-labelledby and aria-describedby attributes
+     */
+    private WebElement findPopupContainerByAriaLabelledBy(WebDriver driver,
+            WebElement dropdownTrigger, WebDriverWait wait) {
+        try {
+            // Get the aria-labelledby and aria-describedby from the dropdown trigger
+            String dropdownAriaLabelledBy = dropdownTrigger.getAttribute("aria-labelledby");
+            String dropdownAriaDescribedBy = dropdownTrigger.getAttribute("aria-describedby");
+
+            if (dropdownAriaLabelledBy == null || dropdownAriaLabelledBy.trim().isEmpty()) {
+                log.debug("Dropdown has no aria-labelledby attribute");
+                return null;
+            }
+
+            log.debug(
+                    "Looking for popup container with aria-labelledby: {} and aria-describedby: {}",
+                    dropdownAriaLabelledBy, dropdownAriaDescribedBy);
+
+            // Find all popup containers
+            List<WebElement> allPopupContainers = driver.findElements(By.xpath(
+                    "//div[@role='presentation' and .//div[@role='option'] and not(contains(@style, 'display: none')) and not(contains(@style, 'visibility: hidden'))]"));
+
+            // Look for popup container that contains options with matching attributes
+            for (WebElement container : allPopupContainers) {
+                try {
+                    List<WebElement> options =
+                            container.findElements(By.cssSelector("[role='option']"));
+                    for (WebElement option : options) {
+                        String optionAriaLabelledBy = option.getAttribute("aria-labelledby");
+                        String optionAriaDescribedBy = option.getAttribute("aria-describedby");
+
+                        // Check if aria-labelledby matches
+                        boolean labelledByMatches =
+                                dropdownAriaLabelledBy.equals(optionAriaLabelledBy);
+
+                        // Check if aria-describedby matches (if both have it)
+                        boolean describedByMatches = false;
+                        if (dropdownAriaDescribedBy != null && optionAriaDescribedBy != null) {
+                            describedByMatches =
+                                    dropdownAriaDescribedBy.equals(optionAriaDescribedBy);
+                        }
+
+                        if (labelledByMatches || describedByMatches) {
+                            log.debug(
+                                    "Found popup container with matching attributes - labelledBy: {}, describedBy: {}",
+                                    labelledByMatches, describedByMatches);
+                            return container;
+                        }
+                    }
+                } catch (Exception e) {
+                    log.debug("Error checking popup container options: {}", e.getMessage());
+                    continue;
+                }
+            }
+
+            return null;
+        } catch (Exception e) {
+            log.debug("Error finding popup container by aria-labelledby: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Fallback strategy for filling combobox when popup container is not found This method tries
+     * multiple strategies to find and click options
+     */
+    private void fillComboboxWithFallbackStrategy(WebDriver driver, WebElement dropdownTrigger,
+            String questionTitle, String optionText, boolean humanLike) {
+        try {
+            log.info("Using fallback strategy for combobox question: {}", questionTitle);
+
+            WebDriverWait wait = new WebDriverWait(driver, java.time.Duration.ofSeconds(10));
+
+            // Ensure dropdown is expanded
+            String ariaExpanded = dropdownTrigger.getAttribute("aria-expanded");
+            if (!"true".equals(ariaExpanded)) {
+                log.warn("Dropdown not expanded in fallback strategy, trying to expand it");
+                // Try multiple click strategies
+                try {
+                    // Strategy 1: Regular click
+                    dropdownTrigger.click();
+                    Thread.sleep(500);
+                } catch (Exception e1) {
+                    log.debug("Regular click failed: {}", e1.getMessage());
+                    try {
+                        // Strategy 2: JavaScript click
+                        ((JavascriptExecutor) driver).executeScript("arguments[0].click();",
+                                dropdownTrigger);
+                        Thread.sleep(500);
+                    } catch (Exception e2) {
+                        log.debug("JavaScript click failed: {}", e2.getMessage());
+                        try {
+                            // Strategy 3: Focus and click
+                            dropdownTrigger.sendKeys(Keys.SPACE);
+                            Thread.sleep(500);
+                        } catch (Exception e3) {
+                            log.debug("Space key failed: {}", e3.getMessage());
+                        }
+                    }
+                }
+
+                // Check if dropdown expanded
+                ariaExpanded = dropdownTrigger.getAttribute("aria-expanded");
+                log.debug("Dropdown aria-expanded after fallback expansion: {}", ariaExpanded);
+            }
+
+            // Wait a bit for dropdown to expand
+            Thread.sleep(1000); // Increased wait time for dropdown to expand
+
+            // Strategy 1: Try to find options directly within the dropdown trigger
+            List<WebElement> options =
+                    dropdownTrigger.findElements(By.cssSelector("[role='option']"));
+            log.info("Strategy 1: Found {} options within dropdown trigger", options.size());
+
+            if (!options.isEmpty()) {
+                // Try to select the option
+                boolean found = false;
+                String normalizedOptionText = normalize(optionText);
+
+                for (WebElement option : options) {
+                    try {
+                        String dataValue = normalize(option.getAttribute("data-value"));
+                        String spanText = "";
+
+                        try {
+                            WebElement span = option.findElement(By.tagName("span"));
+                            spanText = normalize(span.getText());
+                        } catch (Exception ignore) {
+                        }
+
+                        if ((!dataValue.isEmpty() && dataValue.equals(normalizedOptionText))
+                                || (!spanText.isEmpty() && spanText.equals(normalizedOptionText))) {
+
+                            try {
+                                ((JavascriptExecutor) driver).executeScript("arguments[0].click();",
+                                        option);
+                                log.info("Selected option '{}' using fallback strategy 1",
+                                        optionText);
+                                found = true;
+                                break;
+                            } catch (Exception e) {
+                                log.debug("Fallback strategy 1 click failed: {}", e.getMessage());
+                            }
+                        }
+                    } catch (Exception e) {
+                        log.debug("Error processing option in fallback strategy 1: {}",
+                                e.getMessage());
+                    }
+                }
+
+                if (found) {
+                    return;
+                }
+            }
+
+            // Strategy 2: Try to find options in the entire page
+            log.info("Strategy 2: Looking for options in entire page");
+            List<WebElement> allOptions = driver.findElements(By.cssSelector("[role='option']"));
+            log.info("Found {} total options in page", allOptions.size());
+
+            String normalizedOptionText = normalize(optionText);
+            for (WebElement option : allOptions) {
+                try {
+                    String dataValue = normalize(option.getAttribute("data-value"));
+                    String spanText = "";
+
+                    try {
+                        WebElement span = option.findElement(By.tagName("span"));
+                        spanText = normalize(span.getText());
+                    } catch (Exception ignore) {
+                    }
+
+                    if ((!dataValue.isEmpty() && dataValue.equals(normalizedOptionText))
+                            || (!spanText.isEmpty() && spanText.equals(normalizedOptionText))) {
+
+                        try {
+                            ((JavascriptExecutor) driver).executeScript("arguments[0].click();",
+                                    option);
+                            log.info("Selected option '{}' using fallback strategy 2", optionText);
+                            return;
+                        } catch (Exception e) {
+                            log.debug("Fallback strategy 2 click failed: {}", e.getMessage());
+                        }
+                    }
+                } catch (Exception e) {
+                    log.debug("Error processing option in fallback strategy 2: {}", e.getMessage());
+                }
+            }
+
+            log.error("All fallback strategies failed for combobox question: {}", questionTitle);
+
+        } catch (Exception e) {
+            log.error("Error in fallback strategy for combobox question '{}': {}", questionTitle,
+                    e.getMessage());
+        }
+    }
+
+    /**
+     * Find option element using stable attributes (no dynamic classes)
+     */
+    private WebElement findOptionByStableAttributes(WebElement popupContainer, String optionText) {
+        try {
+            String normalizedOptionText = normalize(optionText);
+            List<WebElement> options =
+                    popupContainer.findElements(By.cssSelector("[role='option']"));
+
+            for (WebElement option : options) {
+                try {
+                    // Strategy 1: Check data-value attribute (most stable)
+                    String dataValue = normalize(option.getAttribute("data-value"));
+                    if (!dataValue.isEmpty() && dataValue.equals(normalizedOptionText)) {
+                        log.debug("Found option by data-value: '{}'", dataValue);
+                        return option;
+                    }
+
+                    // Strategy 2: Check aria-label attribute
+                    String ariaLabel = normalize(option.getAttribute("aria-label"));
+                    if (!ariaLabel.isEmpty() && ariaLabel.equals(normalizedOptionText)) {
+                        log.debug("Found option by aria-label: '{}'", ariaLabel);
+                        return option;
+                    }
+
+                    // Strategy 3: Check span text with jsslot attribute
+                    try {
+                        WebElement span = option.findElement(By.cssSelector("span[jsslot]"));
+                        String spanText = normalize(span.getText());
+                        if (!spanText.isEmpty() && spanText.equals(normalizedOptionText)) {
+                            log.debug("Found option by span text: '{}'", spanText);
+                            return option;
+                        }
+                    } catch (Exception e) {
+                        // Span not found, continue
+                    }
+
+                    // Strategy 4: Check any text content in the option
+                    String optionTextContent = normalize(option.getText());
+                    if (!optionTextContent.isEmpty()
+                            && optionTextContent.equals(normalizedOptionText)) {
+                        log.debug("Found option by text content: '{}'", optionTextContent);
+                        return option;
+                    }
+
+                } catch (Exception e) {
+                    log.debug("Error checking option: {}", e.getMessage());
+                    continue;
+                }
+            }
+
+            return null;
+        } catch (Exception e) {
+            log.error("Error finding option by stable attributes: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Enhanced method to select an option from a popup container with better reliability
+     */
+    private boolean selectOptionFromPopup(WebDriver driver, WebElement popupContainer,
+            String optionText, String questionTitle, WebDriverWait wait) {
+        try {
+            log.debug("Attempting to select option '{}' from popup for question: {}", optionText,
+                    questionTitle);
+
+            // Wait for popup to be fully loaded and ready
+            if (!waitForPopupReady(driver, popupContainer, wait)) {
+                log.warn("Popup container not ready for interaction");
+                return false;
+            }
+
+            // Find the target option using stable attributes
+            WebElement targetOption = findOptionByStableAttributes(popupContainer, optionText);
+            if (targetOption == null) {
+                log.error("Could not find option '{}' in popup container", optionText);
+                return false;
+            }
+
+            log.debug("Found target option, attempting to click");
+
+            // Enhanced click strategy with multiple approaches
+            boolean clickSuccess = false;
+
+            // Strategy 1: Try clicking the span element with jsslot attribute
+            try {
+                WebElement spanElement = targetOption.findElement(By.cssSelector("span[jsslot]"));
+                ((JavascriptExecutor) driver).executeScript("arguments[0].click();", spanElement);
+                log.info("Selected option '{}' for question: {} using span click", optionText,
+                        questionTitle);
+                clickSuccess = true;
+            } catch (Exception spanClickException) {
+                log.debug("Span click failed: {}", spanClickException.getMessage());
+            }
+
+            // Strategy 2: Try JavaScript click on the option element
+            if (!clickSuccess) {
+                try {
+                    ((JavascriptExecutor) driver).executeScript("arguments[0].click();",
+                            targetOption);
+                    log.info("Selected option '{}' for question: {} using JavaScript click",
+                            optionText, questionTitle);
+                    clickSuccess = true;
+                } catch (Exception jsClickException) {
+                    log.debug("JavaScript click failed: {}", jsClickException.getMessage());
+                }
+            }
+
+            // Strategy 3: Try regular click with explicit wait
+            if (!clickSuccess) {
+                try {
+                    wait.until(ExpectedConditions.elementToBeClickable(targetOption));
+                    targetOption.click();
+                    log.info("Selected option '{}' for question: {} using regular click",
+                            optionText, questionTitle);
+                    clickSuccess = true;
+                } catch (Exception regularClickException) {
+                    log.debug("Regular click failed: {}", regularClickException.getMessage());
+                }
+            }
+
+            // Strategy 4: Try using Enter key on the option
+            if (!clickSuccess) {
+                try {
+                    targetOption.sendKeys(Keys.ENTER);
+                    log.info("Selected option '{}' for question: {} using Enter key", optionText,
+                            questionTitle);
+                    clickSuccess = true;
+                } catch (Exception enterKeyException) {
+                    log.debug("Enter key failed: {}", enterKeyException.getMessage());
+                }
+            }
+
+            // Strategy 5: Try using Space key on the option
+            if (!clickSuccess) {
+                try {
+                    targetOption.sendKeys(Keys.SPACE);
+                    log.info("Selected option '{}' for question: {} using Space key", optionText,
+                            questionTitle);
+                    clickSuccess = true;
+                } catch (Exception spaceKeyException) {
+                    log.debug("Space key failed: {}", spaceKeyException.getMessage());
+                }
+            }
+
+            if (clickSuccess) {
+                // Wait a bit for the selection to register
+                Thread.sleep(200);
+
+                // Verify the selection was successful
+                if (verifyOptionSelection(driver, optionText, questionTitle)) {
+                    log.info("Option selection verified successfully for question: {}",
+                            questionTitle);
+                    return true;
+                } else {
+                    log.warn("Option selection verification failed for question: {}",
+                            questionTitle);
+                    return false;
+                }
+            } else {
+                log.warn("All click strategies failed for option '{}'", optionText);
+                return false;
+            }
+
+        } catch (Exception e) {
+            log.error("Error selecting option from popup for question '{}': {}", questionTitle,
+                    e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Verify that the option selection was successful by checking the dropdown trigger
+     */
+    private boolean verifyOptionSelection(WebDriver driver, String optionText,
+            String questionTitle) {
+        try {
+            // Wait a bit for the selection to be reflected in the UI
+            Thread.sleep(300);
+
+            // Look for the dropdown trigger that should now show the selected option
+            List<WebElement> dropdownTriggers =
+                    driver.findElements(By.cssSelector("[role='listbox']"));
+
+            for (WebElement trigger : dropdownTriggers) {
+                try {
+                    // Check if the trigger contains the selected option text
+                    String triggerText = trigger.getText();
+                    String normalizedTriggerText = normalize(triggerText);
+                    String normalizedOptionText = normalize(optionText);
+
+                    if (normalizedTriggerText.contains(normalizedOptionText)) {
+                        log.debug(
+                                "Option selection verified: trigger text '{}' contains selected option '{}'",
+                                triggerText, optionText);
+                        return true;
+                    }
+
+                    // Also check aria-label attribute
+                    String ariaLabel = trigger.getAttribute("aria-label");
+                    if (ariaLabel != null && normalize(ariaLabel).contains(normalizedOptionText)) {
+                        log.debug(
+                                "Option selection verified: aria-label '{}' contains selected option '{}'",
+                                ariaLabel, optionText);
+                        return true;
+                    }
+                } catch (Exception e) {
+                    log.debug("Error checking dropdown trigger: {}", e.getMessage());
+                }
+            }
+
+            log.warn("Could not verify option selection for question: {}", questionTitle);
+            return false;
+        } catch (Exception e) {
+            log.error("Error verifying option selection: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Wait for popup container to be fully loaded and ready for interaction
+     */
+    private boolean waitForPopupReady(WebDriver driver, WebElement popupContainer,
+            WebDriverWait wait) {
+        try {
+            // Wait for popup to be visible
+            wait.until(ExpectedConditions.visibilityOf(popupContainer));
+
+            // Wait for options to be loaded
+            wait.until(
+                    ExpectedConditions.presenceOfElementLocated(By.cssSelector("[role='option']")));
+
+            // Wait a bit more for any animations to complete
+            Thread.sleep(300);
+
+            // Verify that options are actually clickable
+            List<WebElement> options =
+                    popupContainer.findElements(By.cssSelector("[role='option']"));
+            if (options.isEmpty()) {
+                log.warn("No options found in popup container after waiting");
+                return false;
+            }
+
+            // Try to wait for at least one option to be clickable
+            try {
+                wait.until(ExpectedConditions.elementToBeClickable(options.get(0)));
+                log.debug("Popup container is ready with {} options", options.size());
+                return true;
+            } catch (Exception e) {
+                log.warn("Options not clickable after waiting: {}", e.getMessage());
+                return false;
+            }
+        } catch (Exception e) {
+            log.error("Error waiting for popup to be ready: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Normalize string for comparison (unicode normalization, trim, lowercase)
+     */
+    private String normalize(String s) {
+        if (s == null)
+            return "";
+        return java.text.Normalizer.normalize(s.trim(), java.text.Normalizer.Form.NFC)
+                .toLowerCase();
+    }
+
+    /**
+     * Retry mechanism for finding FillRequest by ID
+     */
+    private FillRequest findFillRequestWithRetry(UUID fillRequestId) {
+        int maxRetries = 3;
+        int retryCount = 0;
+        Exception lastException = null;
+        while (retryCount < maxRetries) {
+            try {
+                java.util.Optional<FillRequest> optional =
+                        fillRequestRepository.findById(fillRequestId);
+                if (optional.isPresent()) {
+                    log.info("Found FillRequest {} on attempt {}", fillRequestId, retryCount + 1);
+                    return optional.get();
+                }
+            } catch (Exception e) {
+                lastException = e;
+                log.warn("Error finding FillRequest {} (attempt {}): {}", fillRequestId,
+                        retryCount + 1, e.getMessage());
+            }
+            retryCount++;
+            if (retryCount < maxRetries) {
+                try {
+                    Thread.sleep(1000L * retryCount); // Exponential backoff
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+        }
+        log.error("Failed to find FillRequest {} after {} attempts", fillRequestId, maxRetries);
+        if (lastException != null) {
+            throw new ResourceNotFoundException("FillRequest", "id", fillRequestId);
+        } else {
+            throw new ResourceNotFoundException("FillRequest", "id", fillRequestId);
+        }
+    }
+
+    /**
+     * Execute a single form fill task and update counters
+     */
+    private void executeFormFillTask(UUID fillRequestId, String link,
+            Map<Question, QuestionOption> plan, boolean humanLike, AtomicInteger successCount,
+            AtomicInteger failCount) {
+        try {
+            boolean success = executeFormFill(fillRequestId, link, plan, humanLike);
+            if (success) {
+                successCount.incrementAndGet();
+                log.info("Form fill task succeeded for fillRequest {}", fillRequestId);
+            } else {
+                failCount.incrementAndGet();
+                log.warn("Form fill task failed for fillRequest {}", fillRequestId);
+            }
+        } catch (Exception e) {
+            failCount.incrementAndGet();
+            log.error("Exception during form fill task for fillRequest {}: {}", fillRequestId,
+                    e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Find a question element from a map by normalized title
+     */
+    private WebElement findQuestionElementFromMap(String questionTitle,
+            Map<String, WebElement> questionMap, UUID fillRequestId) {
+        if (questionTitle == null || questionMap == null) {
+            log.warn(
+                    "findQuestionElementFromMap: questionTitle or questionMap is null for fillRequest {}",
+                    fillRequestId);
+            return null;
+        }
+        String normalizedTitle = questionTitle.replace("*", "").trim().toLowerCase();
+        WebElement element = questionMap.get(normalizedTitle);
+        if (element != null) {
+            log.debug("Found question element for '{}' in fillRequest {}", questionTitle,
+                    fillRequestId);
+        } else {
+            log.warn("Question element not found for '{}' in fillRequest {}", questionTitle,
+                    fillRequestId);
+        }
+        return element;
+    }
+
+    /**
+     * Generate random text by question type or title using TestDataEnum or fallback
+     */
+    private String generateTextByQuestionType(String questionTitle) {
+        try {
+            String lower = questionTitle.toLowerCase();
+            if (lower.contains("email")) {
+                String value = TestDataEnum.getRandomEmail();
+                log.debug("Generated email for '{}': {}", questionTitle, value);
+                return value;
+            } else if (lower.contains("tên") || lower.contains("name")) {
+                String value = TestDataEnum.getRandomName();
+                log.debug("Generated name for '{}': {}", questionTitle, value);
+                return value;
+            } else if (lower.contains("số điện thoại") || lower.contains("phone")) {
+                String value = TestDataEnum.getRandomPhoneNumber();
+                log.debug("Generated phone for '{}': {}", questionTitle, value);
+                return value;
+            } else if (lower.contains("địa chỉ") || lower.contains("address")) {
+                String value = TestDataEnum.getRandomAddress();
+                log.debug("Generated address for '{}': {}", questionTitle, value);
+                return value;
+            } else if (lower.contains("góp ý") || lower.contains("feedback")
+                    || lower.contains("nhận xét") || lower.contains("ý kiến")) {
+                String value = TestDataEnum.getRandomFeedback();
+                log.debug("Generated feedback for '{}': {}", questionTitle, value);
+                return value;
+            }
+            // Fallback: generate a random string
+            String fallback = "AutoGen-" + java.util.UUID.randomUUID().toString().substring(0, 8);
+            log.debug("Generated fallback text for '{}': {}", questionTitle, fallback);
+            return fallback;
+        } catch (Exception e) {
+            log.error("Error generating text for '{}': {}", questionTitle, e.getMessage());
+            return "AutoGen-Error";
+        }
+    }
+
+    /**
+     * Build a map of normalized question titles to their WebElement containers.
+     */
+    private Map<String, WebElement> buildQuestionMap(List<WebElement> questionElements) {
+        Map<String, WebElement> questionMap = new HashMap<>();
+        for (WebElement element : questionElements) {
+            try {
+                List<WebElement> headings =
+                        element.findElements(By.cssSelector("[role='heading']"));
+                if (!headings.isEmpty()) {
+                    String title = headings.get(0).getText().replace("*", "").trim();
+                    if (!title.isEmpty()) {
+                        String normalizedTitle = title.toLowerCase();
+                        questionMap.put(normalizedTitle, element);
+                    }
+                }
+            } catch (Exception ignore) {
+            }
+        }
+        return questionMap;
+    }
 }
+
 
