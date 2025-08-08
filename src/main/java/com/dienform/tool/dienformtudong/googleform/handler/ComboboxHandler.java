@@ -12,8 +12,7 @@ import org.springframework.stereotype.Component;
 import lombok.extern.slf4j.Slf4j;
 
 /**
- * Dedicated handler for combobox/dropdown question types This class is separated from
- * GoogleFormServiceImpl to avoid affecting other question types
+ * Dedicated handler for combobox/dropdown question types
  */
 @Component
 @Slf4j
@@ -36,33 +35,49 @@ public class ComboboxHandler {
         return false;
       }
 
-      // Click to expand dropdown
-      if (!expandDropdown(driver, dropdownTrigger, questionTitle, wait)) {
-        log.error("Could not expand dropdown for question: {}", questionTitle);
-        return false;
+      // Disable page scrolling to prevent interference with popup
+      disablePageScrolling(driver);
+
+      try {
+        // Click to expand dropdown
+        if (!expandDropdown(driver, dropdownTrigger, questionTitle, wait)) {
+          log.error("Could not expand dropdown for question: {}", questionTitle);
+          return false;
+        }
+
+        // Find and validate popup container
+        WebElement popupContainer =
+            findAndValidatePopupContainer(driver, dropdownTrigger, questionTitle, wait);
+        if (popupContainer == null) {
+          log.error("Could not find or validate popup container for question: {}", questionTitle);
+          return false;
+        }
+
+        // Select option from popup without scrolling
+        boolean success = selectOptionFromPopupWithoutScrolling(driver, popupContainer, optionText,
+            questionTitle, wait);
+
+        if (success) {
+          log.info("Successfully filled combobox question: '{}'", questionTitle);
+        } else {
+          log.error("Failed to fill combobox question: '{}'", questionTitle);
+        }
+
+        return success;
+
+      } finally {
+        // Always re-enable scrolling after popup interaction
+        enablePageScrolling(driver);
       }
-
-      // Find popup container
-      WebElement popupContainer = findPopupContainer(driver, dropdownTrigger, wait);
-      if (popupContainer == null) {
-        log.error("Could not find popup container for question: {}", questionTitle);
-        return false;
-      }
-
-      // Select option from popup
-      boolean success =
-          selectOptionFromPopup(driver, popupContainer, optionText, questionTitle, wait);
-
-      if (success) {
-        log.info("Successfully filled combobox question: '{}'", questionTitle);
-      } else {
-        log.error("Failed to fill combobox question: '{}'", questionTitle);
-      }
-
-      return success;
 
     } catch (Exception e) {
       log.error("Error filling combobox question '{}': {}", questionTitle, e.getMessage());
+      // Ensure scrolling is re-enabled in case of error
+      try {
+        enablePageScrolling(driver);
+      } catch (Exception ex) {
+        log.debug("Error re-enabling scrolling: {}", ex.getMessage());
+      }
       return false;
     }
   }
@@ -90,7 +105,7 @@ public class ComboboxHandler {
   }
 
   /**
-   * Expand the dropdown by clicking on the trigger
+   * Expand the dropdown by clicking on the trigger without scrolling
    */
   private boolean expandDropdown(WebDriver driver, WebElement dropdownTrigger, String questionTitle,
       WebDriverWait wait) {
@@ -105,71 +120,93 @@ public class ComboboxHandler {
       } catch (Exception ignore) {
       }
 
-      // Scroll to the dropdown trigger to ensure it's visible and clickable
-      try {
-        ((JavascriptExecutor) driver)
-            .executeScript("arguments[0].scrollIntoView({block: 'center'});", dropdownTrigger);
-        Thread.sleep(200);
-      } catch (Exception e) {
-        log.debug("Could not scroll to dropdown trigger: {}", e.getMessage());
+      // Ensure dropdown trigger is visible without scrolling the page
+      // Only check if element is in viewport
+      boolean isInViewport = isElementInViewport(driver, dropdownTrigger);
+      if (!isInViewport) {
+        log.debug("Dropdown trigger not in viewport for question: {}", questionTitle);
+        // Don't scroll - let the calling code handle this
+        return false;
       }
 
       // Click to expand the dropdown with multiple strategies
       wait.until(ExpectedConditions.elementToBeClickable(dropdownTrigger));
 
-      // Strategy 1: Regular click
-      dropdownTrigger.click();
-      log.info("Clicked dropdown trigger for question: {}", questionTitle);
+      // Strategy 1: JavaScript click (most reliable, no scrolling)
+      try {
+        ((JavascriptExecutor) driver).executeScript("arguments[0].click();", dropdownTrigger);
+        log.info("Clicked dropdown trigger with JavaScript for question: {}", questionTitle);
+      } catch (Exception e) {
+        log.debug("JavaScript click failed: {}", e.getMessage());
 
-      // Verify dropdown expanded
-      Thread.sleep(500);
-      String ariaExpanded = dropdownTrigger.getAttribute("aria-expanded");
-      if (!"true".equals(ariaExpanded)) {
-        log.warn("Dropdown not expanded after regular click, trying JavaScript click");
+        // Strategy 2: Regular click as fallback
         try {
-          // Strategy 2: JavaScript click
-          ((JavascriptExecutor) driver).executeScript("arguments[0].click();", dropdownTrigger);
-          Thread.sleep(500);
-          ariaExpanded = dropdownTrigger.getAttribute("aria-expanded");
-        } catch (Exception e) {
-          log.debug("JavaScript click failed: {}", e.getMessage());
-        }
-
-        if (!"true".equals(ariaExpanded)) {
-          // Strategy 3: Keyboard toggle as fallback
-          try {
-            dropdownTrigger.sendKeys(Keys.SPACE);
-            Thread.sleep(400);
-            ariaExpanded = dropdownTrigger.getAttribute("aria-expanded");
-          } catch (Exception e) {
-            log.debug("Space key failed: {}", e.getMessage());
-          }
-        }
-
-        if (!"true".equals(ariaExpanded)) {
-          try {
-            dropdownTrigger.sendKeys(Keys.ENTER);
-            Thread.sleep(400);
-            ariaExpanded = dropdownTrigger.getAttribute("aria-expanded");
-          } catch (Exception e) {
-            log.debug("Enter key failed: {}", e.getMessage());
-          }
-        }
-
-        if (!"true".equals(ariaExpanded)) {
-          log.warn("Dropdown still not expanded after all strategies");
+          dropdownTrigger.click();
+          log.info("Clicked dropdown trigger with regular click for question: {}", questionTitle);
+        } catch (Exception e2) {
+          log.debug("Regular click also failed: {}", e2.getMessage());
           return false;
         }
       }
 
-      // Wait a bit for dropdown to expand
-      Thread.sleep(1000);
+      // Verify dropdown expanded with retries
+      boolean expanded = false;
+      for (int attempt = 0; attempt < 3; attempt++) {
+        Thread.sleep(300);
+        String ariaExpanded = dropdownTrigger.getAttribute("aria-expanded");
+        if ("true".equals(ariaExpanded)) {
+          expanded = true;
+          break;
+        }
+
+        if (attempt < 2) { // Not the last attempt
+          log.debug("Dropdown not expanded on attempt {}, retrying...", attempt + 1);
+          // Try keyboard toggle as additional strategy
+          try {
+            if (attempt == 0) {
+              dropdownTrigger.sendKeys(Keys.SPACE);
+            } else {
+              dropdownTrigger.sendKeys(Keys.ENTER);
+            }
+          } catch (Exception e) {
+            log.debug("Keyboard toggle failed on attempt {}: {}", attempt + 1, e.getMessage());
+          }
+        }
+      }
+
+      if (!expanded) {
+        log.warn("Dropdown still not expanded after all strategies for question: {}",
+            questionTitle);
+        return false;
+      }
+
+      // Wait for dropdown animation to complete
+      Thread.sleep(500);
 
       log.debug("Dropdown expanded successfully for question: {}", questionTitle);
       return true;
 
     } catch (Exception e) {
       log.error("Error expanding dropdown for question '{}': {}", questionTitle, e.getMessage());
+      return false;
+    }
+  }
+
+  /**
+   * Check if element is in viewport without scrolling
+   */
+  private boolean isElementInViewport(WebDriver driver, WebElement element) {
+    try {
+      JavascriptExecutor js = (JavascriptExecutor) driver;
+      Boolean result = (Boolean) js.executeScript(
+          "var rect = arguments[0].getBoundingClientRect();"
+              + "return (rect.top >= 0 && rect.left >= 0 && "
+              + "rect.bottom <= (window.innerHeight || document.documentElement.clientHeight) && "
+              + "rect.right <= (window.innerWidth || document.documentElement.clientWidth));",
+          element);
+      return result != null && result;
+    } catch (Exception e) {
+      log.debug("Error checking if element is in viewport: {}", e.getMessage());
       return false;
     }
   }
@@ -298,6 +335,249 @@ public class ComboboxHandler {
     } catch (Exception e) {
       log.debug("Error finding popup container: {}", e.getMessage());
       return null;
+    }
+  }
+
+  /**
+   * Disable page scrolling to prevent interference with popup interactions
+   */
+  private void disablePageScrolling(WebDriver driver) {
+    try {
+      JavascriptExecutor js = (JavascriptExecutor) driver;
+      js.executeScript("document.body.style.overflow = 'hidden';"
+          + "document.documentElement.style.overflow = 'hidden';"
+          + "window.scrollTo = function() {};" + "window.scrollBy = function() {};"
+          + "Element.prototype.scrollIntoView = function() {};");
+      log.debug("Page scrolling disabled for popup interaction");
+    } catch (Exception e) {
+      log.warn("Could not disable page scrolling: {}", e.getMessage());
+    }
+  }
+
+  /**
+   * Re-enable page scrolling after popup interaction
+   */
+  private void enablePageScrolling(WebDriver driver) {
+    try {
+      JavascriptExecutor js = (JavascriptExecutor) driver;
+      js.executeScript("document.body.style.overflow = '';"
+          + "document.documentElement.style.overflow = '';" + "delete window.scrollTo;"
+          + "delete window.scrollBy;" + "delete Element.prototype.scrollIntoView;");
+      log.debug("Page scrolling re-enabled");
+    } catch (Exception e) {
+      log.warn("Could not re-enable page scrolling: {}", e.getMessage());
+    }
+  }
+
+  /**
+   * Find and validate popup container to ensure it belongs to the correct dropdown
+   */
+  private WebElement findAndValidatePopupContainer(WebDriver driver, WebElement dropdownTrigger,
+      String questionTitle, WebDriverWait wait) {
+    try {
+      // First find the popup container
+      WebElement popupContainer = findPopupContainer(driver, dropdownTrigger, wait);
+      if (popupContainer == null) {
+        return null;
+      }
+
+      // Validate that the popup belongs to the correct dropdown
+      if (!validatePopupBelongsToDropdown(driver, popupContainer, dropdownTrigger, questionTitle)) {
+        log.warn("Found popup container but validation failed for question: {}", questionTitle);
+        return null;
+      }
+
+      // Additional validation: ensure popup has valid options
+      if (!validatePopupHasValidOptions(popupContainer)) {
+        log.warn("Popup container found but has no valid options for question: {}", questionTitle);
+        return null;
+      }
+
+      log.info("Successfully found and validated popup container for question: {}", questionTitle);
+      return popupContainer;
+
+    } catch (Exception e) {
+      log.error("Error finding and validating popup container: {}", e.getMessage());
+      return null;
+    }
+  }
+
+  /**
+   * Validate that popup container belongs to the specific dropdown trigger
+   */
+  private boolean validatePopupBelongsToDropdown(WebDriver driver, WebElement popupContainer,
+      WebElement dropdownTrigger, String questionTitle) {
+    try {
+      // Strategy 1: Check spatial proximity (popup should be near the trigger)
+      org.openqa.selenium.Point triggerLocation = dropdownTrigger.getLocation();
+      org.openqa.selenium.Point popupLocation = popupContainer.getLocation();
+
+      double distance = calculateDistance(triggerLocation, popupLocation);
+      // Allow reasonable distance (within 500 pixels)
+      if (distance > 500) {
+        log.debug("Popup too far from dropdown trigger: {} pixels", distance);
+        return false;
+      }
+
+      // Strategy 2: Check if dropdown is expanded when popup is visible
+      String expanded = dropdownTrigger.getAttribute("aria-expanded");
+      if (!"true".equals(expanded)) {
+        log.debug("Dropdown not expanded but popup found - possible mismatch");
+        return false;
+      }
+
+      // Strategy 3: Check if popup appears/disappears when toggling dropdown
+      try {
+        // First check if popup is visible
+        boolean popupVisible = popupContainer.isDisplayed();
+        if (!popupVisible) {
+          log.debug("Popup container not visible");
+          return false;
+        }
+
+        log.debug("Popup validation passed for question: {}", questionTitle);
+        return true;
+
+      } catch (Exception e) {
+        log.debug("Error during popup visibility check: {}", e.getMessage());
+        return false;
+      }
+
+    } catch (Exception e) {
+      log.warn("Error validating popup belongs to dropdown: {}", e.getMessage());
+      return false;
+    }
+  }
+
+  /**
+   * Validate that popup container has valid clickable options
+   */
+  private boolean validatePopupHasValidOptions(WebElement popupContainer) {
+    try {
+      List<WebElement> options = popupContainer.findElements(By.cssSelector("[role='option']"));
+
+      if (options.isEmpty()) {
+        log.debug("No options found in popup container");
+        return false;
+      }
+
+      // Check if at least one option is interactable
+      for (WebElement option : options) {
+        try {
+          if (option.isDisplayed() && option.isEnabled()) {
+            log.debug("Found {} valid options in popup container", options.size());
+            return true;
+          }
+        } catch (Exception e) {
+          // Continue checking other options
+        }
+      }
+
+      log.debug("No interactable options found in popup container");
+      return false;
+
+    } catch (Exception e) {
+      log.warn("Error validating popup options: {}", e.getMessage());
+      return false;
+    }
+  }
+
+  /**
+   * Select option from popup without allowing page scrolling
+   */
+  private boolean selectOptionFromPopupWithoutScrolling(WebDriver driver, WebElement popupContainer,
+      String optionText, String questionTitle, WebDriverWait wait) {
+    try {
+      log.debug("Selecting option '{}' from popup without scrolling for question: {}", optionText,
+          questionTitle);
+
+      // Wait for popup to be fully loaded and ready
+      if (!waitForPopupReady(driver, popupContainer, wait)) {
+        log.warn("Popup container not ready for interaction");
+        return false;
+      }
+
+      // Find the target option using stable attributes
+      WebElement targetOption = findOptionByStableAttributes(popupContainer, optionText);
+      if (targetOption == null) {
+        log.error("Could not find option '{}' in popup container", optionText);
+        return false;
+      }
+
+      log.debug("Found target option, attempting to click without scrolling");
+
+      // Enhanced click strategy without scrolling
+      boolean clickSuccess = false;
+
+      // Strategy 1: Try clicking the span element with jsslot attribute (stable)
+      try {
+        WebElement spanElement = targetOption.findElement(By.cssSelector("span[jsslot]"));
+        ((JavascriptExecutor) driver).executeScript("arguments[0].click();", spanElement);
+        log.info("Selected option '{}' for question: {} using span[jsslot] click", optionText,
+            questionTitle);
+        clickSuccess = true;
+      } catch (Exception spanClickException) {
+        log.debug("Span[jsslot] click failed: {}", spanClickException.getMessage());
+      }
+
+      // Strategy 2: Try JavaScript click on the option element
+      if (!clickSuccess) {
+        try {
+          ((JavascriptExecutor) driver).executeScript("arguments[0].click();", targetOption);
+          log.info("Selected option '{}' for question: {} using JavaScript click", optionText,
+              questionTitle);
+          clickSuccess = true;
+        } catch (Exception jsClickException) {
+          log.debug("JavaScript click failed: {}", jsClickException.getMessage());
+        }
+      }
+
+      // Strategy 3: Try regular click with explicit wait (last resort)
+      if (!clickSuccess) {
+        try {
+          wait.until(ExpectedConditions.elementToBeClickable(targetOption));
+          targetOption.click();
+          log.info("Selected option '{}' for question: {} using regular click", optionText,
+              questionTitle);
+          clickSuccess = true;
+        } catch (Exception regularClickException) {
+          log.debug("Regular click failed: {}", regularClickException.getMessage());
+        }
+      }
+
+      // Strategy 4: Try using Enter key on the option
+      if (!clickSuccess) {
+        try {
+          targetOption.sendKeys(Keys.ENTER);
+          log.info("Selected option '{}' for question: {} using Enter key", optionText,
+              questionTitle);
+          clickSuccess = true;
+        } catch (Exception enterKeyException) {
+          log.debug("Enter key failed: {}", enterKeyException.getMessage());
+        }
+      }
+
+      if (clickSuccess) {
+        // Wait a bit for the selection to register
+        Thread.sleep(200);
+
+        // Verify the selection was successful
+        if (verifyOptionSelection(driver, optionText, questionTitle)) {
+          log.info("Option selection verified successfully for question: {}", questionTitle);
+          return true;
+        } else {
+          log.warn("Option selection verification failed for question: {}", questionTitle);
+          return false;
+        }
+      } else {
+        log.warn("All click strategies failed for option '{}'", optionText);
+        return false;
+      }
+
+    } catch (Exception e) {
+      log.error("Error selecting option from popup for question '{}': {}", questionTitle,
+          e.getMessage());
+      return false;
     }
   }
 
@@ -470,123 +750,7 @@ public class ComboboxHandler {
     }
   }
 
-  /**
-   * Select an option from a popup container with enhanced reliability
-   */
-  private boolean selectOptionFromPopup(WebDriver driver, WebElement popupContainer,
-      String optionText, String questionTitle, WebDriverWait wait) {
-    try {
-      log.debug("Attempting to select option '{}' from popup for question: {}", optionText,
-          questionTitle);
 
-      // Wait for popup to be fully loaded and ready
-      if (!waitForPopupReady(driver, popupContainer, wait)) {
-        log.warn("Popup container not ready for interaction");
-        return false;
-      }
-
-      // Find the target option using stable attributes
-      WebElement targetOption = findOptionByStableAttributes(popupContainer, optionText);
-      if (targetOption == null) {
-        log.error("Could not find option '{}' in popup container", optionText);
-        return false;
-      }
-
-      log.debug("Found target option, attempting to click");
-
-      // Enhanced click strategy with multiple approaches
-      boolean clickSuccess = false;
-
-      // Ensure the option is in view
-      try {
-        ((JavascriptExecutor) driver)
-            .executeScript("arguments[0].scrollIntoView({block: 'center'});", targetOption);
-      } catch (Exception ignore) {
-      }
-
-      // Strategy 1: Try clicking the span element with jsslot attribute (stable)
-      try {
-        WebElement spanElement = targetOption.findElement(By.cssSelector("span[jsslot]"));
-        ((JavascriptExecutor) driver).executeScript("arguments[0].click();", spanElement);
-        log.info("Selected option '{}' for question: {} using span[jsslot] click", optionText,
-            questionTitle);
-        clickSuccess = true;
-      } catch (Exception spanClickException) {
-        log.debug("Span[jsslot] click failed: {}", spanClickException.getMessage());
-      }
-
-      // Strategy 2: Try JavaScript click on the option element
-      if (!clickSuccess) {
-        try {
-          ((JavascriptExecutor) driver).executeScript("arguments[0].click();", targetOption);
-          log.info("Selected option '{}' for question: {} using JavaScript click", optionText,
-              questionTitle);
-          clickSuccess = true;
-        } catch (Exception jsClickException) {
-          log.debug("JavaScript click failed: {}", jsClickException.getMessage());
-        }
-      }
-
-      // Strategy 3: Try regular click with explicit wait
-      if (!clickSuccess) {
-        try {
-          wait.until(ExpectedConditions.elementToBeClickable(targetOption));
-          targetOption.click();
-          log.info("Selected option '{}' for question: {} using regular click", optionText,
-              questionTitle);
-          clickSuccess = true;
-        } catch (Exception regularClickException) {
-          log.debug("Regular click failed: {}", regularClickException.getMessage());
-        }
-      }
-
-      // Strategy 4: Try using Enter key on the option
-      if (!clickSuccess) {
-        try {
-          targetOption.sendKeys(Keys.ENTER);
-          log.info("Selected option '{}' for question: {} using Enter key", optionText,
-              questionTitle);
-          clickSuccess = true;
-        } catch (Exception enterKeyException) {
-          log.debug("Enter key failed: {}", enterKeyException.getMessage());
-        }
-      }
-
-      // Strategy 5: Try using Space key on the option
-      if (!clickSuccess) {
-        try {
-          targetOption.sendKeys(Keys.SPACE);
-          log.info("Selected option '{}' for question: {} using Space key", optionText,
-              questionTitle);
-          clickSuccess = true;
-        } catch (Exception spaceKeyException) {
-          log.debug("Space key failed: {}", spaceKeyException.getMessage());
-        }
-      }
-
-      if (clickSuccess) {
-        // Wait a bit for the selection to register
-        Thread.sleep(200);
-
-        // Verify the selection was successful
-        if (verifyOptionSelection(driver, optionText, questionTitle)) {
-          log.info("Option selection verified successfully for question: {}", questionTitle);
-          return true;
-        } else {
-          log.warn("Option selection verification failed for question: {}", questionTitle);
-          return false;
-        }
-      } else {
-        log.warn("All click strategies failed for option '{}'", optionText);
-        return false;
-      }
-
-    } catch (Exception e) {
-      log.error("Error selecting option from popup for question '{}': {}", questionTitle,
-          e.getMessage());
-      return false;
-    }
-  }
 
   /**
    * Verify that the option selection was successful by checking the dropdown trigger
