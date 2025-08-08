@@ -95,6 +95,16 @@ public class ComboboxHandler {
   private boolean expandDropdown(WebDriver driver, WebElement dropdownTrigger, String questionTitle,
       WebDriverWait wait) {
     try {
+      // If it's already expanded, don't toggle it closed
+      try {
+        String initialExpanded = dropdownTrigger.getAttribute("aria-expanded");
+        if ("true".equals(initialExpanded)) {
+          log.debug("Dropdown already expanded for question: {}", questionTitle);
+          return true;
+        }
+      } catch (Exception ignore) {
+      }
+
       // Scroll to the dropdown trigger to ensure it's visible and clickable
       try {
         ((JavascriptExecutor) driver)
@@ -121,12 +131,33 @@ public class ComboboxHandler {
           ((JavascriptExecutor) driver).executeScript("arguments[0].click();", dropdownTrigger);
           Thread.sleep(500);
           ariaExpanded = dropdownTrigger.getAttribute("aria-expanded");
-          if (!"true".equals(ariaExpanded)) {
-            log.warn("Dropdown still not expanded after JavaScript click");
-            return false;
-          }
         } catch (Exception e) {
           log.debug("JavaScript click failed: {}", e.getMessage());
+        }
+
+        if (!"true".equals(ariaExpanded)) {
+          // Strategy 3: Keyboard toggle as fallback
+          try {
+            dropdownTrigger.sendKeys(Keys.SPACE);
+            Thread.sleep(400);
+            ariaExpanded = dropdownTrigger.getAttribute("aria-expanded");
+          } catch (Exception e) {
+            log.debug("Space key failed: {}", e.getMessage());
+          }
+        }
+
+        if (!"true".equals(ariaExpanded)) {
+          try {
+            dropdownTrigger.sendKeys(Keys.ENTER);
+            Thread.sleep(400);
+            ariaExpanded = dropdownTrigger.getAttribute("aria-expanded");
+          } catch (Exception e) {
+            log.debug("Enter key failed: {}", e.getMessage());
+          }
+        }
+
+        if (!"true".equals(ariaExpanded)) {
+          log.warn("Dropdown still not expanded after all strategies");
           return false;
         }
       }
@@ -245,6 +276,22 @@ public class ComboboxHandler {
         }
       } catch (Exception e) {
         log.debug("Could not find any general popup containers: {}", e.getMessage());
+      }
+
+      // Strategy 7: As a final fallback, some forms render options inside the listbox itself.
+      // If the dropdown is expanded and contains role='option' children, use the trigger as
+      // container.
+      try {
+        String expanded = dropdownTrigger.getAttribute("aria-expanded");
+        List<WebElement> inlineOptions =
+            dropdownTrigger.findElements(By.cssSelector("[role='option']"));
+        if ("true".equals(expanded) && !inlineOptions.isEmpty()) {
+          log.debug("Using dropdown trigger as popup container (inline options detected: {})",
+              inlineOptions.size());
+          return dropdownTrigger;
+        }
+      } catch (Exception e) {
+        log.debug("Inline options fallback check failed: {}", e.getMessage());
       }
 
       return null;
@@ -449,6 +496,13 @@ public class ComboboxHandler {
 
       // Enhanced click strategy with multiple approaches
       boolean clickSuccess = false;
+
+      // Ensure the option is in view
+      try {
+        ((JavascriptExecutor) driver)
+            .executeScript("arguments[0].scrollIntoView({block: 'center'});", targetOption);
+      } catch (Exception ignore) {
+      }
 
       // Strategy 1: Try clicking the span element with jsslot attribute (stable)
       try {

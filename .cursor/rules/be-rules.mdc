@@ -1,0 +1,539 @@
+---
+description: dienform
+globs:
+alwaysApply: true
+---
+
+# Development Guidelines for DienForm Project
+
+## Overview
+
+This document outlines the development standards and best practices for the DienForm backend project - an automated Google Form filling system. Following these guidelines ensures code consistency, maintainability, and reliability in form automation.
+
+You are an expert Java developer, proficient in Spring Boot, Selenium WebDriver, MySQL, and related Java technologies.
+
+Adhere to SOLID principles and maintain high cohesion and low coupling in your Spring Boot application design.
+
+## Tech Stack
+
+- Java 17
+- Spring Boot 3.4.x
+- Spring Data JPA
+- MySQL Database
+- Selenium WebDriver 4.28.1
+- Maven
+- Lombok
+- MapStruct
+- Jsoup
+- Jackson
+
+### Package Naming Convention
+
+- All packages must start with `com.dienform`
+- Tool-specific packages: `com.dienform.tool.dienformtudong`
+- Utility classes should be placed in `com.dienform.common.util`
+- Exception classes in `com.dienform.common.exception`
+- Remember All .md file will be in folder path `/planDoc/`
+
+## Critical Element Selection Guidelines
+
+### Selenium Element Selection Best Practices
+
+**CRITICAL: Avoid Dynamic Classes and IDs**
+
+- NEVER use dynamic classes/js like `MocG8c, vRMGwf, ksKsZd, v.v`, or similar auto-generated identifiers
+- These classes change between form loads and will cause automation failures
+
+**Stable Element Selectors (In Order of Preference):**
+
+1. **Role-based selectors (Most Stable):**
+
+   ```java
+   // For questions
+   By.xpath("//div[@role='listitem']")
+   By.cssSelector("[role='heading']")
+
+   // For form elements
+   By.cssSelector("[role='radio']")
+   By.cssSelector("[role='checkbox']")
+   By.cssSelector("[role='listbox']")
+   By.cssSelector("[role='option']")
+   ```
+
+2. **Type-based selectors:**
+
+   ```java
+   By.cssSelector("input[type='text']")
+   By.cssSelector("input[type='email']")
+   By.tagName("textarea")
+   ```
+
+3. **Data attributes (Google Form specific):**
+
+   ```java
+   By.cssSelector("[data-value='option_text']")
+   By.cssSelector("[data-answer-value='option_text']")
+   ```
+
+4. **Aria attributes:**
+
+   ```java
+   By.xpath(".//div[contains(@aria-label, 'option_text')]")
+   ```
+
+5. **Text content matching:**
+   ```java
+   By.xpath(".//*[contains(text(), 'option_text')]")
+   ```
+
+### Element Selection Implementation Pattern
+
+```java
+private WebElement findStableElement(WebElement container, String optionText) {
+    try {
+        // Primary: data-value attribute
+        WebElement element = container.findElement(
+            By.xpath(".//div[@role='radio' and @data-value='" + optionText + "']"));
+        log.debug("Found element using data-value");
+        return element;
+    } catch (Exception e) {
+        try {
+            // Secondary: aria-label
+            element = container.findElement(
+                By.xpath(".//div[@role='radio' and contains(@aria-label, '" + optionText + "')]"));
+            log.debug("Found element using aria-label");
+            return element;
+        } catch (Exception e2) {
+            try {
+                // Tertiary: text content
+                element = container.findElement(
+                    By.xpath(".//div[@role='radio' and .//*[contains(text(), '" + optionText + "')]]"));
+                log.debug("Found element using text content");
+                return element;
+            } catch (Exception e3) {
+                // Fallback: first available element
+                List<WebElement> elements = container.findElements(By.cssSelector("[role='radio']"));
+                if (!elements.isEmpty()) {
+                    log.warn("Using fallback element for option: {}", optionText);
+                    return elements.get(0);
+                }
+                log.error("No element found for option: {}", optionText);
+                return null;
+            }
+        }
+    }
+}
+```
+
+## Controller Layer
+
+- Use `@RestController` annotation
+- Controllers should only handle HTTP requests and delegate to services
+- Implement proper exception handling with `@ExceptionHandler`
+- Use `@Valid` for request validation
+- Return consistent response models
+
+```java
+@RestController
+@RequestMapping("/api/v1/forms")
+@RequiredArgsConstructor
+@Slf4j
+public class FormController {
+
+    private final FormService formService;
+
+    @PostMapping
+    public ResponseEntity<ResponseModel<FormResponse>> createForm(@Valid @RequestBody FormRequest request) {
+        try {
+            FormResponse response = formService.createForm(request);
+            return ResponseEntity.ok(ResponseModel.success(response));
+        } catch (Exception e) {
+            log.error("Error creating form: {}", e.getMessage(), e);
+            return ResponseEntity.badRequest(ResponseModel.error(e.getMessage()));
+        }
+    }
+}
+```
+
+## Service Layer
+
+- Use `@Service` annotation
+- Implement interfaces for better testability
+- Use constructor injection with `@RequiredArgsConstructor`
+- Implement proper transaction management with `@Transactional`
+- Add comprehensive logging with `@Slf4j`
+
+```java
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class GoogleFormServiceImpl implements GoogleFormService {
+
+    private final GoogleFormParser googleFormParser;
+    private final FillRequestRepository fillRequestRepository;
+
+    @Override
+    @Transactional
+    public int fillForm(UUID fillRequestId) {
+        log.info("Starting form fill for request: {}", fillRequestId);
+        // Implementation
+    }
+}
+```
+
+## Repository Layer
+
+- Extend `JpaRepository` for basic CRUD operations
+- Use `@Repository` annotation
+- Implement custom queries with `@Query` when needed
+- Use proper naming conventions for method names
+
+```java
+@Repository
+public interface FillRequestRepository extends JpaRepository<FillRequest, UUID> {
+
+    @Query("SELECT f FROM FillRequest f WHERE f.status = :status")
+    List<FillRequest> findByStatus(@Param("status") String status);
+
+    Optional<FillRequest> findByFormUrlAndStatus(String formUrl, String status);
+}
+```
+
+## Entity Layer
+
+- Use `@Entity` annotation
+- Implement proper JPA annotations (`@Table`, `@Column`, `@Id`, etc.)
+- Use `@Audited` for audit fields when needed
+- Implement proper relationships with `@OneToMany`, `@ManyToOne`, etc.
+
+```java
+@Entity
+@Table(name = "fill_requests")
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class FillRequest extends AuditEntity {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.UUID)
+    private UUID id;
+
+    @Column(name = "form_url", nullable = false)
+    private String formUrl;
+
+    @Column(name = "status")
+    private String status;
+
+    @OneToMany(mappedBy = "fillRequest", cascade = CascadeType.ALL)
+    private List<FillRequestMapping> mappings;
+}
+```
+
+## DTO Layer
+
+- Create separate request and response DTOs
+- Use `@Data` from Lombok for boilerplate reduction
+- Implement proper validation annotations
+- Use `@Builder` for complex objects
+
+```java
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class FormRequest {
+
+    @NotBlank(message = "Form URL is required")
+    @Pattern(regexp = "https://forms\\.google\\.com/.*", message = "Invalid Google Form URL")
+    private String formUrl;
+
+    @NotNull(message = "Form title is required")
+    private String title;
+
+    @Valid
+    private List<QuestionRequest> questions;
+}
+```
+
+## Exception Handling
+
+- Create custom exceptions extending `RuntimeException`
+- Use `@ControllerAdvice` for global exception handling
+- Implement proper error responses
+- Log exceptions appropriately
+
+```java
+@ControllerAdvice
+@Slf4j
+public class GlobalExceptionHandler {
+
+    @ExceptionHandler(ResourceNotFoundException.class)
+    public ResponseEntity<ResponseModel<String>> handleResourceNotFound(ResourceNotFoundException e) {
+        log.warn("Resource not found: {}", e.getMessage());
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+            .body(ResponseModel.error(e.getMessage()));
+    }
+
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<ResponseModel<String>> handleGenericException(Exception e) {
+        log.error("Unexpected error: {}", e.getMessage(), e);
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+            .body(ResponseModel.error("Internal server error"));
+    }
+}
+```
+
+## Configuration
+
+- Use `@Configuration` for configuration classes
+- Implement proper bean definitions
+- Use `@Value` for externalized configuration
+- Create environment-specific configurations
+
+```java
+@Configuration
+@EnableAsync
+@EnableCaching
+public class AsyncConfig implements AsyncConfigurer {
+
+    @Value("${app.async.core-pool-size:5}")
+    private int corePoolSize;
+
+    @Value("${app.async.max-pool-size:10}")
+    private int maxPoolSize;
+
+    @Override
+    public Executor getAsyncExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(corePoolSize);
+        executor.setMaxPoolSize(maxPoolSize);
+        executor.setQueueCapacity(100);
+        executor.setThreadNamePrefix("Async-");
+        executor.initialize();
+        return executor;
+    }
+}
+```
+
+## Performance Optimization
+
+### Caching Strategy
+
+- Use `@Cacheable` for expensive operations
+- Implement cache eviction policies
+- Use `ConcurrentHashMap` for in-memory caching
+
+```java
+@Service
+public class GoogleFormServiceImpl {
+
+    private final Map<String, List<WebElement>> questionElementsCache = new ConcurrentHashMap<>();
+
+    @Cacheable(value = "formQuestions", key = "#formUrl")
+    public List<ExtractedQuestion> readGoogleForm(String formUrl) {
+        // Implementation
+    }
+}
+```
+
+### Async Processing
+
+- Use `@Async` for non-blocking operations
+- Implement proper thread pool configuration
+- Handle async exceptions properly
+
+```java
+@Async
+public CompletableFuture<Integer> fillFormAsync(UUID fillRequestId) {
+    return CompletableFuture.supplyAsync(() -> fillForm(fillRequestId));
+}
+```
+
+## Logging and Monitoring
+
+- Use SLF4J with Logback
+- Implement proper log levels (ERROR, WARN, INFO, DEBUG)
+- Add performance monitoring for critical operations
+- Use structured logging for better analysis
+
+```java
+@Slf4j
+public class GoogleFormServiceImpl {
+
+    private void logPerformance(String operation, long startTime) {
+        long duration = System.currentTimeMillis() - startTime;
+        log.info("{} completed in {}ms", operation, duration);
+    }
+}
+```
+
+## Database Best Practices
+
+- Use proper indexing for frequently queried fields
+- Implement soft deletes when appropriate
+- Use `@Transactional` with proper isolation levels
+- Implement database migrations with Flyway
+
+## Security Considerations
+
+- Validate all input data
+- Implement proper authentication and authorization
+- Use parameterized queries to prevent SQL injection
+- Sanitize form URLs and data
+
+## Code Organization
+
+### File Structure
+
+```
+src/main/java/com/dienform/
+├── common/
+│   ├── controller/
+│   ├── dto/
+│   ├── entity/
+│   ├── exception/
+│   ├── model/
+│   ├── repository/
+│   ├── service/
+│   └── util/
+├── config/
+├── tool/
+│   └── dienformtudong/
+│       ├── googleform/
+│       ├── fillrequest/
+│       ├── form/
+│       └── question/
+```
+
+### Naming Conventions
+
+- Use PascalCase for class names (e.g., `GoogleFormServiceImpl`)
+- Use camelCase for method and variable names (e.g., `fillForm`, `questionElements`)
+- Use ALL_CAPS for constants (e.g., `MAX_RETRY_ATTEMPTS`)
+- Use descriptive names that clearly indicate purpose
+
+## Frontend Integration (ReactJS + MUI)
+
+- Design APIs to work seamlessly with React frontend
+- Use consistent response formats
+- Implement proper CORS configuration
+- Provide comprehensive API documentation
+
+```java
+@Configuration
+public class WebConfig implements WebMvcConfigurer {
+
+    @Override
+    public void addCorsMappings(CorsRegistry registry) {
+        registry.addMapping("/api/**")
+            .allowedOrigins("http://localhost:3000")
+            .allowedMethods("GET", "POST", "PUT", "DELETE")
+            .allowedHeaders("*");
+    }
+}
+```
+
+## Error Handling for Form Automation
+
+- Implement retry mechanisms for transient failures
+- Use exponential backoff for rate limiting
+- Log detailed error information for debugging
+- Provide meaningful error messages to users
+
+```java
+private List<WebElement> getQuestionElementsWithRetry(WebDriver driver) {
+    int retryCount = 0;
+    int maxRetries = 3;
+
+    while (retryCount < maxRetries) {
+        try {
+            List<WebElement> elements = driver.findElements(By.xpath("//div[@role='listitem']"));
+            if (!elements.isEmpty()) {
+                return elements;
+            }
+        } catch (Exception e) {
+            log.warn("Failed to find elements (attempt {}): {}", retryCount + 1, e.getMessage());
+        }
+
+        retryCount++;
+        if (retryCount < maxRetries) {
+            try {
+                Thread.sleep(1000 * retryCount); // Exponential backoff
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+    }
+
+    throw new RuntimeException("Failed to find question elements after " + maxRetries + " attempts");
+}
+```
+
+## Code Quality Standards
+
+- Write self-documenting code with clear method names
+- Add comprehensive JavaDoc for public methods
+- Keep methods small and focused (max 50 lines)
+- Use meaningful variable names
+- Avoid code duplication through proper abstraction
+- Implement proper null checks and validation
+
+## Performance Guidelines
+
+- Use connection pooling for database operations
+- Implement proper caching strategies
+- Use async processing for I/O operations
+- Optimize database queries with proper indexing
+- Monitor memory usage and implement proper cleanup
+
+## Deployment Considerations
+
+- Use environment-specific configurations
+- Use Docker for containerization
+- Implement proper logging for production debugging
+- Use monitoring tools for performance tracking
+
+## Testing Guidelines
+
+### Testing Strategy Overview
+
+- Implement comprehensive unit tests for all business logic
+- Use integration tests for database operations and external services
+- Maintain test coverage above 80% for production code
+- Use Test-Driven Development (TDD) for complex business logic
+
+#### Test Organization
+
+- Group related tests using `@Nested` annotations
+- Use descriptive test method names with `@DisplayName`
+- Follow the Arrange-Act-Assert (AAA) pattern
+- Keep tests independent and isolated
+- Use `@DirtiesContext` when tests modify application state
+
+#### Mocking Guidelines
+
+- Mock external dependencies (databases, APIs, file systems)
+- Use `@MockBean` for Spring context integration
+- Avoid mocking the class under test
+- Use argument captors to verify method calls
+- Reset mocks between tests with `@BeforeEach`
+
+#### Test Data Management
+
+- Use `@TestConfiguration` for test-specific beans
+- Create reusable test data builders
+- Use `@Transactional` for database tests
+- Clean up test data with `@AfterEach`
+- Use `@DirtiesContext` for tests that modify application state
+
+#### Coverage Requirements
+
+- Maintain minimum 80% line coverage for production code
+- Focus on critical business logic paths
+- Test both happy path and error scenarios
+- Include edge cases and boundary conditions
+- Test exception handling and error recovery
+
+Remember: The key to reliable form automation is using stable, semantic selectors that don't depend on dynamic classes or IDs. Always prioritize role-based selectors and data attributes over class names or IDs that may change between form loads.

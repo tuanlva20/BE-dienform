@@ -1,5 +1,6 @@
 package com.dienform.tool.dienformtudong.googleform.handler;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
@@ -58,8 +59,8 @@ public class GridQuestionHandler {
         Object answerValue = entry.getValue();
 
         if ("all".equals(rowLabel)) {
-          // Fill all rows with the same option
-          fillAllRowsWithOption(driver, rowGroups, answerValue, humanLike);
+          // Fill all rows with randomized options to avoid same answer for all rows
+          fillAllRowsWithRandomizedOption(driver, rowGroups, answerValue, question, humanLike);
         } else {
           // Fill specific row
           fillSpecificRowWithOption(driver, rowGroups, rowLabel, answerValue, humanLike);
@@ -106,8 +107,9 @@ public class GridQuestionHandler {
         Object answerValue = entry.getValue();
 
         if ("all".equals(rowLabel)) {
-          // Fill all rows with the same options
-          fillAllRowsWithCheckboxOptions(driver, rowGroups, answerValue, humanLike);
+          // Fill all rows with randomized options to avoid same answer for all rows
+          fillAllRowsWithRandomizedCheckboxOptions(driver, rowGroups, answerValue, question,
+              humanLike);
         } else {
           // Fill specific row
           fillSpecificRowWithCheckboxOptions(driver, rowGroups, rowLabel, answerValue, humanLike);
@@ -122,7 +124,162 @@ public class GridQuestionHandler {
   }
 
   /**
-   * Fill all rows with the same option (for multiple choice grid)
+   * Select a random option with bias towards the original option
+   */
+  String selectRandomOptionWithBias(String originalOption, List<String> availableOptions) {
+    if (availableOptions.size() <= 1) {
+      return originalOption;
+    }
+
+    // 70% chance to use original option, 30% chance to use random option
+    if (random.nextDouble() < 0.7) {
+      return originalOption;
+    } else {
+      // Remove original option from available options to avoid selecting it again
+      List<String> otherOptions = new ArrayList<>(availableOptions);
+      otherOptions.remove(originalOption);
+
+      if (otherOptions.isEmpty()) {
+        return originalOption;
+      }
+
+      return otherOptions.get(random.nextInt(otherOptions.size()));
+    }
+  }
+
+  /**
+   * Select random options with bias towards the original options
+   */
+  List<String> selectRandomOptionsWithBias(List<String> originalOptions,
+      List<String> availableOptions) {
+    if (availableOptions.size() <= originalOptions.size()) {
+      return originalOptions;
+    }
+
+    List<String> selectedOptions = new ArrayList<>();
+    List<String> remainingAvailableOptions = new ArrayList<>(availableOptions);
+
+    for (String originalOption : originalOptions) {
+      // 70% chance to use original option, 30% chance to use random option
+      if (random.nextDouble() < 0.7) {
+        // Check if original option is still available
+        if (remainingAvailableOptions.contains(originalOption)) {
+          selectedOptions.add(originalOption);
+          remainingAvailableOptions.remove(originalOption);
+        } else {
+          // Original option already used, pick random from remaining
+          if (!remainingAvailableOptions.isEmpty()) {
+            String randomOption =
+                remainingAvailableOptions.get(random.nextInt(remainingAvailableOptions.size()));
+            selectedOptions.add(randomOption);
+            remainingAvailableOptions.remove(randomOption);
+          }
+        }
+      } else {
+        // Remove original option from remaining options to avoid selecting it
+        List<String> tempOptions = new ArrayList<>(remainingAvailableOptions);
+        tempOptions.remove(originalOption);
+
+        if (tempOptions.isEmpty()) {
+          // No other options available, use original
+          if (remainingAvailableOptions.contains(originalOption)) {
+            selectedOptions.add(originalOption);
+            remainingAvailableOptions.remove(originalOption);
+          }
+        } else {
+          // Pick random from remaining options (excluding original)
+          String randomOption = tempOptions.get(random.nextInt(tempOptions.size()));
+          selectedOptions.add(randomOption);
+          remainingAvailableOptions.remove(randomOption);
+        }
+      }
+    }
+
+    return selectedOptions;
+  }
+
+  /**
+   * Fill all rows with randomized options (for multiple choice grid) This prevents all rows from
+   * having the same answer
+   */
+  private void fillAllRowsWithRandomizedOption(WebDriver driver, List<WebElement> rowGroups,
+      Object answerValue, Question question, boolean humanLike) {
+    String optionText = answerValue.toString();
+
+    // Get all available column options for this question
+    List<String> availableOptions = gridQuestionService.getColumnOptions(question);
+
+    if (availableOptions.isEmpty()) {
+      log.warn("No column options found for question: {}", question.getTitle());
+      // Fallback to original behavior
+      fillAllRowsWithOption(driver, rowGroups, answerValue, humanLike);
+      return;
+    }
+
+    log.debug("Available column options: {}", availableOptions);
+
+    for (int i = 0; i < rowGroups.size(); i++) {
+      WebElement rowGroup = rowGroups.get(i);
+      try {
+        // For each row, randomly select from available options
+        // But give higher probability to the original option
+        String selectedOption = selectRandomOptionWithBias(optionText, availableOptions);
+
+        fillRowWithRadioOption(driver, rowGroup, selectedOption, humanLike);
+
+        if (humanLike) {
+          Thread.sleep(50 + random.nextInt(100));
+        }
+
+        log.debug("Row {} filled with option: {}", i + 1, selectedOption);
+      } catch (Exception e) {
+        log.warn("Failed to fill row {} with option '{}': {}", i + 1, optionText, e.getMessage());
+      }
+    }
+  }
+
+  /**
+   * Fill all rows with randomized options (for checkbox grid) This prevents all rows from having
+   * the same answer
+   */
+  private void fillAllRowsWithRandomizedCheckboxOptions(WebDriver driver,
+      List<WebElement> rowGroups, Object answerValue, Question question, boolean humanLike) {
+    List<String> options = parseOptions(answerValue);
+
+    // Get all available column options for this question
+    List<String> availableOptions = gridQuestionService.getColumnOptions(question);
+
+    if (availableOptions.isEmpty()) {
+      log.warn("No column options found for question: {}", question.getTitle());
+      // Fallback to original behavior
+      fillAllRowsWithCheckboxOptions(driver, rowGroups, answerValue, humanLike);
+      return;
+    }
+
+    log.debug("Available column options: {}", availableOptions);
+
+    for (int i = 0; i < rowGroups.size(); i++) {
+      WebElement rowGroup = rowGroups.get(i);
+      try {
+        // For each row, randomly select from available options
+        // But give higher probability to the original options
+        List<String> selectedOptions = selectRandomOptionsWithBias(options, availableOptions);
+
+        fillRowWithCheckboxOptions(driver, rowGroup, selectedOptions, humanLike);
+
+        if (humanLike) {
+          Thread.sleep(50 + random.nextInt(100));
+        }
+
+        log.debug("Row {} filled with options: {}", i + 1, selectedOptions);
+      } catch (Exception e) {
+        log.warn("Failed to fill row {} with options '{}': {}", i + 1, options, e.getMessage());
+      }
+    }
+  }
+
+  /**
+   * Fill all rows with the same option (for multiple choice grid) - original method
    */
   private void fillAllRowsWithOption(WebDriver driver, List<WebElement> rowGroups,
       Object answerValue, boolean humanLike) {
@@ -157,7 +314,7 @@ public class GridQuestionHandler {
   }
 
   /**
-   * Fill all rows with the same options (for checkbox grid)
+   * Fill all rows with the same options (for checkbox grid) - original method
    */
   private void fillAllRowsWithCheckboxOptions(WebDriver driver, List<WebElement> rowGroups,
       Object answerValue, boolean humanLike) {

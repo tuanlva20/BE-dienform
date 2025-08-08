@@ -2096,9 +2096,51 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     }
 
     /**
-     * Fill all rows in checkbox grid with the same options
+     * Fill all rows in checkbox grid with randomized options to avoid same answer for all rows
      */
     private void fillAllCheckboxGridRows(WebDriver driver, List<WebElement> checkboxGroups,
+            List<String> options, WebDriverWait wait, boolean humanLike) {
+        try {
+            // Get available column options from the question structure
+            List<String> availableOptions = extractAvailableColumnOptions(checkboxGroups);
+
+            if (availableOptions.isEmpty()) {
+                log.warn("No column options found, using original options");
+                // Fallback to original behavior
+                fillAllCheckboxGridRowsOriginal(driver, checkboxGroups, options, wait, humanLike);
+                return;
+            }
+
+            log.debug("Available column options: {}", availableOptions);
+
+            for (int i = 0; i < checkboxGroups.size(); i++) {
+                WebElement row = checkboxGroups.get(i);
+                String rowLabel = getRowLabel(row);
+
+                // For each row, randomly select from available options
+                // But give higher probability to the original options
+                List<String> selectedOptions =
+                        selectRandomOptionsWithBias(options, availableOptions);
+
+                log.info("Filling row {}: '{}' with randomized options: {}", i + 1, rowLabel,
+                        selectedOptions);
+
+                fillCheckboxGridRow(driver, row, selectedOptions, wait, humanLike);
+
+                // Add delay between rows in human-like mode
+                if (humanLike && i < checkboxGroups.size() - 1) {
+                    Thread.sleep(100 + new Random().nextInt(200));
+                }
+            }
+        } catch (Exception e) {
+            log.error("Error filling all checkbox grid rows: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Original method for filling all rows with same options (fallback)
+     */
+    private void fillAllCheckboxGridRowsOriginal(WebDriver driver, List<WebElement> checkboxGroups,
             List<String> options, WebDriverWait wait, boolean humanLike) {
         try {
             for (int i = 0; i < checkboxGroups.size(); i++) {
@@ -2116,6 +2158,83 @@ public class GoogleFormServiceImpl implements GoogleFormService {
         } catch (Exception e) {
             log.error("Error filling all checkbox grid rows: {}", e.getMessage());
         }
+    }
+
+    /**
+     * Extract available column options from checkbox groups
+     */
+    private List<String> extractAvailableColumnOptions(List<WebElement> checkboxGroups) {
+        List<String> availableOptions = new ArrayList<>();
+
+        if (checkboxGroups.isEmpty()) {
+            return availableOptions;
+        }
+
+        // Get options from the first row as reference
+        WebElement firstRow = checkboxGroups.get(0);
+        List<WebElement> checkboxes = firstRow.findElements(By.cssSelector("[role='checkbox']"));
+
+        for (WebElement checkbox : checkboxes) {
+            try {
+                // Try data-answer-value attribute first (Google Forms specific)
+                String dataAnswerValue = checkbox.getAttribute("data-answer-value");
+                if (dataAnswerValue != null && !dataAnswerValue.trim().isEmpty()) {
+                    availableOptions.add(dataAnswerValue.trim());
+                    continue;
+                }
+
+                // Try aria-label attribute
+                String ariaLabel = checkbox.getAttribute("aria-label");
+                if (ariaLabel != null && !ariaLabel.trim().isEmpty()) {
+                    availableOptions.add(ariaLabel.trim());
+                    continue;
+                }
+
+                // Try text content
+                String text = checkbox.getText().trim();
+                if (!text.isEmpty()) {
+                    availableOptions.add(text);
+                }
+            } catch (Exception e) {
+                log.debug("Error extracting option from checkbox: {}", e.getMessage());
+            }
+        }
+
+        return availableOptions;
+    }
+
+    /**
+     * Select random options with bias towards the original options
+     */
+    private List<String> selectRandomOptionsWithBias(List<String> originalOptions,
+            List<String> availableOptions) {
+        if (availableOptions.size() <= originalOptions.size()) {
+            return originalOptions;
+        }
+
+        List<String> selectedOptions = new ArrayList<>();
+        Random random = new Random();
+
+        for (String originalOption : originalOptions) {
+            // 70% chance to use original option, 30% chance to use random option
+            if (random.nextDouble() < 0.7) {
+                selectedOptions.add(originalOption);
+            } else {
+                // Remove already selected options and original option from available options
+                List<String> remainingOptions = new ArrayList<>(availableOptions);
+                remainingOptions.removeAll(selectedOptions);
+                remainingOptions.remove(originalOption);
+
+                if (remainingOptions.isEmpty()) {
+                    selectedOptions.add(originalOption);
+                } else {
+                    selectedOptions
+                            .add(remainingOptions.get(random.nextInt(remainingOptions.size())));
+                }
+            }
+        }
+
+        return selectedOptions;
     }
 
     /**
