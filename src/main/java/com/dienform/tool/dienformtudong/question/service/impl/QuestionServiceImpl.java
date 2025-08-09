@@ -1,9 +1,11 @@
 package com.dienform.tool.dienformtudong.question.service.impl;
 
+import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import com.dienform.common.exception.ResourceNotFoundException;
 import com.dienform.tool.dienformtudong.question.dto.response.QuestionOptionResponse;
 import com.dienform.tool.dienformtudong.question.dto.response.QuestionResponse;
@@ -22,6 +24,7 @@ public class QuestionServiceImpl implements QuestionService {
         private final QuestionOptionRepository optionRepository;
 
         @Override
+        @Transactional(readOnly = true)
         public List<QuestionResponse> getQuestionsByFormId(UUID formId) {
                 List<Question> questions = questionRepository.findByFormIdOrderByPosition(formId);
                 return questions.stream().map(this::mapToQuestionResponse)
@@ -29,6 +32,7 @@ public class QuestionServiceImpl implements QuestionService {
         }
 
         @Override
+        @Transactional(readOnly = true)
         public QuestionResponse getQuestionById(UUID id) {
                 Question question = questionRepository.findById(id).orElseThrow(
                                 () -> new ResourceNotFoundException("Question", "id", id));
@@ -63,18 +67,24 @@ public class QuestionServiceImpl implements QuestionService {
 
                 if (isRow) {
                         // For grid rows, collect all column options
-                        List<String> columnOptions = option.getSubOptions().stream()
+                        List<QuestionOption> subOptions =
+                                        option.getSubOptions() == null ? Collections.emptyList()
+                                                        : option.getSubOptions();
+                        List<String> columnOptions = subOptions.stream()
                                         .map(QuestionOption::getText).collect(Collectors.toList());
 
                         return QuestionOptionResponse.builder().id(option.getId())
                                         .text(option.getText()).value(option.getValue())
-                                        .position(option.getPosition()).isRow(true)
-                                        .columnOptions(columnOptions).build();
+                                        .position(option.getPosition() != null
+                                                        ? option.getPosition()
+                                                        : 0)
+                                        .isRow(true).columnOptions(columnOptions).build();
                 }
 
                 // For non-grid options
                 return QuestionOptionResponse.builder().id(option.getId()).text(option.getText())
-                                .value(option.getValue()).position(option.getPosition())
+                                .value(option.getValue())
+                                .position(option.getPosition() != null ? option.getPosition() : 0)
                                 .isRow(false).build();
         }
 }

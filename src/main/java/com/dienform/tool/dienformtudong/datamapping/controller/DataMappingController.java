@@ -93,7 +93,7 @@ public class DataMappingController {
           accessibilityInfo.isAccessible(), accessibilityInfo.isPublic(),
           accessibilityInfo.getAccessMethod());
 
-      // Step 3: Handle inaccessible sheets
+      // Step 3: Handle inaccessible sheets -> return 400 with clear error for FE
       if (!accessibilityInfo.isAccessible()) {
         return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(
             DataMappingResponse.builder().errors(Arrays.asList(accessibilityInfo.getMessage()))
