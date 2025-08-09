@@ -16,6 +16,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -61,7 +62,6 @@ import com.dienform.tool.dienformtudong.question.entity.Question;
 import com.dienform.tool.dienformtudong.question.entity.QuestionOption;
 import com.dienform.tool.dienformtudong.surveyexecution.entity.SesstionExecution;
 import com.dienform.tool.dienformtudong.surveyexecution.repository.SessionExecutionRepository;
-import io.github.bonigarcia.wdm.WebDriverManager;
 import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -130,18 +130,19 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     @Value("${google.form.cache-enabled:true}")
     private boolean cacheEnabled;
 
-    // Performance optimization: Cache question elements to avoid repeated DOM queries
-    private final Map<String, List<WebElement>> questionElementsCache = new ConcurrentHashMap<>();
-
-    // OPTIMIZED: Cache for question mapping to improve "Found matching question" speed
-    private final Map<String, WebElement> questionMappingCache = new ConcurrentHashMap<>();
+    // Deprecated caches (avoid storing WebElement; not reused across sessions)
+    // private final Map<String, List<WebElement>> questionElementsCache = new
+    // ConcurrentHashMap<>();
+    // private final Map<String, WebElement> questionMappingCache = new ConcurrentHashMap<>();
 
     // OPTIMIZED: Thread pool for parallel question processing
     private final ExecutorService questionProcessingExecutor = Executors.newFixedThreadPool(5);
 
-    // OPTIMIZED: Cache for form URL to question map mapping
-    private final Map<String, Map<String, WebElement>> formQuestionMapCache =
-            new ConcurrentHashMap<>();
+    // New: Cache By locators per form and question (safe across sessions)
+    private final Map<UUID, Map<UUID, By>> formLocatorCache = new ConcurrentHashMap<>();
+
+    // Track active WebDriver instances per fill request to guarantee shutdown
+    private final Map<UUID, Set<WebDriver>> activeDriversByFillRequest = new ConcurrentHashMap<>();
 
     /**
      * Cleanup method to clear caches and shutdown executor
@@ -150,10 +151,25 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     public void cleanup() {
         log.info("Cleaning up GoogleFormService resources...");
 
+        // Force close any remaining WebDriver instances
+        try {
+            for (Map.Entry<UUID, Set<WebDriver>> entry : activeDriversByFillRequest.entrySet()) {
+                Set<WebDriver> drivers = entry.getValue();
+                if (drivers != null) {
+                    for (WebDriver d : drivers.toArray(new WebDriver[0])) {
+                        shutdownDriver(d);
+                    }
+                    drivers.clear();
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Error during WebDriver cleanup: {}", e.getMessage());
+        } finally {
+            activeDriversByFillRequest.clear();
+        }
+
         // Clear caches
-        questionElementsCache.clear();
-        questionMappingCache.clear();
-        formQuestionMapCache.clear();
+        formLocatorCache.clear();
 
         // Shutdown executor service
         if (questionProcessingExecutor != null && !questionProcessingExecutor.isShutdown()) {
@@ -172,13 +188,24 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     }
 
     /**
+     * Pre-download and setup ChromeDriver once at startup to avoid per-run delays
+     */
+    @jakarta.annotation.PostConstruct
+    public void initWebDriverBinary() {
+        try {
+            io.github.bonigarcia.wdm.WebDriverManager.chromedriver().setup();
+            log.info("ChromeDriver binary initialized at startup");
+        } catch (Exception e) {
+            log.warn("Failed to initialize ChromeDriver at startup: {}", e.getMessage());
+        }
+    }
+
+    /**
      * Clear all caches manually
      */
     public void clearCaches() {
         log.info("Clearing all caches...");
-        questionElementsCache.clear();
-        questionMappingCache.clear();
-        formQuestionMapCache.clear();
+        formLocatorCache.clear();
         log.info("All caches cleared");
     }
 
@@ -189,9 +216,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
         String cacheKey = fillRequestId.toString();
         log.info("Clearing caches for fillRequest: {}", fillRequestId);
 
-        questionElementsCache.remove(cacheKey);
-        questionMappingCache.remove(cacheKey);
-        formQuestionMapCache.remove(cacheKey);
+        // Per-fillRequest caches removed; rely on TTL cleanup of formLocatorCache
 
         log.info("Caches cleared for fillRequest: {}", fillRequestId);
     }
@@ -276,9 +301,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             return 0;
         }
 
-        // Clear caches for this specific fill request before starting new execution to avoid stale
-        // data
-        clearCachesForFillRequest(fillRequestId);
+        // Avoid aggressive per-request cache clears; TTL scheduler will clean caches periodically
 
         // Find the form
         Form form = formRepository.findById(fillRequest.getForm().getId()).orElseThrow(
@@ -385,7 +408,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             if (executor != null) {
                 try {
                     executor.shutdown();
-                    if (!executor.awaitTermination(30, TimeUnit.SECONDS)) {
+                    if (!executor.awaitTermination(180, TimeUnit.SECONDS)) {
                         executor.shutdownNow();
                         if (!executor.awaitTermination(30, TimeUnit.SECONDS)) {
                             log.error("Executor did not terminate");
@@ -397,8 +420,10 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                 }
             }
 
-            // Clear caches for this specific fill request after execution to free memory
-            clearCachesForFillRequest(fillRequestId);
+            // Force-close any remaining drivers for this fill request as a safety net
+            forceCloseAllDriversForFillRequest(fillRequestId);
+
+            // Let TTL scheduler clear caches periodically instead of per-request
         }
 
         return successCount.get();
@@ -691,32 +716,6 @@ public class GoogleFormServiceImpl implements GoogleFormService {
         }
     }
 
-    public Map<String, List<WebElement>> getQuestionElementsCache() {
-        return questionElementsCache;
-    }
-
-    public Map<String, Map<String, WebElement>> getFormQuestionMapCache() {
-        return formQuestionMapCache;
-    }
-
-    public Map<String, WebElement> getQuestionMappingCache() {
-        return questionMappingCache;
-    }
-
-    /**
-     * Get cached question elements for a specific fill request
-     */
-    public List<WebElement> getQuestionElementsCacheForFillRequest(UUID fillRequestId) {
-        return questionElementsCache.get(fillRequestId.toString());
-    }
-
-    /**
-     * Get cached question map for a specific fill request
-     */
-    public Map<String, WebElement> getFormQuestionMapCacheForFillRequest(UUID fillRequestId) {
-        return formQuestionMapCache.get(fillRequestId.toString());
-    }
-
     public Map<String, List<ExtractedQuestion>> getFormQuestionsCache() {
         return formQuestionsCache;
     }
@@ -897,17 +896,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
      * OPTIMIZED: Get question elements with caching and retry mechanism
      */
     private List<WebElement> getQuestionElementsWithRetry(WebDriver driver, UUID fillRequestId) {
-        String cacheKey = fillRequestId.toString();
-        if (cacheEnabled) {
-            List<WebElement> cachedElements = questionElementsCache.get(cacheKey);
-            if (cachedElements != null && !cachedElements.isEmpty()) {
-                log.info("Using cached question elements for fillRequest {}: {}", fillRequestId,
-                        cachedElements.size());
-                return cachedElements;
-            }
-        }
-
-        // Get elements with retry mechanism
+        // Deprecated method: kept for backward compatibility; no longer caches WebElements
         List<WebElement> questionElements = new ArrayList<>();
         int retryCount = 0;
         int maxRetries = 3;
@@ -916,10 +905,6 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             try {
                 questionElements = driver.findElements(By.xpath("//div[@role='listitem']"));
                 if (!questionElements.isEmpty()) {
-                    // Cache the result
-                    if (cacheEnabled) {
-                        questionElementsCache.put(cacheKey, questionElements);
-                    }
                     log.info("Found {} question elements for fillRequest {} (attempt {})",
                             questionElements.size(), fillRequestId, retryCount + 1);
                     break;
@@ -1132,6 +1117,15 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             // Open browser with optimized settings
             log.info("Opening browser...");
             driver = openBrowser(formUrl, humanLike);
+            // Track this driver for the current fill request to ensure force shutdown later
+            try {
+                Set<WebDriver> set = activeDriversByFillRequest.computeIfAbsent(fillRequestId,
+                        k -> java.util.Collections
+                                .newSetFromMap(new ConcurrentHashMap<WebDriver, Boolean>()));
+                set.add(driver);
+            } catch (Exception e) {
+                log.warn("Failed to register WebDriver for tracking: {}", e.getMessage());
+            }
             long browserOpenTime = System.currentTimeMillis();
             log.info("Browser opened in {}ms", browserOpenTime - startTime);
 
@@ -1139,36 +1133,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(15)); // Reduced from
                                                                                     // 30s to 15s
 
-            // OPTIMIZED: Get all question elements once and cache them with retry mechanism
-            log.info("Finding question elements...");
-            List<WebElement> questionElements = getQuestionElementsWithRetry(driver, fillRequestId);
-
-            if (questionElements.isEmpty()) {
-                log.error("Failed to find question elements");
-                return false;
-            }
-
-            // OPTIMIZED: Build question map with performance logging and caching
-            long mapStartTime = System.currentTimeMillis();
-            Map<String, WebElement> questionMap;
-
-            // OPTIMIZED: Check cache first for question map
-            if (cacheEnabled) {
-                questionMap = formQuestionMapCache.get(fillRequestId.toString());
-                if (questionMap != null) {
-                    log.info("Using cached question map with {} questions", questionMap.size());
-                } else {
-                    questionMap = buildQuestionMap(questionElements);
-                    // Cache the question map for future use
-                    formQuestionMapCache.put(fillRequestId.toString(), questionMap);
-                    log.info("Built and cached question map with {} valid questions in {}ms",
-                            questionMap.size(), System.currentTimeMillis() - mapStartTime);
-                }
-            } else {
-                questionMap = buildQuestionMap(questionElements);
-                log.info("Built question map with {} valid questions in {}ms", questionMap.size(),
-                        System.currentTimeMillis() - mapStartTime);
-            }
+            // No need to pre-fetch and map all question elements; use per-question By locators
 
             // OPTIMIZED: Process each question with better error handling
             int processedQuestions = 0;
@@ -1187,10 +1152,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                     log.info("Processing question: {} (type: {})", question.getTitle(),
                             question.getType());
 
-                    // OPTIMIZED: Find question element using pre-built map with performance
-                    // monitoring
-                    WebElement questionElement = findQuestionWithPerformanceMonitoring(
-                            question.getTitle(), questionMap, fillRequestId);
+                    WebElement questionElement = resolveQuestionElement(driver, formUrl, question);
                     long questionFoundTime = System.currentTimeMillis();
 
                     if (questionElement == null) {
@@ -1267,26 +1229,195 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             // Ensure WebDriver is properly closed
             if (driver != null) {
                 try {
-                    // Check if driver is still active before quitting
-                    if (!isWebDriverQuit(driver)) {
-                        driver.quit();
-                        log.info("WebDriver closed successfully");
-                    } else {
-                        log.info("WebDriver was already quit");
-                    }
-                } catch (Exception e) {
-                    log.error("Error closing WebDriver: {}", e.getMessage());
-                    // Force quit if normal quit fails
+                    shutdownDriver(driver);
+                } finally {
+                    // Remove from active set
                     try {
-                        if (!isWebDriverQuit(driver)) {
-                            driver.close();
+                        Set<WebDriver> set = activeDriversByFillRequest.get(fillRequestId);
+                        if (set != null) {
+                            set.remove(driver);
                         }
-                    } catch (Exception closeException) {
-                        log.error("Error force closing WebDriver: {}", closeException.getMessage());
+                    } catch (Exception ignore) {
                     }
                 }
             }
         }
+    }
+
+    /**
+     * Force-close all tracked WebDriver instances for a specific fill request.
+     */
+    private void forceCloseAllDriversForFillRequest(UUID fillRequestId) {
+        try {
+            Set<WebDriver> drivers = activeDriversByFillRequest.get(fillRequestId);
+            if (drivers != null) {
+                for (WebDriver d : drivers.toArray(new WebDriver[0])) {
+                    shutdownDriver(d);
+                }
+                drivers.clear();
+            }
+        } catch (Exception e) {
+            log.warn("Error force closing drivers for fillRequest {}: {}", fillRequestId,
+                    e.getMessage());
+        } finally {
+            activeDriversByFillRequest.remove(fillRequestId);
+        }
+    }
+
+    /**
+     * Safely shutdown a WebDriver: try to close all windows then quit, with fallbacks.
+     */
+    private void shutdownDriver(WebDriver driver) {
+        if (driver == null) {
+            return;
+        }
+        try {
+            try {
+                for (String handle : driver.getWindowHandles()) {
+                    try {
+                        driver.switchTo().window(handle);
+                        driver.close();
+                    } catch (Exception ignore) {
+                    }
+                }
+            } catch (Exception ignore) {
+            }
+            try {
+                driver.quit();
+                log.info("WebDriver quit invoked");
+            } catch (Exception e) {
+                log.warn("driver.quit() failed: {}", e.getMessage());
+                try {
+                    driver.close();
+                } catch (Exception closeException) {
+                    log.error("driver.close() also failed: {}", closeException.getMessage());
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Unexpected error during driver shutdown: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Find question WebElement using pre-computed metadata from DB additionalData. - Prefer liIndex
+     * to index into filteredQuestionElements for O(1) - Fallback to containerXPath if present
+     */
+    private WebElement findQuestionByAdditionalData(WebDriver driver, Question question,
+            List<WebElement> unused) {
+        try {
+            Map<String, String> additionalData = question.getAdditionalData();
+            if (additionalData != null) {
+                String liIndexStr = additionalData.get("liIndex");
+                if (liIndexStr != null) {
+                    try {
+                        int liIndex = Integer.parseInt(liIndexStr);
+                        List<WebElement> allListItems =
+                                driver.findElements(By.cssSelector("div[role='listitem']"));
+                        if (liIndex >= 0 && liIndex < allListItems.size()) {
+                            return allListItems.get(liIndex);
+                        }
+                    } catch (NumberFormatException ignore) {
+                    }
+                }
+
+                String containerXPath = additionalData.get("containerXPath");
+                if (containerXPath != null && !containerXPath.isBlank()) {
+                    try {
+                        return driver.findElement(By.xpath(containerXPath));
+                    } catch (Exception ignore) {
+                    }
+                }
+            }
+        } catch (Exception ignore) {
+        }
+        return null;
+    }
+
+    /**
+     * Build a stable By locator for a question using saved additionalData
+     */
+    private By buildLocatorForQuestion(Question question) {
+        Map<String, String> add = question.getAdditionalData();
+        if (add != null) {
+            String li = add.get("liIndex");
+            if (li != null) {
+                try {
+                    int i = Integer.parseInt(li);
+                    return By.xpath("(//div[@role='listitem'])[" + (i + 1) + "]");
+                } catch (NumberFormatException ignore) {
+                }
+            }
+            String x = add.get("containerXPath");
+            if (x != null && !x.isBlank()) {
+                return By.xpath(x);
+            }
+            String t = add.get("headingNormalized");
+            if (t != null && !t.isBlank()) {
+                return By.xpath(
+                        "//div[@role='listitem'][.//div[@role='heading' and normalize-space()=\""
+                                + t.replace("\"", "\\\"") + "\"]]");
+            }
+        }
+        String t = question.getTitle() == null ? "" : question.getTitle();
+        return By.xpath("//div[@role='listitem'][.//div[@role='heading' and normalize-space()=\""
+                + t.replace("\"", "\\\"") + "\"]]");
+    }
+
+    /**
+     * Resolve question element via cached By locator. Fallback to rebuilt locator if needed. Throws
+     * MappingException with details when not found.
+     */
+    private WebElement resolveQuestionElement(WebDriver driver, String formUrl, Question question) {
+        UUID formId = question.getForm() != null ? question.getForm().getId() : null;
+        if (formId == null) {
+            // Fallback: try to locate by freshly built locator
+            By by = buildLocatorForQuestion(question);
+            try {
+                return new WebDriverWait(driver, Duration.ofSeconds(10))
+                        .until(ExpectedConditions.presenceOfElementLocated(by));
+            } catch (Exception e) {
+                throw buildMappingException(question, "No formId on question; locator failed", e);
+            }
+        }
+
+        Map<UUID, By> perForm =
+                formLocatorCache.computeIfAbsent(formId, k -> new ConcurrentHashMap<>());
+        By by = perForm.computeIfAbsent(question.getId(), k -> buildLocatorForQuestion(question));
+
+        try {
+            return new WebDriverWait(driver, Duration.ofSeconds(10))
+                    .until(ExpectedConditions.presenceOfElementLocated(by));
+        } catch (Exception first) {
+            // Rebuild fallback and try once
+            By fallback = buildLocatorForQuestion(question);
+            if (!fallback.toString().equals(by.toString())) {
+                perForm.put(question.getId(), fallback);
+            }
+            try {
+                return new WebDriverWait(driver, Duration.ofSeconds(5))
+                        .until(ExpectedConditions.presenceOfElementLocated(fallback));
+            } catch (Exception second) {
+                throw buildMappingException(question, "Locator failed (primary and fallback)",
+                        second);
+            }
+        }
+    }
+
+    private com.dienform.tool.dienformtudong.exception.MappingException buildMappingException(
+            Question question, String reason, Exception cause) {
+        Map<String, Object> details = new HashMap<>();
+        details.put("formId", question.getForm() != null ? question.getForm().getId() : null);
+        details.put("questionId", question.getId());
+        details.put("questionTitle", question.getTitle());
+        Map<String, String> add = question.getAdditionalData();
+        if (add != null) {
+            details.put("liIndex", add.get("liIndex"));
+            details.put("containerXPath", add.get("containerXPath"));
+            details.put("headingNormalized", add.get("headingNormalized"));
+        }
+        details.put("reason", reason);
+        return new com.dienform.tool.dienformtudong.exception.MappingException(
+                "Failed to map question element", details);
     }
 
     /**
@@ -1441,6 +1572,14 @@ public class GoogleFormServiceImpl implements GoogleFormService {
         options.addArguments("--no-first-run");
         options.addArguments("--no-default-browser-check");
 
+        // Faster page initialization: do not block for full load
+        options.setPageLoadStrategy(org.openqa.selenium.PageLoadStrategy.EAGER);
+
+        // Disable images to speed up load
+        java.util.Map<String, Object> prefs = new java.util.HashMap<>();
+        prefs.put("profile.managed_default_content_settings.images", 2);
+        options.setExperimentalOption("prefs", prefs);
+
         // Set headless mode based on configuration
         if (headless) {
             options.addArguments("--headless=new");
@@ -1452,41 +1591,17 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                 Collections.singletonList("enable-automation"));
         options.setExperimentalOption("useAutomationExtension", false);
 
-        // Setup Chrome driver with retry mechanism
-        WebDriver driver = null;
-        int maxRetries = 3;
-        int retryCount = 0;
-
-        while (retryCount < maxRetries) {
-            try {
-                WebDriverManager.chromedriver().setup();
-                driver = new ChromeDriver(options);
-                String sessionId = ((ChromeDriver) driver).getSessionId().toString();
-                log.info("ChromeDriver created successfully with session ID: {}", sessionId);
-                break;
-            } catch (Exception e) {
-                retryCount++;
-                log.warn("Failed to create ChromeDriver (attempt {}/{}): {}", retryCount,
-                        maxRetries, e.getMessage());
-
-                if (retryCount >= maxRetries) {
-                    throw new RuntimeException(
-                            "Failed to create ChromeDriver after " + maxRetries + " attempts", e);
-                }
-
-                // Wait before retry
-                Thread.sleep(1000 * retryCount);
-            }
-        }
+        // Setup Chrome driver
+        WebDriver driver = new ChromeDriver(options);
+        log.info("ChromeDriver created successfully");
 
         if (driver == null) {
             throw new RuntimeException("Failed to create ChromeDriver");
         }
 
-        // Set optimized timeouts - reduced from 180s to 30s
-        int optimizedTimeout = Math.min(timeoutSeconds, 30); // Cap at 30 seconds
-        driver.manage().timeouts().pageLoadTimeout(Duration.ofSeconds(optimizedTimeout));
-        driver.manage().timeouts().implicitlyWait(Duration.ofSeconds(10)); // Reduced implicit wait
+        // Set optimized timeouts: short pageLoadTimeout and zero implicit wait
+        driver.manage().timeouts().pageLoadTimeout(Duration.ofSeconds(10));
+        driver.manage().timeouts().implicitlyWait(Duration.ZERO);
 
         // Create wait object with shorter timeout
         WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(15)); // Reduced from 180s
@@ -1494,71 +1609,22 @@ public class GoogleFormServiceImpl implements GoogleFormService {
 
         // Navigate to form URL with retry mechanism
         log.info("Navigating to form URL: {}", formUrl);
-        int navigationRetries = 3;
-        int navigationRetryCount = 0;
+        driver.get(formUrl);
 
-        while (navigationRetryCount < navigationRetries) {
-            try {
-                driver.get(formUrl);
-                break;
-            } catch (Exception e) {
-                navigationRetryCount++;
-                log.warn("Failed to navigate to form URL (attempt {}/{}): {}", navigationRetryCount,
-                        navigationRetries, e.getMessage());
-
-                if (navigationRetryCount >= navigationRetries) {
-                    throw new RuntimeException("Failed to navigate to form URL after "
-                            + navigationRetries + " attempts", e);
-                }
-
-                // Wait before retry
-                Thread.sleep(2000 * navigationRetryCount);
-            }
-        }
-
-        // Wait for form to load completely with multiple strategies
+        // Wait for form to be ready (minimal wait)
         try {
             log.info("Waiting for form to load completely...");
 
-            // Strategy 1: Wait for Google Forms specific elements
+            // Wait for question containers to be present
             wait.until(ExpectedConditions
                     .presenceOfElementLocated(By.xpath("//div[@role='listitem']")));
-            log.info("Form elements found successfully with primary selector");
-
-            // Strategy 2: Wait for form container
-            wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("form")));
-            log.info("Form container found successfully");
-
-            // Strategy 3: Wait for at least one question to be fully loaded
-            wait.until(ExpectedConditions
-                    .presenceOfElementLocated(By.cssSelector("[role='heading']")));
-            log.info("Question headings found successfully");
-
-            // Additional wait to ensure JavaScript is fully executed
-            Thread.sleep(2000);
-            log.info("Form loading completed successfully");
+            log.info("Form ready: question containers present");
 
         } catch (Exception e) {
-            log.warn("Primary selectors failed, trying alternative: {}", e.getMessage());
-            // Fallback: try alternative selector with shorter timeout
-            try {
-                WebDriverWait shortWait = new WebDriverWait(driver, Duration.ofSeconds(10));
-                shortWait
-                        .until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("form")));
-                log.info("Form elements found with alternative selector");
-                // Thread.sleep(1000); // Additional wait
-            } catch (Exception e2) {
-                log.warn("Alternative selector also failed, proceeding anyway: {}",
-                        e2.getMessage());
-                // Continue anyway - elements might be loaded but not detected by selectors
-                // Thread.sleep(2000); // Wait a bit more before proceeding
-            }
+            log.warn("Waiting for form containers failed: {}. Proceeding.", e.getMessage());
         }
 
-        // Minimal delay only in human-like mode
-        if (humanLike) {
-            Thread.sleep(500); // Reduced from 2000ms to 500ms
-        }
+        // Proceed immediately
 
         return driver;
     }

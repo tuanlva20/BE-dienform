@@ -26,13 +26,9 @@ public class CacheManagementController {
   public ResponseEntity<Map<String, Object>> getCacheStatus() {
     Map<String, Object> status = new HashMap<>();
     try {
-      status.put("questionElementsCache_size",
-          googleFormServiceImpl.getQuestionElementsCache().size());
-      status.put("formQuestionMapCache_size",
-          googleFormServiceImpl.getFormQuestionMapCache().size());
-      status.put("questionMappingCache_size",
-          googleFormServiceImpl.getQuestionMappingCache().size());
+      // Deprecated caches removed; show only active caches
       status.put("formQuestionsCache_size", googleFormServiceImpl.getFormQuestionsCache().size());
+      // formLocatorCache is internal; we can reflect via a method in service if exposed later
       status.put("timestamp", System.currentTimeMillis());
       return ResponseEntity.ok(status);
     } catch (Exception e) {
@@ -48,12 +44,7 @@ public class CacheManagementController {
   public ResponseEntity<Map<String, Object>> getCacheKeys() {
     Map<String, Object> keys = new HashMap<>();
     try {
-      keys.put("questionElementsCache_keys",
-          googleFormServiceImpl.getQuestionElementsCache().keySet());
-      keys.put("formQuestionMapCache_keys",
-          googleFormServiceImpl.getFormQuestionMapCache().keySet());
-      keys.put("questionMappingCache_keys",
-          googleFormServiceImpl.getQuestionMappingCache().keySet());
+      // Deprecated caches removed
       keys.put("formQuestionsCache_keys", googleFormServiceImpl.getFormQuestionsCache().keySet());
       keys.put("timestamp", System.currentTimeMillis());
       return ResponseEntity.ok(keys);
@@ -88,17 +79,9 @@ public class CacheManagementController {
     try {
       switch (type) {
         case "questionElements":
-          return ResponseEntity.ok(googleFormServiceImpl.getQuestionElementsCache().entrySet()
-              .stream().collect(Collectors.toMap(Map.Entry::getKey,
-                  e -> e.getValue() == null ? 0 : e.getValue().size())));
         case "questionMap":
-          return ResponseEntity.ok(
-              googleFormServiceImpl.getFormQuestionMapCache().entrySet().stream().collect(Collectors
-                  .toMap(Map.Entry::getKey, e -> e.getValue() == null ? 0 : e.getValue().size())));
         case "questionMapping":
-          return ResponseEntity.ok(googleFormServiceImpl.getQuestionMappingCache().entrySet()
-              .stream().collect(Collectors.toMap(Map.Entry::getKey,
-                  e -> e.getValue() == null ? "null" : e.getValue().toString())));
+          return ResponseEntity.badRequest().body("Deprecated cache type: " + type);
         case "questions":
           return ResponseEntity.ok(
               googleFormServiceImpl.getFormQuestionsCache().entrySet().stream().collect(Collectors
@@ -106,8 +89,7 @@ public class CacheManagementController {
         default:
           Map<String, Object> error = new HashMap<>();
           error.put("error", "Unknown cache type: " + type);
-          error.put("validTypes",
-              List.of("questionElements", "questionMap", "questionMapping", "questions"));
+          error.put("validTypes", List.of("questions"));
           return ResponseEntity.badRequest().body(error);
       }
     } catch (Exception e) {
@@ -124,19 +106,7 @@ public class CacheManagementController {
   public ResponseEntity<Map<String, Object>> getAllCacheData() {
     Map<String, Object> all = new HashMap<>();
     try {
-      // questionElementsCache: key -> số lượng phần tử
-      all.put("questionElementsCache",
-          googleFormServiceImpl.getQuestionElementsCache().entrySet().stream().collect(Collectors
-              .toMap(Map.Entry::getKey, e -> e.getValue() == null ? 0 : e.getValue().size())));
-      // formQuestionMapCache: key -> số lượng phần tử
-      all.put("formQuestionMapCache",
-          googleFormServiceImpl.getFormQuestionMapCache().entrySet().stream().collect(Collectors
-              .toMap(Map.Entry::getKey, e -> e.getValue() == null ? 0 : e.getValue().size())));
-      // questionMappingCache: key -> string value
-      all.put("questionMappingCache",
-          googleFormServiceImpl.getQuestionMappingCache().entrySet().stream()
-              .collect(Collectors.toMap(Map.Entry::getKey,
-                  e -> e.getValue() == null ? "null" : e.getValue().toString())));
+      // Deprecated caches removed from detailed view
       // formQuestionsCache: key -> số lượng phần tử
       all.put("formQuestionsCache",
           googleFormServiceImpl.getFormQuestionsCache().entrySet().stream().collect(Collectors

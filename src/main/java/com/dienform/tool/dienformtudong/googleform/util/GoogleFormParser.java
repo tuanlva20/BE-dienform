@@ -137,24 +137,24 @@ public class GoogleFormParser {
 
     public List<ExtractedQuestion> extractQuestionsFromHtml(String htmlContent) {
         List<ExtractedQuestion> questions = new ArrayList<>();
-        // Parse the HTML content using Jsoup
         Document document = Jsoup.parse(htmlContent);
 
-        // Select all question headings based on class or unique identifiers
-        Elements questionElements = document.select("[role=listitem]");
+        // All list items in the form
+        Elements listItems = document.select("div[role=listitem]");
 
-        int questionIndex = 0;
-        for (Element questionElement : questionElements) {
+        int questionIndex = 0; // logical order of questions (DB position)
+        for (int liIndex = 0; liIndex < listItems.size(); liIndex++) {
+            Element questionElement = listItems.get(liIndex);
+
             Elements questionTitleElement = questionElement.select("[role=heading]");
             String questionTitle = questionTitleElement.text().trim();
             if (org.springframework.util.ObjectUtils.isEmpty(questionTitle)
                     && org.springframework.util.ObjectUtils
                             .isEmpty(questionTitleElement.select("span strong").text())) {
-                log.warn("Skipping empty question title");
+                // Not a real question block – skip without advancing logicalQuestionIndex
                 continue;
             }
 
-            // Initialize ExtractedQuestion object with default type
             String type = detectQuestionType(questionElement);
             if (type == null) {
                 log.warn("Could not detect question type for element: {}", questionElement);
@@ -165,7 +165,7 @@ public class GoogleFormParser {
             question.setTitle(questionTitle);
             question.setType(type);
             question.setRequired(isRequired(questionElement));
-            question.setPosition(questionIndex++);
+            question.setPosition(questionIndex++); // position in logical question order
             question.setOptions(new ArrayList<>());
 
             // Extract options based on question type
@@ -190,11 +190,22 @@ public class GoogleFormParser {
                     extractDateOptions(questionElement, question);
                     break;
                 case "time":
-                    // Time questions don't have options, but might have constraints
+                    // Time questions don't have options
                     break;
                 default:
                     log.warn("Unsupported question type for options extraction: {}", type);
             }
+
+            // Merge base locator metadata into additionalData after type-specific extraction
+            Map<String, String> additionalData =
+                    question.getAdditionalData() != null ? question.getAdditionalData()
+                            : new HashMap<>();
+            additionalData.put("liIndex", String.valueOf(liIndex)); // index in all listitems
+            additionalData.put("containerXPath",
+                    "(//div[@role='listitem'])[" + (liIndex + 1) + "]");
+            additionalData.put("headingNormalized",
+                    questionTitle == null ? "" : questionTitle.replace("*", "").trim());
+            question.setAdditionalData(additionalData);
 
             questions.add(question);
         }

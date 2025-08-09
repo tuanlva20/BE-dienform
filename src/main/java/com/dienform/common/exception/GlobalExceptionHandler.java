@@ -108,4 +108,18 @@ public class GlobalExceptionHandler {
         "An unexpected error occurred", request.getDescription(false), LocalDateTime.now());
     return new ResponseEntity<>(errorResponse, HttpStatus.INTERNAL_SERVER_ERROR);
   }
+
+  // Detailed mapping error for user visibility
+  @ExceptionHandler(com.dienform.tool.dienformtudong.exception.MappingException.class)
+  public ResponseEntity<Map<String, Object>> handleMappingException(
+      com.dienform.tool.dienformtudong.exception.MappingException ex, WebRequest request) {
+    log.warn("MappingException: {} - details: {}", ex.getMessage(), ex.getDetails());
+    Map<String, Object> body = new HashMap<>();
+    body.put("status", HttpStatus.BAD_REQUEST.value());
+    body.put("message", ex.getMessage());
+    body.put("path", request.getDescription(false));
+    body.put("timestamp", LocalDateTime.now());
+    body.put("details", ex.getDetails());
+    return new ResponseEntity<>(body, HttpStatus.BAD_REQUEST);
+  }
 }

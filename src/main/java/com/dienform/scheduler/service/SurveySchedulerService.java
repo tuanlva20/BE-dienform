@@ -24,6 +24,7 @@ import com.dienform.tool.dienformtudong.fillrequest.service.ScheduleDistribution
 import com.dienform.tool.dienformtudong.fillschedule.entity.FillSchedule;
 import com.dienform.tool.dienformtudong.form.entity.Form;
 import com.dienform.tool.dienformtudong.form.repository.FormRepository;
+import com.dienform.tool.dienformtudong.googleform.service.impl.GoogleFormServiceImpl;
 import com.dienform.tool.dienformtudong.question.entity.Question;
 import com.dienform.tool.dienformtudong.question.repository.QuestionRepository;
 import lombok.RequiredArgsConstructor;
@@ -45,6 +46,7 @@ public class SurveySchedulerService {
   private final FormRepository formRepository;
   private final QuestionRepository questionRepository;
   private final CampaignSchedulerConfig schedulerConfig;
+  private final GoogleFormServiceImpl googleFormServiceImpl;
 
   @Autowired
   private DataFillCampaignService dataFillCampaignService;
@@ -139,6 +141,19 @@ public class SurveySchedulerService {
       } catch (Exception e) {
         log.error("Error updating stuck campaign status: {}", campaign.getId(), e);
       }
+    }
+  }
+
+  /**
+   * TTL scheduler to clear in-memory caches periodically to prevent growth Runs every 15 minutes
+   */
+  @Scheduled(fixedRate = 15 * 60 * 1000)
+  public void clearCacheTtl() {
+    try {
+      log.info("TTL cache cleanup triggered (every 15 minutes)");
+      googleFormServiceImpl.clearCaches();
+    } catch (Exception e) {
+      log.error("Error during TTL cache cleanup", e);
     }
   }
 
