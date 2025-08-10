@@ -69,7 +69,7 @@ jwt:
 
 app:
   frontend:
-    url: ${FRONTEND_URL:http://160.25.72.91:3000}
+    url: ${FRONTEND_URL:http://khaosat.tech}
   security:
     enable-ip-on-register: ${ENABLE_IP_ON_REGISTER:false}
   cookie:
