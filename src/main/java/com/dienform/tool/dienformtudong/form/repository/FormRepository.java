@@ -14,6 +14,13 @@ import com.dienform.tool.dienformtudong.form.entity.Form;
 public interface FormRepository extends JpaRepository<Form, UUID> {
     Page<Form> findByNameContainingIgnoreCase(String search, Pageable pageable);
 
+    Page<Form> findByCreatedBy_Id(UUID createdById, Pageable pageable);
+
+    Page<Form> findByCreatedBy_IdAndNameContainingIgnoreCase(UUID createdById, String search,
+            Pageable pageable);
+
+    long countByCreatedBy_Id(UUID createdById);
+
     @EntityGraph(attributePaths = {"formStatistic", "questions.options"})
     @Query("SELECT f FROM Form f WHERE f.id = :id")
     Optional<Form> findByIdWithFetch(UUID id);

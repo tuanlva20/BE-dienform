@@ -10,6 +10,7 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import com.dienform.common.exception.ResourceNotFoundException;
+import com.dienform.common.util.CurrentUserUtil;
 import com.dienform.tool.dienformtudong.fillrequest.entity.FillRequest;
 import com.dienform.tool.dienformtudong.fillrequest.repository.FillRequestMappingRepository;
 import com.dienform.tool.dienformtudong.fillrequest.repository.FillRequestRepository;
@@ -46,15 +47,37 @@ public class FormServiceImpl implements FormService {
   private final QuestionOptionRepository optionRepository;
   private final FillRequestRepository fillRequestRepository;
   private final FillRequestMappingRepository fillRequestMappingRepository;
+  private final CurrentUserUtil currentUserUtil;
 
   @Override
   public Page<FormResponse> getAllForms(FormParam param, Pageable pageable) {
     Page<Form> formPage;
 
-    if (param.getSearch() != null && !param.getSearch().isEmpty()) {
-      formPage = formRepository.findByNameContainingIgnoreCase(param.getSearch(), pageable);
+    String search = param.getSearch();
+    String createdByStr = param.getCreatedBy();
+    if (createdByStr != null && !createdByStr.isBlank()) {
+      UUID createdBy = null;
+      try {
+        createdBy = UUID.fromString(createdByStr);
+      } catch (Exception ignored) {
+      }
+      if (createdBy != null) {
+        if (search != null && !search.isBlank()) {
+          formPage = formRepository.findByCreatedBy_IdAndNameContainingIgnoreCase(createdBy, search,
+              pageable);
+        } else {
+          formPage = formRepository.findByCreatedBy_Id(createdBy, pageable);
+        }
+      } else {
+        // fallback to normal search if invalid UUID
+        formPage = (search != null && !search.isBlank())
+            ? formRepository.findByNameContainingIgnoreCase(search, pageable)
+            : formRepository.findAll(pageable);
+      }
     } else {
-      formPage = formRepository.findAll(pageable);
+      formPage = (search != null && !search.isBlank())
+          ? formRepository.findByNameContainingIgnoreCase(search, pageable)
+          : formRepository.findAll(pageable);
     }
 
     return formPage.map(formMapper::toResponse);
@@ -72,23 +95,26 @@ public class FormServiceImpl implements FormService {
   public FormResponse createForm(FormRequest formRequest) {
     // Create and save the form
     Form form = formMapper.toEntity(formRequest);
+    currentUserUtil.getCurrentUserIfPresent().ifPresent(form::setCreatedBy);
 
-    // If form name is null or empty, extract title from Google Form and append form count
+    // If form name is null or empty, extract title from Google Form and append user-specific form
+    // count
     if (form.getName() == null || form.getName().trim().isEmpty()) {
-      // Convert edit link to public link first
       String title = googleFormService.extractTitleFromFormLink(form.getEditLink());
 
-      // Get total form count
-      long formCount = formRepository.count();
+      // Count forms created by current user; fallback to global count if not authenticated
+      long formCountForUser = currentUserUtil.getCurrentUserIdIfPresent()
+          .map(formRepository::countByCreatedBy_Id).orElse(0L);
+
+      long nextOrdinal = formCountForUser + 1;
 
       if (title != null && !title.trim().isEmpty()) {
-        // Append form count to title
-        form.setName(title + " #" + (formCount + 1));
-        log.info("Using extracted title with count as form name: {}", form.getName());
+        form.setName(title + " #" + nextOrdinal);
+        log.info("Using extracted title with user-specific count as form name: {}", form.getName());
       } else {
-        // Use default name with count if title extraction fails
-        form.setName("Form #" + (formCount + 1));
-        log.warn("Could not extract title from Google Form, using default name with count: {}",
+        form.setName("Form #" + nextOrdinal);
+        log.warn(
+            "Could not extract title from Google Form, using default name with user-specific count: {}",
             form.getName());
       }
     }
@@ -129,7 +155,7 @@ public class FormServiceImpl implements FormService {
 
           // Dùng Map để loại trùng subOptions theo value
           if (rowOption.getSubOptions() != null) {
-            
+
             for (var subOption : rowOption.getSubOptions()) {
               if (subOption.getValue() == null
                   || subOptionValueMap.containsKey(subOption.getValue())) {

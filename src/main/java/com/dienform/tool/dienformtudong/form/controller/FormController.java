@@ -17,6 +17,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import com.dienform.common.model.ResponseModel;
+import com.dienform.common.util.CurrentUserUtil;
 import com.dienform.tool.dienformtudong.form.dto.param.FormParam;
 import com.dienform.tool.dienformtudong.form.dto.request.FormRequest;
 import com.dienform.tool.dienformtudong.form.dto.response.FormDetailResponse;
@@ -31,13 +32,17 @@ import lombok.RequiredArgsConstructor;
 public class FormController {
 
     private final FormService formService;
+    private final CurrentUserUtil currentUserUtil;
 
     @GetMapping
     public ResponseModel<?> getAllForms(@RequestParam(required = false) String search,
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "10") int size) {
 
-        FormParam param = FormParam.builder().search(search).page(page).size(size).build();
+        String createdBy = currentUserUtil.getCurrentUserIdIfPresent().map(java.util.UUID::toString)
+                .orElse(null);
+        FormParam param = FormParam.builder().search(search).createdBy(createdBy).page(page)
+                .size(size).build();
         Pageable pageable = PageRequest.of(page, size, Sort.by("createdAt").descending());
         Page<FormResponse> forms = formService.getAllForms(param, pageable);
         return ResponseModel.success(forms.getContent(), forms.getTotalPages(), page, size,
