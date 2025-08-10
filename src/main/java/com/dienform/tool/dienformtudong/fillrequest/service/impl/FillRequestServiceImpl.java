@@ -423,11 +423,12 @@ public class FillRequestServiceImpl implements FillRequestService {
     }
 
     // Step 5: Create fill request
-    FillRequest fillRequest = FillRequest.builder().form(form)
-        .surveyCount(Math.min(dataFillRequestDTO.getSubmissionCount(), sheetData.size()))
+    // Persist the exact requested submission count. Data re-use will be handled at execution time.
+    int requestedSubmissionCount = dataFillRequestDTO.getSubmissionCount();
+    FillRequest fillRequest = FillRequest.builder().form(form).surveyCount(requestedSubmissionCount)
         .pricePerSurvey(dataFillRequestDTO.getPricePerSurvey())
         .totalPrice(dataFillRequestDTO.getPricePerSurvey()
-            .multiply(BigDecimal.valueOf(dataFillRequestDTO.getSubmissionCount())))
+            .multiply(BigDecimal.valueOf(requestedSubmissionCount)))
         .humanLike(Boolean.TRUE.equals(dataFillRequestDTO.getIsHumanLike()))
         .startDate(dataFillRequestDTO.getStartDate()).endDate(dataFillRequestDTO.getEndDate())
         .status(Constants.FILL_REQUEST_STATUS_PENDING).build();
@@ -435,8 +436,10 @@ public class FillRequestServiceImpl implements FillRequestService {
     FillRequest savedRequest = fillRequestRepository.save(fillRequest);
 
     // Step 6: Create schedule distribution
+    // Ensure the number of scheduled tasks matches the persisted surveyCount
+    int effectiveTaskCount = savedRequest.getSurveyCount();
     List<ScheduleDistributionService.ScheduledTask> schedule =
-        scheduleDistributionService.distributeSchedule(dataFillRequestDTO.getSubmissionCount(),
+        scheduleDistributionService.distributeSchedule(effectiveTaskCount,
             dataFillRequestDTO.getStartDate(), dataFillRequestDTO.getEndDate(),
             Boolean.TRUE.equals(dataFillRequestDTO.getIsHumanLike()));
 

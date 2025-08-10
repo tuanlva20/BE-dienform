@@ -1572,7 +1572,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
         options.addArguments("--remote-allow-origins=*");
         options.addArguments("--no-sandbox");
         options.addArguments("--disable-dev-shm-usage");
-        options.addArguments("--window-size=1920,1080");
+        // options.addArguments("--window-size=1920,1080");
 
         // Performance optimizations
         options.addArguments("--disable-gpu");
