@@ -6,11 +6,12 @@ import java.util.Map;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.BindException;
-import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.WebRequest;
+import com.dienform.common.model.ErrorCode;
+import com.dienform.common.model.ResponseModel;
 import jakarta.validation.ConstraintViolationException;
 import lombok.AllArgsConstructor;
 import lombok.Data;
@@ -40,73 +41,99 @@ public class GlobalExceptionHandler {
   }
 
   @ExceptionHandler(ResourceNotFoundException.class)
-  public ResponseEntity<ErrorResponse> handleResourceNotFoundException(ResourceNotFoundException ex,
-      WebRequest request) {
+  public ResponseEntity<ResponseModel<Void>> handleResourceNotFoundException(
+      ResourceNotFoundException ex, WebRequest request) {
     log.warn("Resource not found: {} - {}", ex.getResourceName(), ex.getMessage());
 
     // Create a more user-friendly error message
     String userMessage = String.format("Không tìm thấy %s với %s: '%s'", ex.getResourceName(),
         ex.getFieldName(), ex.getFieldValue());
 
-    ErrorResponse errorResponse = new ErrorResponse(HttpStatus.NOT_FOUND.value(), userMessage,
-        request.getDescription(false), LocalDateTime.now());
-    return new ResponseEntity<>(errorResponse, HttpStatus.NOT_FOUND);
+    Map<String, Object> details = new HashMap<>();
+    details.put("path", request.getDescription(false));
+    details.put("timestamp", LocalDateTime.now());
+    return new ResponseEntity<>(
+        ResponseModel.error(userMessage, HttpStatus.NOT_FOUND, ErrorCode.NOT_FOUND, details),
+        HttpStatus.NOT_FOUND);
   }
 
   @ExceptionHandler(BadRequestException.class)
-  public ResponseEntity<ErrorResponse> handleBadRequestException(BadRequestException ex,
+  public ResponseEntity<ResponseModel<Void>> handleBadRequestException(BadRequestException ex,
       WebRequest request) {
-    ErrorResponse errorResponse = new ErrorResponse(HttpStatus.BAD_REQUEST.value(), ex.getMessage(),
-        request.getDescription(false), LocalDateTime.now());
-    return new ResponseEntity<>(errorResponse, HttpStatus.BAD_REQUEST);
+    Map<String, Object> details = new HashMap<>();
+    details.put("path", request.getDescription(false));
+    details.put("timestamp", LocalDateTime.now());
+    return new ResponseEntity<>(ResponseModel.error(ex.getMessage(), HttpStatus.BAD_REQUEST,
+        ErrorCode.BAD_REQUEST, details), HttpStatus.BAD_REQUEST);
   }
 
   @ExceptionHandler(MethodArgumentNotValidException.class)
-  public ResponseEntity<ValidationErrorResponse> handleMethodArgumentNotValidException(
+  public ResponseEntity<ResponseModel<Void>> handleMethodArgumentNotValidException(
       MethodArgumentNotValidException ex, WebRequest request) {
     Map<String, String> errors = new HashMap<>();
-    ex.getBindingResult().getAllErrors().forEach(error -> {
-      String fieldName = ((FieldError) error).getField();
+    ex.getBindingResult().getFieldErrors().forEach(error -> {
+      String fieldName = error.getField();
       String errorMessage = error.getDefaultMessage();
       errors.put(fieldName, errorMessage);
     });
 
-    ValidationErrorResponse errorResponse =
-        new ValidationErrorResponse(HttpStatus.BAD_REQUEST.value(), "Validation error",
-            request.getDescription(false), LocalDateTime.now(), errors);
-    return new ResponseEntity<>(errorResponse, HttpStatus.BAD_REQUEST);
+    Map<String, Object> details = new HashMap<>();
+    details.put("errors", errors);
+    details.put("path", request.getDescription(false));
+    details.put("timestamp", LocalDateTime.now());
+    return new ResponseEntity<>(ResponseModel.error("Validation error", HttpStatus.BAD_REQUEST,
+        ErrorCode.VALIDATION_ERROR, details), HttpStatus.BAD_REQUEST);
   }
 
   @ExceptionHandler(BindException.class)
-  public ResponseEntity<ValidationErrorResponse> handleBindException(BindException ex,
+  public ResponseEntity<ResponseModel<Void>> handleBindException(BindException ex,
       WebRequest request) {
     Map<String, String> errors = new HashMap<>();
-    ex.getBindingResult().getAllErrors().forEach(error -> {
-      String fieldName = ((FieldError) error).getField();
+    ex.getBindingResult().getFieldErrors().forEach(error -> {
+      String fieldName = error.getField();
       String errorMessage = error.getDefaultMessage();
       errors.put(fieldName, errorMessage);
     });
 
-    ValidationErrorResponse errorResponse =
-        new ValidationErrorResponse(HttpStatus.BAD_REQUEST.value(), "Validation error",
-            request.getDescription(false), LocalDateTime.now(), errors);
-    return new ResponseEntity<>(errorResponse, HttpStatus.BAD_REQUEST);
+    Map<String, Object> details = new HashMap<>();
+    details.put("errors", errors);
+    details.put("path", request.getDescription(false));
+    details.put("timestamp", LocalDateTime.now());
+    return new ResponseEntity<>(ResponseModel.error("Validation error", HttpStatus.BAD_REQUEST,
+        ErrorCode.VALIDATION_ERROR, details), HttpStatus.BAD_REQUEST);
   }
 
   @ExceptionHandler(ConstraintViolationException.class)
-  public ResponseEntity<ErrorResponse> handleConstraintViolationException(
+  public ResponseEntity<ResponseModel<Void>> handleConstraintViolationException(
       ConstraintViolationException ex, WebRequest request) {
-    ErrorResponse errorResponse = new ErrorResponse(HttpStatus.BAD_REQUEST.value(),
-        "Validation error: " + ex.getMessage(), request.getDescription(false), LocalDateTime.now());
-    return new ResponseEntity<>(errorResponse, HttpStatus.BAD_REQUEST);
+    Map<String, Object> details = new HashMap<>();
+    details.put("path", request.getDescription(false));
+    details.put("timestamp", LocalDateTime.now());
+    return new ResponseEntity<>(ResponseModel.error("Validation error: " + ex.getMessage(),
+        HttpStatus.BAD_REQUEST, ErrorCode.CONSTRAINT_VIOLATION, details), HttpStatus.BAD_REQUEST);
+  }
+
+  @ExceptionHandler(ConflictException.class)
+  public ResponseEntity<ResponseModel<Void>> handleConflictException(ConflictException ex,
+      WebRequest request) {
+    Map<String, Object> details = new HashMap<>();
+    details.put("path", request.getDescription(false));
+    details.put("timestamp", LocalDateTime.now());
+    return new ResponseEntity<>(
+        ResponseModel.error(ex.getMessage(), HttpStatus.CONFLICT, ErrorCode.CONFLICT, details),
+        HttpStatus.CONFLICT);
   }
 
   @ExceptionHandler(Exception.class)
-  public ResponseEntity<ErrorResponse> handleGlobalException(Exception ex, WebRequest request) {
+  public ResponseEntity<ResponseModel<Void>> handleGlobalException(Exception ex,
+      WebRequest request) {
     log.error("Unhandled exception", ex);
-    ErrorResponse errorResponse = new ErrorResponse(HttpStatus.INTERNAL_SERVER_ERROR.value(),
-        "An unexpected error occurred", request.getDescription(false), LocalDateTime.now());
-    return new ResponseEntity<>(errorResponse, HttpStatus.INTERNAL_SERVER_ERROR);
+    Map<String, Object> details = new HashMap<>();
+    details.put("path", request.getDescription(false));
+    details.put("timestamp", LocalDateTime.now());
+    return new ResponseEntity<>(ResponseModel.error("An unexpected error occurred",
+        HttpStatus.INTERNAL_SERVER_ERROR, ErrorCode.INTERNAL_ERROR, details),
+        HttpStatus.INTERNAL_SERVER_ERROR);
   }
 
   // Detailed mapping error for user visibility

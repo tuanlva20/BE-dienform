@@ -18,13 +18,8 @@ spring:
     username: khaosat.dev@gmail.com
     password: iyqmpuqjfdqlztos
     properties:
-      mail.smtp.auth: true
-      mail.smtp.starttls.enable: true
-
-# Local development settings
-app:
-  frontend:
-    url: http://localhost:3000
+      "[mail.smtp.auth]": true
+      "[mail.smtp.starttls.enable]": true
 
 # Local logging configuration
 logging:
@@ -55,7 +50,7 @@ google:
     similarity-threshold: 0.7
   # Google OAuth Configuration
   oauth:
-    client-id: 174305364945-1p8i19sc1gclleccatiirch72r5gdt0b.apps.googleusercontent.com
+    client-id: 576659994866-msfjs05kr5mqtk8nsli7hmmrid9qlc3t.apps.googleusercontent.com
 
 # Campaign Scheduler Configuration
 campaign:
@@ -63,8 +58,23 @@ campaign:
     fixed-rate: 10000 # Check every 10 seconds (10000ms)
     enabled: true
 
-# JWT Configuration
+# JWT Configuration for production
 jwt:
-  secret: YourSuperSecretJWTKeyThatShouldBeAtLeast256BitsLongForHS256AlgorithmSecurity
-  expiration: 86400000 # 1 day
-  refresh-expiration: 604800000 # 7 days
+  secret: ${JWT_SECRET:YourSuperSecretJWTKeyThatShouldBeAtLeast256BitsLongForHS256AlgorithmSecurity}
+  access-expiration: ${JWT_ACCESS_EXPIRATION_MS:86400000} # 1 day
+  refresh-expiration: ${JWT_REFRESH_EXPIRATION_SEC:2592000} # 7 days
+
+app:
+  frontend:
+    url: ${FRONTEND_URL:http://localhost:3000}
+  security:
+    enable-ip-on-register: ${ENABLE_IP_ON_REGISTER:false}
+  cookie:
+    domain: ${APP_COOKIE_DOMAIN:}
+    secure: ${APP_COOKIE_SECURE:false}
+    samesite: ${APP_COOKIE_SAMESITE:Lax}
+
+facebook:
+  app:
+    id: ${FACEBOOK_APP_ID:}
+    secret: ${FACEBOOK_APP_SECRET:}

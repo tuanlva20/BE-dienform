@@ -19,13 +19,10 @@ spring:
     username: ${MAIL_USERNAME:khaosat.dev@gmail.com}
     password: ${MAIL_PASSWORD:iyqmpuqjfdqlztos}
     properties:
-      mail.smtp.auth: true
-      mail.smtp.starttls.enable: true
+      "[mail.smtp.auth]": true
+      "[mail.smtp.starttls.enable]": true
 
 # Production settings
-app:
-  frontend:
-    url: ${FRONTEND_URL:https://yourdomain.com}
 
 # Production logging configuration
 logging:
@@ -67,5 +64,20 @@ campaign:
 # JWT Configuration for production
 jwt:
   secret: ${JWT_SECRET:YourSuperSecretJWTKeyThatShouldBeAtLeast256BitsLongForHS256AlgorithmSecurity}
-  expiration: 86400000 # 1 day
-  refresh-expiration: 604800000 # 7 days
+  access-expiration: ${JWT_ACCESS_EXPIRATION_MS:86400000} # 1 day
+  refresh-expiration: ${JWT_REFRESH_EXPIRATION_SEC:2592000} # 7 days
+
+app:
+  frontend:
+    url: ${FRONTEND_URL:https://yourdomain.com}
+  security:
+    enable-ip-on-register: ${ENABLE_IP_ON_REGISTER:false}
+  cookie:
+    domain: ${APP_COOKIE_DOMAIN:}
+    secure: ${APP_COOKIE_SECURE:true}
+    samesite: ${APP_COOKIE_SAMESITE:None}
+
+facebook:
+  app:
+    id: ${FACEBOOK_APP_ID:}
+    secret: ${FACEBOOK_APP_SECRET:}
