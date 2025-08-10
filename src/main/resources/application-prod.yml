@@ -1,17 +1,17 @@
 # Production environment configurations
 server:
-  port: 8080
+  port: 2412
 
 spring:
   jpa:
     open-in-view: false
     show-sql: false # Disable SQL logging in production
     hibernate:
-      ddl-auto: validate # Validate schema in production
+      ddl-auto: update # Validate schema in production
   datasource:
-    url: ${DATABASE_URL:jdbc:mysql://localhost:3306/dienform?useSSL=true&serverTimezone=UTC}
-    username: ${DATABASE_USERNAME:root}
-    password: ${DATABASE_PASSWORD:password}
+    url: ${DATABASE_URL:jdbc:mysql://160.25.72.91:3306/fill_form}
+    username: ${DATABASE_USERNAME:fillform}
+    password: ${DATABASE_PASSWORD:admin@}
     driver-class-name: com.mysql.cj.jdbc.Driver
   mail:
     host: smtp.gmail.com
@@ -53,7 +53,7 @@ google:
     similarity-threshold: 0.8 # Higher threshold for production
   # Google OAuth Configuration
   oauth:
-    client-id: ${GOOGLE_OAUTH_CLIENT_ID:174305364945-1p8i19sc1gclleccatiirch72r5gdt0b.apps.googleusercontent.com}
+    client-id: 576659994866-msfjs05kr5mqtk8nsli7hmmrid9qlc3t.apps.googleusercontent.com
 
 # Campaign Scheduler Configuration for production
 campaign:
@@ -69,13 +69,13 @@ jwt:
 
 app:
   frontend:
-    url: ${FRONTEND_URL:https://yourdomain.com}
+    url: ${FRONTEND_URL:http://160.25.72.91:3000}
   security:
     enable-ip-on-register: ${ENABLE_IP_ON_REGISTER:false}
   cookie:
     domain: ${APP_COOKIE_DOMAIN:}
-    secure: ${APP_COOKIE_SECURE:true}
-    samesite: ${APP_COOKIE_SAMESITE:None}
+    secure: ${APP_COOKIE_SECURE:false}
+    samesite: ${APP_COOKIE_SAMESITE:Lax}
 
 facebook:
   app:
