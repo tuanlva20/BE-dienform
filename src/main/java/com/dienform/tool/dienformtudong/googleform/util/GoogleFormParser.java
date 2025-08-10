@@ -9,7 +9,6 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.stream.Collectors;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
@@ -411,7 +410,7 @@ public class GoogleFormParser {
                         try {
                             JsonArray colElement = colArr.get(j).getAsJsonArray();
                             if (colElement.size() > 0) {
-                                String colText = colElement.get(0).getAsString();
+                                String colText = colElement.get(0).getAsString().trim();
                                 if (!allColumns.contains(colText)) {
                                     allColumns.add(colText);
                                     log.debug("Found column: {}", colText);
@@ -450,13 +449,18 @@ public class GoogleFormParser {
                         rowOption.setValue(rowId);
                         rowOption.setPosition(i);
                         rowOption.setRow(true); // This is a row option
-                        rowOption.setSubOptions(allColumns.stream().map(opt -> {
+                        // Build column subOptions with correct positions
+                        List<ExtractedOption> columnSubOptions = new ArrayList<>();
+                        for (int colIndex = 0; colIndex < allColumns.size(); colIndex++) {
+                            String colText = allColumns.get(colIndex);
                             ExtractedOption subOpt = new ExtractedOption();
-                            subOpt.setText(opt);
-                            subOpt.setValue(opt);
+                            subOpt.setText(colText);
+                            subOpt.setValue(colText);
+                            subOpt.setPosition(colIndex);
                             subOpt.setRow(false); // These are column subOptions
-                            return subOpt;
-                        }).collect(Collectors.toList()));
+                            columnSubOptions.add(subOpt);
+                        }
+                        rowOption.setSubOptions(columnSubOptions);
                         rowOptions.add(rowOption);
                         log.info(
                                 "=== JSON PARSING: Created row option: '{}' with isRow={} and {} subOptions",
@@ -534,15 +538,19 @@ public class GoogleFormParser {
                     rowOption.setText(rowTitle);
                     rowOption.setValue("row_" + rowIndex);
                     rowOption.setPosition(rowIndex);
-                    rowOption.setRow(true); // This is a
-                                            // row option
-                    rowOption.setSubOptions(columnLabels.stream().map(opt -> {
+                    rowOption.setRow(true); // This is a row option
+                    // Build column subOptions with correct positions
+                    List<ExtractedOption> columnSubOptions = new ArrayList<>();
+                    for (int colIndex = 0; colIndex < columnLabels.size(); colIndex++) {
+                        String colText = columnLabels.get(colIndex);
                         ExtractedOption subOpt = new ExtractedOption();
-                        subOpt.setText(opt);
-                        subOpt.setValue(opt);
+                        subOpt.setText(colText);
+                        subOpt.setValue(colText);
+                        subOpt.setPosition(colIndex);
                         subOpt.setRow(false); // These are column subOptions
-                        return subOpt;
-                    }).collect(Collectors.toList()));
+                        columnSubOptions.add(subOpt);
+                    }
+                    rowOption.setSubOptions(columnSubOptions);
                     rowOptions.add(rowOption);
                     log.info(
                             "=== HTML PARSING: Created row option: '{}' with isRow={} and {} subOptions",
@@ -596,7 +604,7 @@ public class GoogleFormParser {
                                 for (int j = 0; j < colArr.size(); j++) {
                                     JsonArray colElement = colArr.get(j).getAsJsonArray();
                                     if (colElement.size() > 0) {
-                                        String colText = colElement.get(0).getAsString();
+                                        String colText = colElement.get(0).getAsString().trim();
                                         columnLabels.add(colText);
                                     }
                                 }
