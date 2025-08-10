@@ -443,8 +443,14 @@ public class FillRequestServiceImpl implements FillRequestService {
     // Step 7: Store data mapping for campaign execution
     List<FillRequestMapping> mappings = new ArrayList<>();
     for (var mapping : dataFillRequestDTO.getMappings()) {
+      String rawQuestionId = mapping.getQuestionId();
+      String baseQuestionId = rawQuestionId;
+      if (rawQuestionId != null && rawQuestionId.contains(":")) {
+        baseQuestionId = rawQuestionId.split(":", 2)[0];
+      }
+
       FillRequestMapping fillRequestMapping = FillRequestMapping.builder()
-          .fillRequestId(savedRequest.getId()).questionId(UUID.fromString(mapping.getQuestionId()))
+          .fillRequestId(savedRequest.getId()).questionId(UUID.fromString(baseQuestionId))
           .columnName(mapping.getColumnName()).sheetLink(dataFillRequestDTO.getSheetLink()).build();
       mappings.add(fillRequestMapping);
     }

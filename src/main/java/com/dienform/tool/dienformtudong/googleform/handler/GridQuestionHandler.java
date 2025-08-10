@@ -438,7 +438,38 @@ public class GridQuestionHandler {
         }
 
         if (!optionFound) {
-          log.warn("Checkbox for option '{}' not found in row", optionText);
+          // Fallback: if option is numeric, treat as 1-based column index within the row
+          String token = optionText != null ? optionText.trim() : "";
+          if (token.matches("\\d+")) {
+            int idx = Integer.parseInt(token);
+            if (idx >= 1 && idx <= checkboxes.size()) {
+              WebElement byIndex = checkboxes.get(idx - 1);
+              try {
+                String ariaChecked = byIndex.getAttribute("aria-checked");
+                if (!"true".equals(ariaChecked)) {
+                  ((JavascriptExecutor) driver).executeScript("arguments[0].scrollIntoView(true);",
+                      byIndex);
+                  if (humanLike) {
+                    Thread.sleep(100 + random.nextInt(200));
+                  }
+                  try {
+                    ((JavascriptExecutor) driver).executeScript("arguments[0].click();", byIndex);
+                  } catch (Exception jsErr) {
+                    byIndex.click();
+                  }
+                  log.debug("Clicked checkbox by index {} (fallback)", idx);
+                } else {
+                  log.debug("Checkbox by index {} already selected", idx);
+                }
+                optionFound = true;
+              } catch (Exception clickErr) {
+                log.debug("Failed to click checkbox by index {}: {}", idx, clickErr.getMessage());
+              }
+            }
+          }
+          if (!optionFound) {
+            log.warn("Checkbox for option '{}' not found in row", optionText);
+          }
         }
       }
     } catch (Exception e) {
@@ -450,11 +481,52 @@ public class GridQuestionHandler {
    * Find row by label - improved to handle the specific HTML structure
    */
   private WebElement findRowByLabel(List<WebElement> rowGroups, String targetLabel) {
+    String normalizedTarget =
+        targetLabel == null ? "" : targetLabel.trim().toLowerCase().replaceAll("\\s+", " ");
     for (WebElement rowGroup : rowGroups) {
-      String ariaLabel = rowGroup.getAttribute("aria-label");
-      if (ariaLabel != null && ariaLabel.trim().equalsIgnoreCase(targetLabel.trim())) {
-        log.debug("Found row with label: {}", targetLabel);
-        return rowGroup;
+      try {
+        String ariaLabel = rowGroup.getAttribute("aria-label");
+        if (ariaLabel != null && ariaLabel.trim().equalsIgnoreCase(targetLabel.trim())) {
+          log.debug("Found row with label (aria-label): {}", targetLabel);
+          return rowGroup;
+        }
+        if (ariaLabel != null) {
+          String ariaNorm = ariaLabel.trim().toLowerCase().replaceAll("\\s+", " ");
+          if (!normalizedTarget.isEmpty() && ariaNorm.contains(normalizedTarget)) {
+            log.debug("Found row by aria-label contains: {}", targetLabel);
+            return rowGroup;
+          }
+        }
+
+        // Fallback: try to find a descendant with role="row" or text matching target label
+        List<WebElement> labelCandidates =
+            rowGroup.findElements(By.cssSelector("[role='row'], [role='presentation']"));
+        for (WebElement lc : labelCandidates) {
+          String text = lc.getText();
+          if (text != null && !text.trim().isEmpty()
+              && text.trim().equalsIgnoreCase(targetLabel.trim())) {
+            log.debug("Found row with label (descendant text): {}", targetLabel);
+            return rowGroup;
+          }
+          if (text != null) {
+            String txtNorm = text.trim().toLowerCase().replaceAll("\\s+", " ");
+            if (!normalizedTarget.isEmpty() && txtNorm.contains(normalizedTarget)) {
+              log.debug("Found row by descendant text contains: {}", targetLabel);
+              return rowGroup;
+            }
+          }
+        }
+
+        // Final fallback: check the entire group's text content contains the label
+        String groupText = rowGroup.getText();
+        if (groupText != null) {
+          String grpNorm = groupText.trim().toLowerCase().replaceAll("\\s+", " ");
+          if (!normalizedTarget.isEmpty() && grpNorm.contains(normalizedTarget)) {
+            log.debug("Found row by group text contains: {}", targetLabel);
+            return rowGroup;
+          }
+        }
+      } catch (Exception ignore) {
       }
     }
     log.warn("Row with label '{}' not found", targetLabel);
@@ -466,14 +538,35 @@ public class GridQuestionHandler {
    */
   private List<String> parseOptions(Object answerValue) {
     if (answerValue instanceof List) {
-      return (List<String>) answerValue;
-    } else {
-      String text = answerValue.toString();
-      if (text.contains(",")) {
-        return List.of(text.split(","));
-      } else {
-        return List.of(text);
+      List<?> raw = (List<?>) answerValue;
+      List<String> tokens = new ArrayList<>();
+      for (Object o : raw) {
+        if (o == null) {
+          continue;
+        }
+        String t = o.toString().trim();
+        if (!t.isEmpty()) {
+          tokens.add(t);
+        }
       }
+      return tokens;
+    } else {
+      String text = answerValue == null ? "" : answerValue.toString();
+      String[] parts = text.split("[,|]");
+      List<String> tokens = new ArrayList<>();
+      for (String p : parts) {
+        String t = p.trim();
+        if (!t.isEmpty()) {
+          tokens.add(t);
+        }
+      }
+      if (tokens.isEmpty() && text != null) {
+        String t = text.trim();
+        if (!t.isEmpty()) {
+          tokens.add(t);
+        }
+      }
+      return tokens;
     }
   }
 }

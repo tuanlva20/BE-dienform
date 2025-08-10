@@ -21,7 +21,7 @@ import lombok.extern.slf4j.Slf4j;
 @Slf4j
 public class GridQuestionServiceImpl implements GridQuestionService {
 
-  private static final Pattern GRID_OPTION_PATTERN = Pattern.compile("(.+?):(.+)");
+  private static final Pattern GRID_OPTION_PATTERN = Pattern.compile("(.+):(.+)");
   private static final Pattern MULTIPLE_OPTIONS_PATTERN = Pattern.compile("(.+?),(.+)");
 
   @Override
@@ -33,6 +33,33 @@ public class GridQuestionServiceImpl implements GridQuestionService {
 
     String normalizedText = rawAnswerText.trim();
 
+    // Support multiple row entries separated by ';' (e.g., "Row1:optA,optB;Row2:1|3")
+    if (normalizedText.contains(";")) {
+      Map<String, Object> rowAnswers = new HashMap<>();
+      String[] rowParts = normalizedText.split(";");
+      for (String rowPart : rowParts) {
+        String trimmedPart = rowPart.trim();
+        if (trimmedPart.isEmpty()) {
+          continue;
+        }
+        Matcher multiRowMatcher = GRID_OPTION_PATTERN.matcher(trimmedPart);
+        if (multiRowMatcher.matches()) {
+          String row = multiRowMatcher.group(1).trim();
+          String optionsPart = multiRowMatcher.group(2).trim();
+          if (optionsPart.contains(",") || optionsPart.contains("|")) {
+            List<String> options = parseMultipleOptions(optionsPart);
+            rowAnswers.put(row, options);
+          } else {
+            rowAnswers.put(row, optionsPart);
+          }
+        }
+      }
+      if (!rowAnswers.isEmpty()) {
+        return GridQuestionAnswer.withRowAnswers(question.getId(), question.getTitle(),
+            question.getType(), rowAnswers);
+      }
+    }
+
     // Check if it contains row information (format: "row:option")
     Matcher gridMatcher = GRID_OPTION_PATTERN.matcher(normalizedText);
     if (gridMatcher.matches()) {
@@ -40,7 +67,7 @@ public class GridQuestionServiceImpl implements GridQuestionService {
       String optionsPart = gridMatcher.group(2).trim();
 
       // Check if options part contains multiple options
-      if (optionsPart.contains(",")) {
+      if (optionsPart.contains(",") || optionsPart.contains("|")) {
         List<String> options = parseMultipleOptions(optionsPart);
         Map<String, Object> rowAnswers = new HashMap<>();
         rowAnswers.put(row, options);
@@ -57,7 +84,7 @@ public class GridQuestionServiceImpl implements GridQuestionService {
     }
 
     // No row specified, check if it contains multiple options
-    if (normalizedText.contains(",")) {
+    if (normalizedText.contains(",") || normalizedText.contains("|")) {
       List<String> options = parseMultipleOptions(normalizedText);
       Map<String, Object> rowAnswers = new HashMap<>();
       rowAnswers.put("all", options); // Use "all" to indicate all rows
@@ -182,7 +209,7 @@ public class GridQuestionServiceImpl implements GridQuestionService {
    */
   private List<String> parseMultipleOptions(String optionsText) {
     List<String> options = new ArrayList<>();
-    String[] parts = optionsText.split(",");
+    String[] parts = optionsText.split("[,|]");
     for (String part : parts) {
       String trimmed = part.trim();
       if (!trimmed.isEmpty()) {

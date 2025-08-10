@@ -52,6 +52,11 @@ public interface GoogleFormService {
     void clearCaches();
 
     /**
+     * Expose form questions cache for operational endpoints
+     */
+    Map<String, List<ExtractedQuestion>> getFormQuestionsCache();
+
+    /**
      * Reset fill request status to PENDING if it's stuck in RUNNING state
      * 
      * @param fillRequestId The ID of the fill request to reset

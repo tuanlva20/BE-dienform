@@ -60,6 +60,7 @@ import com.dienform.tool.dienformtudong.googleform.util.GoogleFormParser.Extract
 import com.dienform.tool.dienformtudong.googleform.util.TestDataEnum;
 import com.dienform.tool.dienformtudong.question.entity.Question;
 import com.dienform.tool.dienformtudong.question.entity.QuestionOption;
+import com.dienform.tool.dienformtudong.question.repository.QuestionRepository;
 import com.dienform.tool.dienformtudong.surveyexecution.entity.SesstionExecution;
 import com.dienform.tool.dienformtudong.surveyexecution.repository.SessionExecutionRepository;
 import jakarta.annotation.PreDestroy;
@@ -107,6 +108,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     private final SessionExecutionRepository sessionExecutionRepository;
 
     private final ComboboxHandler comboboxHandler;
+    private final QuestionRepository questionRepository;
 
     // In-memory cache of form questions (URL -> Questions)
     private final Map<String, List<ExtractedQuestion>> formQuestionsCache =
@@ -479,11 +481,30 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     public boolean submitFormWithBrowser(UUID formId, String formUrl,
             Map<String, String> formData) {
         try {
+            // Load questions for this form to ensure title/type/additionalData are present
+            List<com.dienform.tool.dienformtudong.question.entity.Question> questionsForForm =
+                    questionRepository.findByFormIdOrderByPosition(formId);
+            Map<UUID, com.dienform.tool.dienformtudong.question.entity.Question> questionsById =
+                    new HashMap<>();
+            for (com.dienform.tool.dienformtudong.question.entity.Question q : questionsForForm) {
+                if (q.getId() != null) {
+                    questionsById.put(q.getId(), q);
+                }
+            }
+
             // Convert formData to Map<Question, QuestionOption>
             Map<Question, QuestionOption> selections = new HashMap<>();
             for (Map.Entry<String, String> entry : formData.entrySet()) {
-                Question question = new Question();
-                question.setId(UUID.fromString(entry.getKey()));
+                UUID qid = UUID.fromString(entry.getKey());
+                Question question = questionsById.get(qid);
+                if (question == null) {
+                    // Fallback to single fetch if not preloaded (should be rare)
+                    question = questionRepository.findById(qid).orElse(null);
+                }
+                if (question == null) {
+                    log.warn("Question not found for id {} in submitFormWithBrowser", qid);
+                    continue;
+                }
 
                 QuestionOption option = new QuestionOption();
                 option.setText(entry.getValue());
@@ -1753,74 +1774,87 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                 return;
             }
 
-            // First try exact match with data-answer-value
-            for (WebElement checkbox : checkboxOptions) {
-                String dataValue = checkbox.getAttribute("data-answer-value");
-                if (dataValue != null && dataValue.trim().equals(optionText.trim())) {
-                    wait.until(ExpectedConditions.elementToBeClickable(checkbox));
-                    checkbox.click();
-                    log.info("Checked checkbox option (exact match) for question '{}': {}",
-                            expectedTitle, optionText);
+            // Support multi-select values: e.g., "3|5" or "A|B,C". Split by , or |
+            String[] desiredParts = optionText.split("[,|]");
+            java.util.Set<String> desired = new java.util.HashSet<>();
+            for (String p : desiredParts) {
+                String t = p.trim();
+                if (!t.isEmpty())
+                    desired.add(t);
+            }
 
-                    // Verify checkbox was checked
-                    boolean isChecked = wait.until(
-                            ExpectedConditions.attributeToBe(checkbox, "aria-checked", "true"));
-                    if (!isChecked) {
-                        log.warn("Checkbox may not have been checked properly");
+            int selectedCount = 0;
+            // Try matching each desired token across strategies
+            for (String token : desired) {
+                boolean matched = false;
+
+                // Try exact match with data-answer-value
+                for (WebElement checkbox : checkboxOptions) {
+                    String dataValue = checkbox.getAttribute("data-answer-value");
+                    if (dataValue != null && (dataValue.trim().equals(token)
+                            || dataValue.trim().equalsIgnoreCase(token))) {
+                        wait.until(ExpectedConditions.elementToBeClickable(checkbox));
+                        checkbox.click();
+                        log.info("Checked checkbox option (data-value) '{}' for question '{}'",
+                                token, expectedTitle);
+                        matched = true;
+                        selectedCount++;
+                        break;
                     }
-                    return;
+                }
+                if (matched)
+                    continue;
+
+                // Try aria-label
+                for (WebElement checkbox : checkboxOptions) {
+                    String ariaLabel = checkbox.getAttribute("aria-label");
+                    if (ariaLabel != null && (ariaLabel.trim().equals(token)
+                            || ariaLabel.trim().equalsIgnoreCase(token))) {
+                        wait.until(ExpectedConditions.elementToBeClickable(checkbox));
+                        checkbox.click();
+                        log.info("Checked checkbox option (aria-label) '{}' for question '{}'",
+                                token, expectedTitle);
+                        matched = true;
+                        selectedCount++;
+                        break;
+                    }
+                }
+                if (matched)
+                    continue;
+
+                // Try text content match
+                for (WebElement checkbox : checkboxOptions) {
+                    String checkboxText = checkbox.getText().trim();
+                    if (checkboxText.isEmpty()) {
+                        try {
+                            WebElement span = checkbox.findElement(
+                                    By.xpath(".//following-sibling::div//span[@dir='auto']"));
+                            checkboxText = span.getText().trim();
+                        } catch (Exception ignored) {
+                        }
+                    }
+                    if (!checkboxText.isEmpty() && (checkboxText.equals(token)
+                            || checkboxText.equalsIgnoreCase(token))) {
+                        wait.until(ExpectedConditions.elementToBeClickable(checkbox));
+                        checkbox.click();
+                        log.info("Checked checkbox option (text content) '{}' for question '{}'",
+                                token, expectedTitle);
+                        matched = true;
+                        selectedCount++;
+                        break;
+                    }
+                }
+
+                if (!matched) {
+                    log.warn("Checkbox option token '{}' not found for question '{}'", token,
+                            expectedTitle);
                 }
             }
 
-            // Then try with aria-label
-            for (WebElement checkbox : checkboxOptions) {
-                String ariaLabel = checkbox.getAttribute("aria-label");
-                if (ariaLabel != null && ariaLabel.trim().equals(optionText.trim())) {
-                    wait.until(ExpectedConditions.elementToBeClickable(checkbox));
-                    checkbox.click();
-                    log.info("Checked checkbox option (aria-label match) for question '{}': {}",
-                            expectedTitle, optionText);
-
-                    // Verify checkbox was checked
-                    boolean isChecked = wait.until(
-                            ExpectedConditions.attributeToBe(checkbox, "aria-checked", "true"));
-                    if (!isChecked) {
-                        log.warn("Checkbox may not have been checked properly");
-                    }
-                    return;
-                }
+            if (selectedCount == 0) {
+                log.warn("No checkbox options could be selected for question '{}' from input '{}'",
+                        expectedTitle, optionText);
             }
-
-            // Finally try with text content
-            for (WebElement checkbox : checkboxOptions) {
-                String checkboxText = checkbox.getText().trim();
-                // If getText() returns empty, try to find text in child span
-                if (checkboxText.isEmpty()) {
-                    try {
-                        WebElement span = checkbox.findElement(
-                                By.xpath(".//following-sibling::div//span[@dir='auto']"));
-                        checkboxText = span.getText().trim();
-                    } catch (Exception ignored) {
-                    }
-                }
-
-                if (checkboxText.equals(optionText.trim())) {
-                    wait.until(ExpectedConditions.elementToBeClickable(checkbox));
-                    checkbox.click();
-                    log.info("Checked checkbox option (text content match) for question '{}': {}",
-                            expectedTitle, optionText);
-
-                    // Verify checkbox was checked
-                    boolean isChecked = wait.until(
-                            ExpectedConditions.attributeToBe(checkbox, "aria-checked", "true"));
-                    if (!isChecked) {
-                        log.warn("Checkbox may not have been checked properly");
-                    }
-                    return;
-                }
-            }
-
-            log.warn("Checkbox option not found for question '{}': {}", expectedTitle, optionText);
 
         } catch (Exception e) {
             log.error("Error filling checkbox question '{}': {}", optionText, e.getMessage());
@@ -2101,8 +2135,9 @@ public class GoogleFormServiceImpl implements GoogleFormService {
 
         String normalizedText = optionText.trim();
 
-        // Check if it contains row information (format: "row:option1,option2")
-        Pattern gridPattern = Pattern.compile("(.+?):(.+)");
+        // Check if it contains row information (format: "row:option1,option2").
+        // Use greedy left group to split on the last colon to support row labels containing ':'
+        Pattern gridPattern = Pattern.compile("(.+):(.+)");
         Matcher gridMatcher = gridPattern.matcher(normalizedText);
 
         if (gridMatcher.matches()) {
@@ -2112,8 +2147,8 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             return new CheckboxGridAnswer(row, options);
         }
 
-        // No row specified, check if it contains multiple options
-        if (normalizedText.contains(",")) {
+        // No row specified, check if it contains multiple options (support "," and "|")
+        if (normalizedText.contains(",") || normalizedText.contains("|")) {
             List<String> options = parseMultipleOptions(normalizedText);
             return new CheckboxGridAnswer(null, options);
         }
@@ -2127,7 +2162,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
      */
     private List<String> parseMultipleOptions(String optionsText) {
         List<String> options = new ArrayList<>();
-        String[] parts = optionsText.split(",");
+        String[] parts = optionsText.split("[,|]");
         for (String part : parts) {
             String trimmed = part.trim();
             if (!trimmed.isEmpty()) {
@@ -2450,6 +2485,40 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                                 e.getMessage());
                     }
                 } else {
+                    // Fallback: if option is numeric, treat it as 1-based column index
+                    String token = optionText != null ? optionText.trim() : "";
+                    if (token.matches("\\d+")) {
+                        int idx = Integer.parseInt(token);
+                        if (idx >= 1 && idx <= checkboxes.size()) {
+                            WebElement byIndex = checkboxes.get(idx - 1);
+                            try {
+                                String ariaChecked = byIndex.getAttribute("aria-checked");
+                                if (!"true".equals(ariaChecked)) {
+                                    ((JavascriptExecutor) driver).executeScript(
+                                            "arguments[0].scrollIntoView({block: 'center'});",
+                                            byIndex);
+                                    wait.until(ExpectedConditions.elementToBeClickable(byIndex));
+                                    try {
+                                        ((JavascriptExecutor) driver)
+                                                .executeScript("arguments[0].click();", byIndex);
+                                    } catch (Exception jsErr) {
+                                        byIndex.click();
+                                    }
+                                    log.info("Selected checkbox option by index {} (fallback)",
+                                            idx);
+                                    if (humanLike) {
+                                        Thread.sleep(50 + new Random().nextInt(100));
+                                    }
+                                } else {
+                                    log.debug("Checkbox by index {} already selected", idx);
+                                }
+                            } catch (Exception clickErr) {
+                                log.debug("Failed to click checkbox by index {}: {}", idx,
+                                        clickErr.getMessage());
+                            }
+                            continue;
+                        }
+                    }
                     log.warn("Checkbox option '{}' not found in row", optionText);
                 }
             }

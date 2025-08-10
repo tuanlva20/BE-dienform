@@ -293,27 +293,48 @@ public class DataFillCampaignService {
 
     // Map each question to its corresponding column value
     for (var mapping : originalRequest.getMappings()) {
-      String questionId = mapping.getQuestionId();
+      String questionIdRaw = mapping.getQuestionId();
       String columnName = extractColumnName(mapping.getColumnName());
 
+      // Support grid mapping keys in format "<questionId>:<rowLabel>"
+      String baseQuestionId = questionIdRaw;
+      String explicitRowLabel = null;
+      if (questionIdRaw != null && questionIdRaw.contains(":")) {
+        String[] parts = questionIdRaw.split(":", 2);
+        baseQuestionId = parts[0];
+        explicitRowLabel = parts.length > 1 ? parts[1] : null;
+      }
+
       // Find question
-      Question question = questionMap.get(UUID.fromString(questionId));
+      Question question = questionMap.get(UUID.fromString(baseQuestionId));
       if (question == null) {
-        log.warn("Question not found for ID: {}", questionId);
+        log.warn("Question not found for ID: {}", baseQuestionId);
         continue;
       }
 
       // Get value from sheet
       Object value = rowData.get(columnName);
       if (value == null) {
-        log.warn("No value found in column {} for question {}", columnName, questionId);
+        log.warn("No value found in column {} for question {}", columnName, baseQuestionId);
         continue;
       }
 
       // Convert value based on question type
-      String convertedValue = convertValueBasedOnQuestionType(value.toString(), question);
+      String convertedValue =
+          convertValueBasedOnQuestionType(value.toString(), question, explicitRowLabel, columnName);
       if (convertedValue != null) {
-        formData.put(questionId, convertedValue);
+        // For grid questions, accumulate multiple rows into a single entry using ';'
+        String type = question.getType() == null ? "" : question.getType().toLowerCase();
+        if ("multiple_choice_grid".equals(type) || "checkbox_grid".equals(type)) {
+          String existing = formData.get(baseQuestionId);
+          if (existing != null && !existing.isBlank()) {
+            formData.put(baseQuestionId, existing + ";" + convertedValue);
+          } else {
+            formData.put(baseQuestionId, convertedValue);
+          }
+        } else {
+          formData.put(baseQuestionId, convertedValue);
+        }
       }
     }
 
@@ -323,7 +344,8 @@ public class DataFillCampaignService {
   /**
    * Convert value based on question type
    */
-  private String convertValueBasedOnQuestionType(String value, Question question) {
+  private String convertValueBasedOnQuestionType(String value, Question question,
+      String explicitRowLabel, String columnName) {
     try {
       switch (question.getType().toLowerCase()) {
         case "text":
@@ -335,11 +357,74 @@ public class DataFillCampaignService {
         case "combobox":
         case "dropdown":
         case "select":
-          // If value is numeric, treat it as position
+          // Support multi-select encoding for checkbox: e.g. "3|5" -> map to option values
+          if ("checkbox".equalsIgnoreCase(question.getType())
+              || "multiselect".equalsIgnoreCase(question.getType())) {
+            // If contains delimiters, convert each position
+            if (value.contains("|") || value.contains(",")) {
+              return dataFillValidator.convertMultiplePositionsToValues(value,
+                  question.getOptions());
+            }
+          }
+          // If value is numeric (single), treat it as position
           if (value.matches("\\d+")) {
             return dataFillValidator.convertPositionToValue(value, question.getOptions());
           }
           return value;
+
+        case "multiple_choice_grid": {
+          String rowLabelMC =
+              explicitRowLabel != null ? explicitRowLabel : extractBracketLabel(columnName);
+          if (rowLabelMC == null) {
+            log.warn("Missing row label for multiple_choice_grid in column {}", columnName);
+            return null;
+          }
+          String v = value.trim();
+          // Map numeric index (1-based) to column option value
+          if (v.matches("\\d+")) {
+            List<QuestionOption> columns = question.getOptions().stream().filter(o -> !o.isRow())
+                .sorted((a, b) -> Integer.compare(a.getPosition() == null ? 0 : a.getPosition(),
+                    b.getPosition() == null ? 0 : b.getPosition()))
+                .toList();
+            int pos = Integer.parseInt(v);
+            if (pos >= 1 && pos <= columns.size()) {
+              v = columns.get(pos - 1).getValue();
+            }
+          }
+          return rowLabelMC + ":" + v;
+        }
+
+        case "checkbox_grid": {
+          String rowLabelCB =
+              explicitRowLabel != null ? explicitRowLabel : extractBracketLabel(columnName);
+          if (rowLabelCB == null) {
+            log.warn("Missing row label for checkbox_grid in column {}", columnName);
+            return null;
+          }
+          String[] parts = value.split("[,|]");
+          List<QuestionOption> columns = question.getOptions().stream().filter(o -> !o.isRow())
+              .sorted((a, b) -> Integer.compare(a.getPosition() == null ? 0 : a.getPosition(),
+                  b.getPosition() == null ? 0 : b.getPosition()))
+              .toList();
+          java.util.List<String> mapped = new java.util.ArrayList<>();
+          for (String p : parts) {
+            String t = p.trim();
+            if (t.isEmpty())
+              continue;
+            if (t.matches("\\d+")) {
+              int pos = Integer.parseInt(t);
+              if (pos >= 1 && pos <= columns.size()) {
+                mapped.add(columns.get(pos - 1).getValue());
+              } else {
+                mapped.add(t);
+              }
+            } else {
+              mapped.add(t);
+            }
+          }
+          String joined = String.join("|", mapped);
+          return rowLabelCB + ":" + joined;
+        }
 
         default:
           log.error("Unsupported question type: {} for question ID: {}", question.getType(),
@@ -360,5 +445,18 @@ public class DataFillCampaignService {
       return formattedColumnName.substring(formattedColumnName.indexOf(" - ") + 3);
     }
     return formattedColumnName;
+  }
+
+  // Extract label inside brackets from formatted column name: "Title [Label]" -> "Label"
+  private String extractBracketLabel(String formattedColumnName) {
+    if (formattedColumnName == null) {
+      return null;
+    }
+    int start = formattedColumnName.lastIndexOf('[');
+    int end = formattedColumnName.lastIndexOf(']');
+    if (start >= 0 && end > start) {
+      return formattedColumnName.substring(start + 1, end).trim();
+    }
+    return null;
   }
 }

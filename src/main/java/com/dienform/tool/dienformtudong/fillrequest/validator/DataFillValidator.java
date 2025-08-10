@@ -100,25 +100,44 @@ public class DataFillValidator {
       return ValidationResult.invalid(errors);
     }
 
-    // Create mapping from column to question
-    Map<String, Question> columnToQuestion = createColumnToQuestionMapping(questions, request);
-
     // Validate each row of data
     for (int rowIndex = 0; rowIndex < sheetData.size(); rowIndex++) {
       Map<String, Object> row = sheetData.get(rowIndex);
 
       for (var mapping : request.getMappings()) {
         String columnName = extractColumnName(mapping.getColumnName());
-        Question question = columnToQuestion.get(mapping.getQuestionId());
+        String mappingQuestionId = mapping.getQuestionId();
 
+        // Support grid mapping keys in format "<questionId>:<rowLabel>"
+        String baseQuestionId = mappingQuestionId;
+        String explicitRowLabel = null;
+        if (mappingQuestionId != null && mappingQuestionId.contains(":")) {
+          String[] parts = mappingQuestionId.split(":", 2);
+          baseQuestionId = parts[0];
+          explicitRowLabel = parts.length > 1 ? parts[1] : null;
+        }
+
+        Question question = findQuestionById(questions, baseQuestionId);
         if (question == null) {
-          errors.add(String.format("Không tìm thấy câu hỏi với ID: %s", mapping.getQuestionId()));
+          errors.add(String.format("Không tìm thấy câu hỏi với ID: %s", baseQuestionId));
           continue;
         }
 
+        // Derive row label for grid questions if needed
+        String rowLabelForGrid = explicitRowLabel;
+        if (rowLabelForGrid == null && isGridQuestionType(question.getType())) {
+          rowLabelForGrid = extractBracketLabel(columnName);
+        }
+
         Object cellValue = row.get(columnName);
-        ValidationResult cellValidation =
-            validateCellData(cellValue, question, rowIndex + 1, columnName);
+
+        ValidationResult cellValidation;
+        if (isGridQuestionType(question.getType())) {
+          cellValidation =
+              validateGridCellData(cellValue, question, rowLabelForGrid, rowIndex + 1, columnName);
+        } else {
+          cellValidation = validateCellData(cellValue, question, rowIndex + 1, columnName);
+        }
 
         if (!cellValidation.isValid()) {
           errors.addAll(cellValidation.getErrors());
@@ -256,12 +275,162 @@ public class DataFillValidator {
         }
         break;
 
+      case "multiple_choice_grid":
+      case "checkbox_grid":
+        // Grid types are validated in validateGridCellData via caller
+        break;
       default:
         log.warn("Unknown question type: {}", question.getType());
         break;
     }
 
     return errors.isEmpty() ? ValidationResult.valid() : ValidationResult.invalid(errors);
+  }
+
+  /**
+   * Validate grid cell data for multiple_choice_grid and checkbox_grid. Supports mapping keys in
+   * format "<questionId>:<rowLabel>" and/or column labels like "<Question Title> [<Row Label>]".
+   */
+  private ValidationResult validateGridCellData(Object cellValue, Question question,
+      String rowLabel, int rowIndex, String columnName) {
+    List<String> errors = new ArrayList<>();
+    String cellStr = cellValue != null ? cellValue.toString().trim() : "";
+
+    // Skip validation for empty cells if question is not required
+    if (cellStr.isEmpty() && !Boolean.TRUE.equals(question.getRequired())) {
+      return ValidationResult.valid();
+    }
+
+    // Required field validation
+    if (cellStr.isEmpty() && Boolean.TRUE.equals(question.getRequired())) {
+      errors.add(String.format("Dòng %d, cột %s: Câu hỏi bắt buộc không được để trống", rowIndex,
+          columnName));
+      return ValidationResult.invalid(errors);
+    }
+
+    if (rowLabel == null || rowLabel.trim().isEmpty()) {
+      errors.add(String.format(
+          "Dòng %d, cột %s: Không xác định được nhãn hàng (row) cho câu hỏi dạng lưới", rowIndex,
+          columnName));
+      return ValidationResult.invalid(errors);
+    }
+
+    // Build row list and find the requested row
+    List<com.dienform.tool.dienformtudong.question.entity.QuestionOption> allOptions =
+        question.getOptions() == null ? java.util.Collections.emptyList() : question.getOptions();
+    com.dienform.tool.dienformtudong.question.entity.QuestionOption matchedRow =
+        allOptions.stream().filter(o -> o.isRow() && o.getText() != null
+            && o.getText().trim().equalsIgnoreCase(rowLabel.trim())).findFirst().orElse(null);
+
+    if (matchedRow == null) {
+      errors.add(String.format(
+          "Dòng %d, cột %s: Không tìm thấy hàng '%s' trong cấu trúc câu hỏi dạng lưới", rowIndex,
+          columnName, rowLabel));
+      return ValidationResult.invalid(errors);
+    }
+
+    // Determine column options at question level to avoid missing subOptions on rows
+    List<com.dienform.tool.dienformtudong.question.entity.QuestionOption> sortedColumns =
+        allOptions.stream().filter(o -> !o.isRow())
+            .sorted((a, b) -> Integer.compare(a.getPosition() == null ? 0 : a.getPosition(),
+                b.getPosition() == null ? 0 : b.getPosition()))
+            .toList();
+
+    List<String> validValues = sortedColumns.stream()
+        .map(com.dienform.tool.dienformtudong.question.entity.QuestionOption::getValue).toList();
+
+    boolean isCheckboxGrid = "checkbox_grid".equalsIgnoreCase(question.getType());
+    boolean isMultipleChoiceGrid = "multiple_choice_grid".equalsIgnoreCase(question.getType());
+
+    if (isMultipleChoiceGrid) {
+      if (cellStr.contains("|")) {
+        errors.add(String.format(
+            "Dòng %d, cột %s: Chỉ được chọn 1 đáp án cho mỗi hàng của Multiple Choice Grid",
+            rowIndex, columnName));
+        return ValidationResult.invalid(errors);
+      }
+
+      // Only index allowed per requirement
+      if (isPositionNumber(cellStr)) {
+        int position = Integer.parseInt(cellStr);
+        if (position < 1 || position > sortedColumns.size()) {
+          errors.add(String.format(
+              "Dòng %d, cột %s: Vị trí '%s' không hợp lệ. Các vị trí hợp lệ: 1-%d. Danh sách: %s",
+              rowIndex, columnName, cellStr, sortedColumns.size(),
+              formatOptionsWithPosition(sortedColumns)));
+        }
+      } else {
+        errors.add(String.format(
+            "Dòng %d, cột %s: Chỉ chấp nhận số thứ tự (1-%d) cho Multiple Choice Grid. Danh sách: %s",
+            rowIndex, columnName, sortedColumns.size(), formatOptionsWithPosition(sortedColumns)));
+      }
+
+      return errors.isEmpty() ? ValidationResult.valid() : ValidationResult.invalid(errors);
+    }
+
+    if (isCheckboxGrid) {
+      String[] parts = cellStr.split("[,|]");
+      for (String part : parts) {
+        String value = part.trim();
+        if (value.isEmpty()) {
+          continue;
+        }
+        // Only index allowed per requirement
+        if (isPositionNumber(value)) {
+          int position = Integer.parseInt(value);
+          if (position < 1 || position > sortedColumns.size()) {
+            errors.add(String.format(
+                "Dòng %d, cột %s: Vị trí '%s' không hợp lệ. Các vị trí hợp lệ: 1-%d. Danh sách: %s",
+                rowIndex, columnName, value, sortedColumns.size(),
+                formatOptionsWithPosition(sortedColumns)));
+          }
+        } else {
+          errors.add(String.format(
+              "Dòng %d, cột %s: Chỉ chấp nhận số thứ tự (1-%d) cho Checkbox Grid. Danh sách: %s",
+              rowIndex, columnName, sortedColumns.size(),
+              formatOptionsWithPosition(sortedColumns)));
+        }
+      }
+      return errors.isEmpty() ? ValidationResult.valid() : ValidationResult.invalid(errors);
+    }
+
+    // Unknown grid subtype - treat as valid to avoid blocking
+    return ValidationResult.valid();
+  }
+
+  private boolean isGridQuestionType(String type) {
+    if (type == null) {
+      return false;
+    }
+    String lower = type.toLowerCase();
+    return lower.equals("multiple_choice_grid") || lower.equals("checkbox_grid");
+  }
+
+  /**
+   * Extract label inside brackets from formatted column name: "Title [Label]" -> "Label".
+   */
+  private String extractBracketLabel(String formattedColumnName) {
+    if (formattedColumnName == null) {
+      return null;
+    }
+    int start = formattedColumnName.lastIndexOf('[');
+    int end = formattedColumnName.lastIndexOf(']');
+    if (start >= 0 && end > start) {
+      return formattedColumnName.substring(start + 1, end).trim();
+    }
+    return null;
+  }
+
+  private Question findQuestionById(List<Question> questions, String id) {
+    if (id == null) {
+      return null;
+    }
+    for (Question q : questions) {
+      if (q != null && q.getId() != null && id.equalsIgnoreCase(q.getId().toString())) {
+        return q;
+      }
+    }
+    return null;
   }
 
   /**

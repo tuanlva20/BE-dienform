@@ -10,14 +10,14 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
-import com.dienform.tool.dienformtudong.googleform.service.impl.GoogleFormServiceImpl;
+import com.dienform.tool.dienformtudong.googleform.service.GoogleFormService;
 import lombok.RequiredArgsConstructor;
 
 @RestController
 @RequestMapping("/api/cache")
 @RequiredArgsConstructor
 public class CacheManagementController {
-  private final GoogleFormServiceImpl googleFormServiceImpl;
+  private final GoogleFormService googleFormServiceImpl;
 
   /**
    * Get cache status with sizes of all caches
