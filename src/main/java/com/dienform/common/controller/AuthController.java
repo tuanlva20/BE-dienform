@@ -90,10 +90,22 @@ public class AuthController {
       @RequestBody(required = false) RefreshTokenRequest request,
       @CookieValue(name = "refresh_token", required = false) String refreshCookie) {
     String refreshToken = request != null ? request.getRefreshToken() : null;
-    if (refreshToken == null || refreshToken.isBlank())
+    if (refreshToken == null || refreshToken.isBlank()) {
       refreshToken = refreshCookie;
-    AuthResponse res = authService.refresh(refreshToken);
-    return withAuthCookies(res);
+    }
+
+    if (refreshToken == null || refreshToken.isBlank()) {
+      return ResponseEntity.status(org.springframework.http.HttpStatus.UNAUTHORIZED)
+          .body(AuthResponse.builder().success(false).message("Missing refresh token").build());
+    }
+
+    try {
+      AuthResponse res = authService.refresh(refreshToken);
+      return withAuthCookies(res);
+    } catch (Exception ex) {
+      return ResponseEntity.status(org.springframework.http.HttpStatus.UNAUTHORIZED)
+          .body(AuthResponse.builder().success(false).message("Invalid refresh token").build());
+    }
   }
 
   @PostMapping("/logout")
