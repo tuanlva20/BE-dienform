@@ -292,19 +292,73 @@ public class GoogleFormParser {
         return "https://docs.google.com/forms/d/e/" + formId + "/viewform";
     }
 
+    /**
+     * Extract visible label text for an option by inspecting the closest label/span structure.
+     * Priority: label span[dir=auto] -> entire label text -> aria-label on the option itself.
+     */
+    private String extractVisibleLabelText(Element optionElement) {
+        try {
+            Element label = null;
+            Element current = optionElement;
+            while (current != null) {
+                if ("label".equalsIgnoreCase(current.tagName())) {
+                    label = current;
+                    break;
+                }
+                current = current.parent();
+            }
+            if (label == null) {
+                for (Element anc : optionElement.parents()) {
+                    if ("label".equalsIgnoreCase(anc.tagName())) {
+                        label = anc;
+                        break;
+                    }
+                }
+            }
+            if (label != null) {
+                Element span = label.selectFirst("span[dir=auto]");
+                if (span != null) {
+                    String t = span.text().trim();
+                    if (!t.isEmpty()) {
+                        return t;
+                    }
+                }
+                String t2 = label.text().trim();
+                if (!t2.isEmpty()) {
+                    return t2;
+                }
+            }
+            if (optionElement.hasAttr("aria-label")) {
+                String aria = optionElement.attr("aria-label").trim();
+                if (!aria.isEmpty()) {
+                    return aria;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return "";
+    }
+
     private void extractRadioOptions(Element questionElement, ExtractedQuestion question) {
         Elements optionElements = questionElement.select("[role=radio]");
         int optionIndex = 0;
         for (Element optionElement : optionElements) {
-            String optionText = optionElement.attr("data-value").trim();
-            if (org.springframework.util.ObjectUtils.isEmpty(optionText)) {
+            String rawValue = optionElement.attr("data-value").trim();
+            if (org.springframework.util.ObjectUtils.isEmpty(rawValue)) {
                 log.warn("Skipping empty option radio text");
                 continue;
             }
 
             ExtractedOption option = new ExtractedOption();
-            option.setText(optionText);
-            option.setValue(optionText);
+            String displayText = rawValue;
+            if ("__other_option__".equalsIgnoreCase(rawValue)) {
+                String visible = extractVisibleLabelText(optionElement);
+                if (!visible.isEmpty()) {
+                    displayText = visible;
+                }
+            }
+            option.setText(displayText);
+            option.setValue(rawValue);
             option.setPosition(optionIndex++);
             question.getOptions().add(option);
         }
@@ -314,15 +368,23 @@ public class GoogleFormParser {
         Elements optionElements = questionElement.select("[role=checkbox]");
         int optionIndex = 0;
         for (Element optionElement : optionElements) {
-            String optionText = optionElement.attr("data-answer-value").trim();
-            if (org.springframework.util.ObjectUtils.isEmpty(optionText)) {
+            String rawValue = optionElement.attr("data-answer-value").trim();
+            if (org.springframework.util.ObjectUtils.isEmpty(rawValue)) {
                 log.warn("Skipping empty option checkbox text");
                 continue;
             }
 
             ExtractedOption option = new ExtractedOption();
-            option.setText(optionText);
-            option.setValue(optionText);
+            String displayText = rawValue;
+            if ("__other_option__".equalsIgnoreCase(displayText)
+                    || optionElement.hasAttr("data-other-checkbox")) {
+                String visible = extractVisibleLabelText(optionElement);
+                if (!visible.isEmpty()) {
+                    displayText = visible;
+                }
+            }
+            option.setText(displayText);
+            option.setValue(rawValue);
             option.setPosition(optionIndex++);
             question.getOptions().add(option);
         }

@@ -1683,57 +1683,74 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                 return;
             }
 
-            // OPTIMIZED: Try exact match with data-value first (most efficient)
+            boolean selected = false;
+            // Exact match by data-value
             for (WebElement radio : radioOptions) {
                 try {
                     String dataValue = radio.getAttribute("data-value");
                     if (dataValue != null && dataValue.trim().equals(optionText.trim())) {
-                        // OPTIMIZED: Use shorter wait for clickability
                         wait.until(ExpectedConditions.elementToBeClickable(radio));
                         radio.click();
                         log.info("Selected radio option (exact match): {}", optionText);
-                        return;
+                        selected = true;
+                        break;
                     }
-                } catch (Exception e) {
-                    // Continue to next option if this one fails
-                    continue;
+                } catch (Exception ignored) {
                 }
             }
 
-            // OPTIMIZED: Try with aria-label as fallback
-            for (WebElement radio : radioOptions) {
-                try {
-                    String ariaLabel = radio.getAttribute("aria-label");
-                    if (ariaLabel != null && ariaLabel.trim().equals(optionText.trim())) {
-                        wait.until(ExpectedConditions.elementToBeClickable(radio));
-                        radio.click();
-                        log.info("Selected radio option (aria-label match): {}", optionText);
-                        return;
+            // Fallback: aria-label exact
+            if (!selected) {
+                for (WebElement radio : radioOptions) {
+                    try {
+                        String ariaLabel = radio.getAttribute("aria-label");
+                        if (ariaLabel != null && ariaLabel.trim().equals(optionText.trim())) {
+                            wait.until(ExpectedConditions.elementToBeClickable(radio));
+                            radio.click();
+                            log.info("Selected radio option (aria-label match): {}", optionText);
+                            selected = true;
+                            break;
+                        }
+                    } catch (Exception ignored) {
                     }
-                } catch (Exception e) {
-                    // Continue to next option if this one fails
-                    continue;
                 }
             }
 
-            // OPTIMIZED: Try partial match as last resort
-            for (WebElement radio : radioOptions) {
-                try {
-                    String ariaLabel = radio.getAttribute("aria-label");
-                    if (ariaLabel != null
-                            && ariaLabel.toLowerCase().contains(optionText.toLowerCase())) {
-                        wait.until(ExpectedConditions.elementToBeClickable(radio));
-                        radio.click();
-                        log.info("Selected radio option (partial match): {}", optionText);
-                        return;
+            // Fallback: visible label text via following span
+            if (!selected) {
+                for (WebElement radio : radioOptions) {
+                    try {
+                        String spanText = "";
+                        try {
+                            WebElement span = radio.findElement(
+                                    By.xpath(".//following-sibling::div//span[@dir='auto']"));
+                            spanText = span.getText().trim();
+                        } catch (Exception ignored) {
+                        }
+                        if (!spanText.isEmpty() && (spanText.equals(optionText)
+                                || spanText.equalsIgnoreCase(optionText))) {
+                            wait.until(ExpectedConditions.elementToBeClickable(radio));
+                            radio.click();
+                            log.info("Selected radio option (label text): {}", optionText);
+                            selected = true;
+                            break;
+                        }
+                    } catch (Exception ignored) {
                     }
-                } catch (Exception e) {
-                    // Continue to next option if this one fails
-                    continue;
                 }
             }
 
-            log.warn("No matching radio option found for: {}", optionText);
+            if (!selected) {
+                log.warn("No matching radio option found for: {}", optionText);
+                return;
+            }
+
+            // If an 'Other' text input appears for this question, fill it with sample data
+            try {
+                fillOtherTextIfPresent(driver, questionElement, humanLike);
+            } catch (Exception e) {
+                log.debug("No 'Other' text input to fill or failed to fill: {}", e.getMessage());
+            }
 
         } catch (Exception e) {
             log.error("Error filling radio question: {}", e.getMessage());
@@ -1784,6 +1801,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             }
 
             int selectedCount = 0;
+            boolean otherSelected = false;
             // Try matching each desired token across strategies
             for (String token : desired) {
                 boolean matched = false;
@@ -1797,6 +1815,10 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                         checkbox.click();
                         log.info("Checked checkbox option (data-value) '{}' for question '{}'",
                                 token, expectedTitle);
+                        if ("__other_option__".equalsIgnoreCase(dataValue)
+                                || checkbox.getAttribute("data-other-checkbox") != null) {
+                            otherSelected = true;
+                        }
                         matched = true;
                         selectedCount++;
                         break;
@@ -1814,6 +1836,11 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                         checkbox.click();
                         log.info("Checked checkbox option (aria-label) '{}' for question '{}'",
                                 token, expectedTitle);
+                        if ("__other_option__"
+                                .equalsIgnoreCase(checkbox.getAttribute("data-answer-value"))
+                                || checkbox.getAttribute("data-other-checkbox") != null) {
+                            otherSelected = true;
+                        }
                         matched = true;
                         selectedCount++;
                         break;
@@ -1839,6 +1866,12 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                         checkbox.click();
                         log.info("Checked checkbox option (text content) '{}' for question '{}'",
                                 token, expectedTitle);
+                        if ("__other_option__"
+                                .equalsIgnoreCase(checkbox.getAttribute("data-answer-value"))
+                                || checkbox.getAttribute("data-other-checkbox") != null
+                                || checkboxText.equalsIgnoreCase("Mục khác:")) {
+                            otherSelected = true;
+                        }
                         matched = true;
                         selectedCount++;
                         break;
@@ -1856,9 +1889,109 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                         expectedTitle, optionText);
             }
 
+            // If 'Other' was selected, fill the text input if present
+            if (otherSelected) {
+                try {
+                    fillOtherTextIfPresent(driver, questionElement, humanLike);
+                } catch (Exception e) {
+                    log.debug("Failed to fill 'Other' text input: {}", e.getMessage());
+                }
+            }
+
         } catch (Exception e) {
             log.error("Error filling checkbox question '{}': {}", optionText, e.getMessage());
         }
+    }
+
+    /**
+     * Attempt to find and fill the 'Other' text input within a question container. Uses stable
+     * selectors and avoids dynamic classes.
+     */
+    private void fillOtherTextIfPresent(WebDriver driver, WebElement questionElement,
+            boolean humanLike) {
+        try {
+            WebElement input = findOtherTextInput(questionElement);
+            if (input == null)
+                return;
+
+            WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(10));
+            wait.until(ExpectedConditions.elementToBeClickable(input));
+
+            input.click();
+            try {
+                input.clear();
+            } catch (Exception ignored) {
+            }
+
+            String sampleText = generateAutoOtherText();
+            if (humanLike) {
+                for (char c : sampleText.toCharArray()) {
+                    input.sendKeys(String.valueOf(c));
+                    try {
+                        Thread.sleep(40 + new Random().nextInt(60));
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+            } else {
+                input.sendKeys(sampleText);
+            }
+            log.info("Filled 'Other' text input with sample data");
+        } catch (Exception e) {
+            log.debug("No 'Other' input to fill or error during fill: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Find the 'Other' input for the currently selected 'Other' option in this question.
+     */
+    private WebElement findOtherTextInput(WebElement questionElement) {
+        try {
+            // Primary: exact aria-label
+            List<WebElement> exact = questionElement.findElements(
+                    By.cssSelector("input[type='text'][aria-label='Câu trả lời khác']"));
+            for (WebElement e : exact) {
+                if (e.isDisplayed() && e.isEnabled()) {
+                    return e;
+                }
+            }
+
+            // Secondary: any input with aria-label containing 'khác' (case-insensitive)
+            List<WebElement> anyAria =
+                    questionElement.findElements(By.cssSelector("input[type='text'][aria-label]"));
+            for (WebElement e : anyAria) {
+                try {
+                    String aria = e.getAttribute("aria-label");
+                    if (aria != null && aria.toLowerCase().contains("khác") && e.isDisplayed()
+                            && e.isEnabled()) {
+                        return e;
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+
+            // Tertiary: from label text 'Mục khác:' → following input
+            try {
+                WebElement span = questionElement.findElement(
+                        By.xpath(".//span[@dir='auto' and normalize-space(.)='Mục khác:']"));
+                WebElement container =
+                        span.findElement(By.xpath("ancestor::label/following-sibling::div"));
+                WebElement input = container.findElement(By.xpath(".//input[@type='text']"));
+                if (input != null && input.isDisplayed() && input.isEnabled()) {
+                    return input;
+                }
+            } catch (Exception ignored) {
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    private String generateAutoOtherText() {
+        String uuid = java.util.UUID.randomUUID().toString().replace("-", "");
+        String prefix = uuid.length() >= 8 ? uuid.substring(0, 8) : uuid;
+        return "autogen_" + prefix;
     }
 
     /**
@@ -3535,13 +3668,13 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                 log.debug("Generated feedback for '{}': {}", questionTitle, value);
                 return value;
             }
-            // Fallback: generate a random string
-            String fallback = "AutoGen-" + java.util.UUID.randomUUID().toString().substring(0, 8);
+            // Fallback: reuse the unified autogen format
+            String fallback = generateAutoOtherText();
             log.debug("Generated fallback text for '{}': {}", questionTitle, fallback);
             return fallback;
         } catch (Exception e) {
             log.error("Error generating text for '{}': {}", questionTitle, e.getMessage());
-            return "AutoGen-Error";
+            return generateAutoOtherText();
         }
     }
 
