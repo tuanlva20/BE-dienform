@@ -356,21 +356,30 @@ public class DataFillCampaignService {
         case "checkbox":
         case "combobox":
         case "dropdown":
-        case "select":
-          // Support multi-select encoding for checkbox: e.g. "3|5" -> map to option values
+        case "select": {
+          String raw = value == null ? "" : value.trim();
+          int dashIdx = raw.lastIndexOf('-');
+          String main = dashIdx > 0 ? raw.substring(0, dashIdx).trim() : raw;
+          String other = dashIdx > 0 ? raw.substring(dashIdx + 1).trim() : null;
+
+          // Support multi-select encoding for checkbox with '|' only
           if ("checkbox".equalsIgnoreCase(question.getType())
               || "multiselect".equalsIgnoreCase(question.getType())) {
-            // If contains delimiters, convert each position
-            if (value.contains("|") || value.contains(",")) {
-              return dataFillValidator.convertMultiplePositionsToValues(value,
-                  question.getOptions());
+            if (main.contains("|")) {
+              String converted =
+                  dataFillValidator.convertMultiplePositionsToValues(main, question.getOptions());
+              return (other != null && !other.isEmpty()) ? converted + "-" + other : converted;
             }
           }
-          // If value is numeric (single), treat it as position
-          if (value.matches("\\d+")) {
-            return dataFillValidator.convertPositionToValue(value, question.getOptions());
+          // Single numeric position
+          if (main.matches("\\d+")) {
+            String converted =
+                dataFillValidator.convertPositionToValue(main, question.getOptions());
+            return (other != null && !other.isEmpty()) ? converted + "-" + other : converted;
           }
-          return value;
+          // Already explicit value(s); keep optional -other suffix
+          return raw;
+        }
 
         case "multiple_choice_grid": {
           String rowLabelMC =
@@ -460,3 +469,4 @@ public class DataFillCampaignService {
     return null;
   }
 }
+

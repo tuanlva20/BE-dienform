@@ -179,9 +179,16 @@ public class FillRequestServiceImpl implements FillRequestService {
                           "id", dist.getOptionId()));
             }
 
-            AnswerDistribution distribution =
-                AnswerDistribution.builder().fillRequest(savedRequest).question(question)
-                    .option(option).percentage(dist.getPercentage()).count(count).build();
+            // Ensure 'Khác' with valueString gets stored and count at least 1 when percentage = 0
+            if (option != null && "__other_option__".equalsIgnoreCase(option.getValue())
+                && dist.getValueString() != null && !dist.getValueString().trim().isEmpty()
+                && dist.getPercentage() == 0) {
+              count = 1;
+            }
+
+            AnswerDistribution distribution = AnswerDistribution.builder().fillRequest(savedRequest)
+                .question(question).option(option).percentage(dist.getPercentage()).count(count)
+                .valueString(dist.getValueString()).build();
 
             distributions.add(distribution);
           }

@@ -440,25 +440,47 @@ public class DataFillValidator {
       String columnName) {
     List<String> errors = new ArrayList<>();
 
+    // Support optional "-<otherText>" suffix; we only validate the left part (indices)
+    String raw = value == null ? "" : value.trim();
+    int dashIdx = raw.lastIndexOf('-');
+    String main = dashIdx > 0 ? raw.substring(0, dashIdx).trim() : raw;
+    String otherText = dashIdx > 0 ? raw.substring(dashIdx + 1).trim() : null;
+
     List<QuestionOption> options = question.getOptions().stream()
         .sorted((a, b) -> Integer.compare(a.getPosition(), b.getPosition())).toList();
 
-    List<String> validOptions = options.stream().map(QuestionOption::getValue).toList();
+    if (!isPositionNumber(main)) {
+      errors.add(String.format(
+          "Dòng %d, cột %s: Chỉ chấp nhận số thứ tự (1-%d) cho câu hỏi một lựa chọn. Danh sách: %s",
+          rowIndex, columnName, options.size(), formatOptionsWithPosition(options)));
+      return ValidationResult.invalid(errors);
+    }
 
-    // Check if value is a position number (1, 2, 3, etc.)
-    if (isPositionNumber(value)) {
-      int position = Integer.parseInt(value);
-      if (position < 1 || position > options.size()) {
-        errors.add(String.format(
-            "Dòng %d, cột %s: Vị trí '%s' không hợp lệ. Các vị trí hợp lệ: 1-%d. Danh sách: %s",
-            rowIndex, columnName, value, options.size(), formatOptionsWithPosition(options)));
+    int position = Integer.parseInt(main);
+    if (position < 1 || position > options.size()) {
+      errors.add(String.format(
+          "Dòng %d, cột %s: Vị trí '%s' không hợp lệ. Các vị trí hợp lệ: 1-%d. Danh sách: %s",
+          rowIndex, columnName, main, options.size(), formatOptionsWithPosition(options)));
+    }
+
+    // If other text provided, ensure the selected index corresponds to the 'Other' option
+    if (otherText != null && !otherText.isEmpty()) {
+      int otherIndex = -1;
+      for (int i = 0; i < options.size(); i++) {
+        QuestionOption opt = options.get(i);
+        if (opt.getValue() != null && "__other_option__".equalsIgnoreCase(opt.getValue())) {
+          otherIndex = i + 1; // 1-based
+          break;
+        }
       }
-    } else {
-      // Check if value matches option text exactly
-      if (!validOptions.contains(value)) {
+      if (otherIndex == -1) {
         errors.add(String.format(
-            "Dòng %d, cột %s: Giá trị '%s' không có trong danh sách lựa chọn. Có thể sử dụng số thứ tự (1-%d) hoặc text chính xác. Danh sách: %s",
-            rowIndex, columnName, value, options.size(), formatOptionsWithPosition(options)));
+            "Dòng %d, cột %s: Đã cung cấp ghi chú cho 'Khác' nhưng câu hỏi không có lựa chọn 'Khác'",
+            rowIndex, columnName));
+      } else if (position != otherIndex) {
+        errors.add(String.format(
+            "Dòng %d, cột %s: Đã cung cấp ghi chú '%s' nhưng vị trí được chọn (%d) không phải 'Khác'. Vui lòng chọn vị trí %d để nhập ghi chú cho 'Khác'",
+            rowIndex, columnName, otherText, position, otherIndex));
       }
     }
 
@@ -472,34 +494,56 @@ public class DataFillValidator {
       String columnName) {
     List<String> errors = new ArrayList<>();
 
+    // Support optional "-<otherText>" suffix; validate left part (indices) with '|' only
+    String raw = value == null ? "" : value.trim();
+    int dashIdx = raw.lastIndexOf('-');
+    String main = dashIdx > 0 ? raw.substring(0, dashIdx).trim() : raw;
+    String otherText = dashIdx > 0 ? raw.substring(dashIdx + 1).trim() : null;
+
     List<QuestionOption> options = question.getOptions().stream()
         .sorted((a, b) -> Integer.compare(a.getPosition(), b.getPosition())).toList();
 
-    List<String> validOptions = options.stream().map(QuestionOption::getValue).toList();
+    String[] selectedOptions = main.split("\\|");
+    List<Integer> selectedPositions = new ArrayList<>();
 
-    // Split by | delimiter
-    String[] selectedOptions = value.split("\\|");
-
-    for (String option : selectedOptions) {
-      String trimmedOption = option.trim();
-
-      // Check if option is a position number (1, 2, 3, etc.)
-      if (isPositionNumber(trimmedOption)) {
-        int position = Integer.parseInt(trimmedOption);
-        if (position < 1 || position > options.size()) {
-          errors.add(String.format(
-              "Dòng %d, cột %s: Vị trí '%s' không hợp lệ. Các vị trí hợp lệ: 1-%d. Danh sách: %s",
-              rowIndex, columnName, trimmedOption, options.size(),
-              formatOptionsWithPosition(options)));
-        }
+    for (String optionToken : selectedOptions) {
+      String trimmed = optionToken.trim();
+      if (trimmed.isEmpty())
+        continue;
+      if (!isPositionNumber(trimmed)) {
+        errors.add(String.format(
+            "Dòng %d, cột %s: Chỉ chấp nhận số thứ tự (1-%d) cho câu hỏi nhiều lựa chọn. Danh sách: %s",
+            rowIndex, columnName, options.size(), formatOptionsWithPosition(options)));
+        continue;
+      }
+      int position = Integer.parseInt(trimmed);
+      if (position < 1 || position > options.size()) {
+        errors.add(String.format(
+            "Dòng %d, cột %s: Vị trí '%s' không hợp lệ. Các vị trí hợp lệ: 1-%d. Danh sách: %s",
+            rowIndex, columnName, trimmed, options.size(), formatOptionsWithPosition(options)));
       } else {
-        // Check if option matches text exactly
-        if (!validOptions.contains(trimmedOption)) {
-          errors.add(String.format(
-              "Dòng %d, cột %s: Giá trị '%s' không có trong danh sách lựa chọn. Có thể sử dụng số thứ tự (1-%d) hoặc text chính xác. Danh sách: %s",
-              rowIndex, columnName, trimmedOption, options.size(),
-              formatOptionsWithPosition(options)));
+        selectedPositions.add(position);
+      }
+    }
+
+    // If other text provided, ensure 'Other' is among selections
+    if (otherText != null && !otherText.isEmpty()) {
+      int otherIndex = -1;
+      for (int i = 0; i < options.size(); i++) {
+        QuestionOption opt = options.get(i);
+        if (opt.getValue() != null && "__other_option__".equalsIgnoreCase(opt.getValue())) {
+          otherIndex = i + 1;
+          break;
         }
+      }
+      if (otherIndex == -1) {
+        errors.add(String.format(
+            "Dòng %d, cột %s: Đã cung cấp ghi chú cho 'Khác' nhưng câu hỏi không có lựa chọn 'Khác'",
+            rowIndex, columnName));
+      } else if (!selectedPositions.contains(otherIndex)) {
+        errors.add(String.format(
+            "Dòng %d, cột %s: Đã cung cấp ghi chú '%s' nhưng lựa chọn không bao gồm 'Khác'. Vui lòng thêm vị trí %d để nhập ghi chú cho 'Khác'",
+            rowIndex, columnName, otherText, otherIndex));
       }
     }
 
