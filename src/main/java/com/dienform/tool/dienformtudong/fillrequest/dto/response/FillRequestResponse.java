@@ -48,5 +48,7 @@ public class FillRequestResponse {
     private LocalDateTime endDate;
     private String status;
 
+    private int completedSurvey;
+
     private List<AnswerDistributionResponse> answerDistributions;
 }

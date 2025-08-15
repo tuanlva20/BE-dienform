@@ -41,8 +41,8 @@ google:
     retry-delay-ms: 1000
 
     # Feature flags
-    auto-submit: false # Set to false for local debugging
-    headless: false # Set to false for local debugging
+    auto-submit: true # Set to false for local debugging
+    headless: true # Set to false for local debugging
     async-enabled: true
     cache-enabled: true
 
@@ -67,6 +67,13 @@ jwt:
 app:
   frontend:
     url: ${FRONTEND_URL:http://localhost:3000}
+realtime:
+  socket:
+    path: /socket.io
+    progress-emit-interval-ms: ${FILLREQ_PROGRESS_EMIT_INTERVAL_MS:1000}
+    progress-emit-delta: ${FILLREQ_PROGRESS_EMIT_DELTA:1}
+    burst-max-per-sec: ${FILLREQ_BURST_MAX_EVENTS_PER_SEC:10}
+    port: 9092
   security:
     enable-ip-on-register: ${ENABLE_IP_ON_REGISTER:false}
   cookie:

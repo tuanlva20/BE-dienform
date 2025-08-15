@@ -47,6 +47,7 @@ import com.dienform.tool.dienformtudong.answerdistribution.entity.AnswerDistribu
 import com.dienform.tool.dienformtudong.answerdistribution.repository.AnswerDistributionRepository;
 import com.dienform.tool.dienformtudong.fillrequest.entity.FillRequest;
 import com.dienform.tool.dienformtudong.fillrequest.repository.FillRequestRepository;
+import com.dienform.tool.dienformtudong.fillrequest.service.FillRequestCounterService;
 import com.dienform.tool.dienformtudong.form.entity.Form;
 import com.dienform.tool.dienformtudong.form.enums.FormStatusEnum;
 import com.dienform.tool.dienformtudong.form.repository.FormRepository;
@@ -103,6 +104,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
 
     private final GoogleFormParser googleFormParser;
     private final FillRequestRepository fillRequestRepository;
+    private final FillRequestCounterService fillRequestCounterService;
     private final FormRepository formRepository;
     private final AnswerDistributionRepository answerDistributionRepository;
 
@@ -110,6 +112,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
 
     private final ComboboxHandler comboboxHandler;
     private final QuestionRepository questionRepository;
+    private final GridQuestionHandler gridQuestionHandler;
 
     // In-memory cache of form questions (URL -> Questions)
     private final Map<String, List<ExtractedQuestion>> formQuestionsCache =
@@ -158,6 +161,10 @@ public class GoogleFormServiceImpl implements GoogleFormService {
 
     // New: Local map for data-fill API submissions to carry Other text per question
     private final ThreadLocal<Map<UUID, String>> dataFillOtherTextByQuestion = new ThreadLocal<>();
+
+    // Realtime gateway to notify UI on status changes
+    private final com.dienform.realtime.FillRequestRealtimeGateway realtimeGateway;
+    private final com.dienform.common.util.CurrentUserUtil currentUserUtil;
 
     /**
      * Cleanup method to clear caches and shutdown executor
@@ -301,7 +308,6 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     }
 
     @Override
-    @Transactional
     public int fillForm(UUID fillRequestId) {
         log.info("Starting automated form filling for request ID: {}", fillRequestId);
 
@@ -309,8 +315,10 @@ public class GoogleFormServiceImpl implements GoogleFormService {
         final FillRequest fillRequest = findFillRequestWithRetry(fillRequestId);
 
         // Validate fill request status before starting
-        if (!Constants.FILL_REQUEST_STATUS_PENDING.equals(fillRequest.getStatus())
-                && !Constants.FILL_REQUEST_STATUS_RUNNING.equals(fillRequest.getStatus())) {
+        if (!(com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.PENDING
+                .equals(fillRequest.getStatus())
+                || com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.IN_PROCESS
+                        .equals(fillRequest.getStatus()))) {
             log.warn("Fill request {} is not in valid state to start. Current status: {}",
                     fillRequestId, fillRequest.getStatus());
             return 0;
@@ -380,8 +388,20 @@ public class GoogleFormServiceImpl implements GoogleFormService {
 
         sessionExecutionRepository.save(sessionExecute);
 
-        // Update request status to RUNNING
-        updateFillRequestStatus(fillRequest, Constants.FILL_REQUEST_STATUS_RUNNING);
+        // Update request status to RUNNING using direct update to avoid entity overwrite of
+        // counters
+        try {
+            fillRequestRepository.updateStatus(fillRequest.getId(),
+                    com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.IN_PROCESS);
+        } catch (Exception ignore) {
+            // fallback to existing method
+            updateFillRequestStatus(fillRequest,
+                    com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.IN_PROCESS
+                            .name());
+        }
+
+        // Ensure user is in room and send initial updates
+        ensureUserInRoom(fillRequest);
 
         // Group distributions by question
         Map<Question, List<AnswerDistribution>> distributionsByQuestion = distributions.stream()
@@ -422,22 +442,23 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                         }
                     }
 
-                    futures.add(CompletableFuture.runAsync(() -> {
+                    CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
                         executeFormFillTask(fillRequestId, link, plan, fillRequest.isHumanLike(),
                                 successCount, failCount);
-                    }, executor));
+                    }, executor).whenComplete((v, t) -> {
+                        int processed = totalProcessed.incrementAndGet();
+                        if (processed == fillRequest.getSurveyCount()) {
+                            // All tasks finished execution, update final status based on DB state
+                            updateFinalStatus(fillRequest, sessionExecute, successCount.get(),
+                                    failCount.get());
+                        }
+                    });
+
+                    futures.add(future);
 
                 } catch (Exception e) {
                     log.error("Error during form filling: {}", e.getMessage(), e);
                     failCount.incrementAndGet();
-                } finally {
-                    // Update progress after each task
-                    int processed = totalProcessed.incrementAndGet();
-                    if (processed == fillRequest.getSurveyCount()) {
-                        // All tasks completed, update final status
-                        updateFinalStatus(fillRequest, sessionExecute, successCount.get(),
-                                failCount.get());
-                    }
                 }
             }
 
@@ -528,7 +549,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
      * Submit form data using browser automation
      */
     @Override
-    public boolean submitFormWithBrowser(UUID formId, String formUrl,
+    public boolean submitFormWithBrowser(UUID fillRequestId, UUID formId, String formUrl,
             Map<String, String> formData) {
         try {
             // Load questions for this form to ensure title/type/additionalData are present
@@ -575,7 +596,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             dataFillOtherTextByQuestion.set(localOtherText);
 
             // Use existing executeFormFill method with formId as cache key
-            return executeFormFill(formId, formUrl, selections, true);
+            return executeFormFill(fillRequestId, formId, formUrl, selections, true);
         } catch (Exception e) {
             log.error("Error submitting form: {}", e.getMessage(), e);
             return false;
@@ -786,8 +807,10 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             FillRequest fillRequest = fillRequestRepository.findById(fillRequestId).orElseThrow(
                     () -> new ResourceNotFoundException("Fill Request", "id", fillRequestId));
 
-            if (Constants.FILL_REQUEST_STATUS_RUNNING.equals(fillRequest.getStatus())) {
-                fillRequest.setStatus(Constants.FILL_REQUEST_STATUS_PENDING);
+            if (com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.IN_PROCESS
+                    .equals(fillRequest.getStatus())) {
+                fillRequest.setStatus(
+                        com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.PENDING);
                 fillRequestRepository.save(fillRequest);
                 log.info("Reset fill request {} status from RUNNING to PENDING", fillRequestId);
             } else {
@@ -814,9 +837,20 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             FillRequest current = fillRequestRepository.findById(fillRequest.getId()).orElseThrow(
                     () -> new ResourceNotFoundException("Fill Request", "id", fillRequest.getId()));
 
-            current.setStatus(status);
-            fillRequestRepository.save(current);
-            log.info("Updated fill request {} status to: {}", current.getId(), status);
+            // Only update if status actually changed
+            String currentStatus = current.getStatus() != null ? current.getStatus().name() : null;
+            if (!status.equals(currentStatus)) {
+                current.setStatus(
+                        com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum
+                                .valueOf(status));
+                fillRequestRepository.save(current);
+                log.info("Updated fill request {} status to: {}", current.getId(), status);
+
+                // Emit realtime update only when status changes
+                emitSingleUpdate(current);
+            } else {
+                log.debug("Fill request {} status unchanged: {}", current.getId(), status);
+            }
         } catch (Exception e) {
             log.error("Failed to update fill request status: {}", e.getMessage(), e);
             throw e;
@@ -830,27 +864,138 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     protected void updateFinalStatus(FillRequest fillRequest, SesstionExecution sessionExecute,
             int successCount, int failCount) {
         try {
-            // Update session execution
-            sessionExecute.setEndTime(LocalDateTime.now());
-            sessionExecute.setSuccessfulExecutions(successCount);
-            sessionExecute.setFailedExecutions(failCount);
-            sessionExecute.setStatus(FormStatusEnum.COMPLETED);
-            sessionExecutionRepository.save(sessionExecute);
+            // Determine final status based on persisted completedSurvey first
+            FillRequest current = fillRequestRepository.findById(fillRequest.getId()).orElseThrow(
+                    () -> new ResourceNotFoundException("Fill Request", "id", fillRequest.getId()));
 
-            // Determine final status based on success/fail counts
-            String finalStatus = (failCount == 0) ? Constants.FILL_REQUEST_STATUS_COMPLETED
-                    : Constants.FILL_REQUEST_STATUS_FAILED;
+            boolean allPersistedCompleted =
+                    current.getCompletedSurvey() >= current.getSurveyCount();
 
-            // Update fill request status
+            String finalStatus;
+            if (failCount > 0) {
+                finalStatus =
+                        com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.FAILED
+                                .name();
+            } else if (allPersistedCompleted) {
+                finalStatus =
+                        com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.COMPLETED
+                                .name();
+            } else {
+                // Tasks finished but DB increments not fully reflected yet
+                finalStatus =
+                        com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.IN_PROCESS
+                                .name();
+            }
+
+            // Update fill request status (this will emit the event if status changed)
             updateFillRequestStatus(fillRequest, finalStatus);
+
+            // Best-effort: atomic update session execution to avoid optimistic locking
+            try {
+                int affected = sessionExecutionRepository.updateFinalState(sessionExecute.getId(),
+                        LocalDateTime.now(), successCount, failCount, FormStatusEnum.COMPLETED);
+                if (affected == 0) {
+                    // Fallback: try update the latest session by fillRequestId
+                    SesstionExecution latest = sessionExecutionRepository
+                            .findTopByFillRequestIdOrderByStartTimeDesc(fillRequest.getId());
+                    if (latest != null) {
+                        int affected2 = sessionExecutionRepository.updateFinalState(latest.getId(),
+                                LocalDateTime.now(), successCount, failCount,
+                                FormStatusEnum.COMPLETED);
+                        if (affected2 == 0) {
+                            log.warn("No session execution rows updated for id {} (fallback)",
+                                    latest.getId());
+                        }
+                    } else {
+                        log.warn(
+                                "No session execution found for fillRequest {} to update final state",
+                                fillRequest.getId());
+                    }
+                }
+            } catch (Exception sessionUpdateError) {
+                log.warn("Failed to update session execution final state: {}",
+                        sessionUpdateError.getMessage());
+            }
 
             log.info("Fill request {} completed. Success: {}, Failed: {}, Final status: {}",
                     fillRequest.getId(), successCount, failCount, finalStatus);
         } catch (Exception e) {
-            log.error("Failed to update final status: {}", e.getMessage(), e);
-            // Ensure we set failed status even if update fails
-            updateFillRequestStatus(fillRequest, Constants.FILL_REQUEST_STATUS_FAILED);
-            throw e;
+            log.error("Failed to compute/update final status: {}", e.getMessage(), e);
+            // On fatal error, mark FAILED and notify UI + leave user room
+            try {
+                FillRequest fr = fillRequestRepository.findById(fillRequest.getId()).orElse(null);
+                if (fr != null && fr.getForm() != null) {
+                    fr.setStatus(
+                            com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.FAILED);
+                    fillRequestRepository.save(fr);
+                    com.dienform.realtime.dto.FillRequestUpdateEvent evt =
+                            com.dienform.realtime.dto.FillRequestUpdateEvent.builder()
+                                    .formId(fr.getForm().getId().toString())
+                                    .requestId(fr.getId().toString())
+                                    .status(com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.FAILED
+                                            .name())
+                                    .completedSurvey(fr.getCompletedSurvey())
+                                    .surveyCount(fr.getSurveyCount())
+                                    .updatedAt(java.time.Instant.now().toString()).build();
+
+                    // Get current user ID if available
+                    String userId = null;
+                    try {
+                        userId = currentUserUtil.getCurrentUserIdIfPresent().map(UUID::toString)
+                                .orElse(null);
+                    } catch (Exception ignore) {
+                        log.debug("Failed to get current user ID: {}", ignore.getMessage());
+                    }
+
+                    // Use centralized emit method with deduplication
+                    realtimeGateway.emitUpdateWithUser(fr.getForm().getId().toString(), evt,
+                            userId);
+
+                    // Leave user room if user ID is available
+                    if (userId != null) {
+                        try {
+                            realtimeGateway.leaveUserFormRoom(userId,
+                                    fr.getForm().getId().toString());
+                        } catch (Exception ignore2) {
+                            log.debug("Failed to leave user room: {}", ignore2.getMessage());
+                        }
+                    }
+                }
+            } catch (Exception ignore) {
+                log.debug("Failed to handle fatal error: {}", ignore.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Centralized emit method to avoid duplicates
+     */
+    private void emitSingleUpdate(FillRequest fillRequest) {
+        try {
+            com.dienform.realtime.dto.FillRequestUpdateEvent event =
+                    com.dienform.realtime.dto.FillRequestUpdateEvent.builder()
+                            .formId(fillRequest.getForm().getId().toString())
+                            .requestId(fillRequest.getId().toString())
+                            .status(fillRequest.getStatus().name())
+                            .completedSurvey(fillRequest.getCompletedSurvey())
+                            .surveyCount(fillRequest.getSurveyCount())
+                            .updatedAt(java.time.Instant.now().toString()).build();
+
+            // Get current user ID if available
+            String userId = null;
+            try {
+                userId = currentUserUtil.getCurrentUserIdIfPresent().map(UUID::toString)
+                        .orElse(null);
+            } catch (Exception ignore) {
+                log.debug("Failed to get current user ID: {}", ignore.getMessage());
+            }
+
+            // Use centralized emit method with deduplication
+            realtimeGateway.emitUpdateWithUser(fillRequest.getForm().getId().toString(), event,
+                    userId);
+
+        } catch (Exception emitErr) {
+            log.warn("Failed to emit realtime status update: {}", emitErr.getMessage());
         }
     }
 
@@ -880,7 +1025,23 @@ public class GoogleFormServiceImpl implements GoogleFormService {
 
                 // Unified handling: free-text and date/time use valueString with round-robin;
                 // others use distribution
-                String type = question.getType() == null ? "" : question.getType().toLowerCase();
+                String type;
+                try {
+                    // Defensive: access fields inside try to avoid LazyInitializationException
+                    type = question.getType() == null ? "" : question.getType().toLowerCase();
+                } catch (org.hibernate.LazyInitializationException lie) {
+                    // Reload managed entity if proxy got detached
+                    try {
+                        Question managed =
+                                questionRepository.findById(question.getId()).orElse(null);
+                        type = managed != null && managed.getType() != null
+                                ? managed.getType().toLowerCase()
+                                : "";
+                        question = managed != null ? managed : question;
+                    } catch (Exception ex) {
+                        type = "";
+                    }
+                }
                 boolean isFreeText =
                         type.equals("text") || type.equals("email") || type.equals("textarea")
                                 || type.equals("short_answer") || type.equals("paragraph");
@@ -977,7 +1138,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
      * @param humanLike Whether to simulate human-like behavior
      * @return True if successful, false otherwise
      */
-    private boolean executeFormFill(UUID fillRequestId, String formUrl,
+    private boolean executeFormFill(UUID fillRequestId, UUID formId, String formUrl,
             Map<Question, QuestionOption> selections, boolean humanLike) {
         WebDriver driver = null;
         try {
@@ -2190,10 +2351,9 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     private void fillMultipleChoiceGridQuestion(WebDriver driver, WebElement questionElement,
             Question question, QuestionOption option, boolean humanLike) {
         try {
-            // Use the new GridQuestionHandler for comprehensive grid question handling
-            GridQuestionHandler gridHandler = new GridQuestionHandler();
-            gridHandler.fillMultipleChoiceGridQuestion(driver, questionElement, question, option,
-                    humanLike);
+            // Use the injected GridQuestionHandler for comprehensive grid question handling
+            gridQuestionHandler.fillMultipleChoiceGridQuestion(driver, questionElement, question,
+                    option, humanLike);
         } catch (Exception e) {
             log.error("Error filling multiple choice grid question: {}", e.getMessage());
         }
@@ -2205,11 +2365,10 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     private void fillCheckboxGridQuestion(WebDriver driver, WebElement questionElement,
             Question question, QuestionOption option, boolean humanLike) {
         try {
-            // Try the new GridQuestionHandler first
+            // Try the injected GridQuestionHandler first
             try {
-                GridQuestionHandler gridHandler = new GridQuestionHandler();
-                gridHandler.fillCheckboxGridQuestion(driver, questionElement, question, option,
-                        humanLike);
+                gridQuestionHandler.fillCheckboxGridQuestion(driver, questionElement, question,
+                        option, humanLike);
                 return;
             } catch (Exception e) {
                 log.warn("GridQuestionHandler failed for checkbox grid, trying fallback method: {}",
@@ -3123,8 +3282,9 @@ public class GoogleFormServiceImpl implements GoogleFormService {
         Exception lastException = null;
         while (retryCount < maxRetries) {
             try {
+                // Use findByIdWithAllData to avoid LazyInitializationException
                 java.util.Optional<FillRequest> optional =
-                        fillRequestRepository.findById(fillRequestId);
+                        fillRequestRepository.findByIdWithAllData(fillRequestId);
                 if (optional.isPresent()) {
                     log.info("Found FillRequest {} on attempt {}", fillRequestId, retryCount + 1);
                     return optional.get();
@@ -3159,10 +3319,34 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             Map<Question, QuestionOption> plan, boolean humanLike, AtomicInteger successCount,
             AtomicInteger failCount) {
         try {
-            boolean success = executeFormFill(fillRequestId, link, plan, humanLike);
+            // fetch formId once for accuracy
+            UUID formIdSafe = null;
+            try {
+                FillRequest frTmp = fillRequestRepository.findById(fillRequestId).orElse(null);
+                if (frTmp != null && frTmp.getForm() != null) {
+                    formIdSafe = frTmp.getForm().getId();
+                }
+            } catch (Exception ignore) {
+            }
+            boolean success = executeFormFill(fillRequestId, formIdSafe, link, plan, humanLike);
             if (success) {
                 successCount.incrementAndGet();
                 log.info("Form fill task succeeded for fillRequest {}", fillRequestId);
+                try {
+                    // Use dedicated counter service with REQUIRES_NEW transaction and retry logic
+                    boolean incrementSuccess = fillRequestCounterService
+                            .incrementCompletedSurveyWithDelay(fillRequestId);
+                    if (!incrementSuccess) {
+                        log.warn(
+                                "Failed to increment completedSurvey for {} after retries (may have reached limit)",
+                                fillRequestId);
+                    }
+                    // Emit progress update after increment so FE reflects latest completedSurvey
+                    emitProgressUpdate(fillRequestId);
+                } catch (Exception e) {
+                    log.error("Failed to increment completedSurvey for {}: {}", fillRequestId,
+                            e.getMessage());
+                }
             } else {
                 failCount.incrementAndGet();
                 log.warn("Form fill task failed for fillRequest {}", fillRequestId);
@@ -3171,6 +3355,56 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             failCount.incrementAndGet();
             log.error("Exception during form fill task for fillRequest {}: {}", fillRequestId,
                     e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Ensure current user is in the form room and send initial updates
+     */
+    private void ensureUserInRoom(FillRequest fillRequest) {
+        try {
+            currentUserUtil.getCurrentUserIdIfPresent().ifPresent(uid -> {
+                String userId = uid.toString();
+                String formId = fillRequest.getForm().getId().toString();
+
+                // Ensure user joins the room
+                realtimeGateway.ensureUserJoinedFormRoom(userId, formId);
+
+                // Send bulk state update
+                realtimeGateway.emitBulkStateForUser(userId, formId);
+
+                // Send current fill request update
+                com.dienform.realtime.dto.FillRequestUpdateEvent evt =
+                        com.dienform.realtime.dto.FillRequestUpdateEvent.builder().formId(formId)
+                                .requestId(fillRequest.getId().toString())
+                                .status(fillRequest.getStatus().name())
+                                .completedSurvey(fillRequest.getCompletedSurvey())
+                                .surveyCount(fillRequest.getSurveyCount())
+                                .updatedAt(java.time.Instant.now().toString()).build();
+                realtimeGateway.emitUpdateForUser(userId, formId, evt);
+
+                log.debug("Ensured user {} is in room for form {} and sent initial updates", userId,
+                        formId);
+            });
+        } catch (Exception e) {
+            log.warn("Failed to ensure user in room: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Emit progress update to both form room and user-specific room
+     */
+    private void emitProgressUpdate(UUID fillRequestId) {
+        try {
+            FillRequest currentAfter = fillRequestRepository.findById(fillRequestId).orElse(null);
+            if (currentAfter != null && currentAfter.getForm() != null) {
+                // Use centralized emit method to avoid duplicates
+                emitSingleUpdate(currentAfter);
+                log.debug("Emitted progress update for fillRequest: {} - {}/{}", fillRequestId,
+                        currentAfter.getCompletedSurvey(), currentAfter.getSurveyCount());
+            }
+        } catch (Exception e) {
+            log.warn("Failed to emit progress update: {}", e.getMessage());
         }
     }
 

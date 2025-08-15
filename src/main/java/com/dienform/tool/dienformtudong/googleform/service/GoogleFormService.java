@@ -44,7 +44,8 @@ public interface GoogleFormService {
      * @param formData Map of question IDs to answers
      * @return true if submission was successful, false otherwise
      */
-    boolean submitFormWithBrowser(UUID formId, String formUrl, Map<String, String> formData);
+    boolean submitFormWithBrowser(UUID fillRequestId, UUID formId, String formUrl,
+            Map<String, String> formData);
 
     /**
      * Clear all caches to free memory and avoid stale data

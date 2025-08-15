@@ -11,12 +11,12 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import com.dienform.common.util.Constants;
 import com.dienform.config.CampaignSchedulerConfig;
 import com.dienform.tool.dienformtudong.datamapping.dto.request.ColumnMapping;
 import com.dienform.tool.dienformtudong.datamapping.dto.request.DataFillRequestDTO;
 import com.dienform.tool.dienformtudong.fillrequest.entity.FillRequest;
 import com.dienform.tool.dienformtudong.fillrequest.entity.FillRequestMapping;
+import com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum;
 import com.dienform.tool.dienformtudong.fillrequest.repository.FillRequestMappingRepository;
 import com.dienform.tool.dienformtudong.fillrequest.repository.FillRequestRepository;
 import com.dienform.tool.dienformtudong.fillrequest.service.DataFillCampaignService;
@@ -54,6 +54,12 @@ public class SurveySchedulerService {
   @Autowired
   private ScheduleDistributionService scheduleDistributionService;
 
+  @Autowired
+  private com.dienform.realtime.FillRequestRealtimeGateway realtimeGateway;
+
+  @Autowired
+  private com.dienform.common.util.CurrentUserUtil currentUserUtil;
+
   /**
    * Scheduled task that checks for PENDING campaigns and starts them when scheduled Rate is
    * configurable via application-local.yml (campaign.scheduler.fixed-rate)
@@ -72,7 +78,7 @@ public class SurveySchedulerService {
     LocalDateTime checkTime = now.plusMinutes(1); // Include campaigns starting in next minute
 
     List<FillRequest> pendingCampaigns = fillRequestRepository
-        .findByStatusAndStartDateLessThanEqual(Constants.FILL_REQUEST_STATUS_PENDING, checkTime);
+        .findByStatusAndStartDateLessThanEqual(FillRequestStatusEnum.PENDING.name(), checkTime);
 
     if (pendingCampaigns.isEmpty()) {
       log.debug("No PENDING campaigns ready to start");
@@ -122,8 +128,8 @@ public class SurveySchedulerService {
 
     // Find campaigns that have been running for more than 30 minutes
     LocalDateTime thirtyMinutesAgo = LocalDateTime.now().minusMinutes(30);
-    List<FillRequest> stuckCampaigns = fillRequestRepository
-        .findByStatusAndStartDateLessThan(Constants.FILL_REQUEST_STATUS_RUNNING, thirtyMinutesAgo);
+    List<FillRequest> stuckCampaigns = fillRequestRepository.findByStatusAndStartDateLessThan(
+        FillRequestStatusEnum.IN_PROCESS.name(), thirtyMinutesAgo);
 
     if (stuckCampaigns.isEmpty()) {
       log.debug("No stuck RUNNING campaigns found");
@@ -136,7 +142,7 @@ public class SurveySchedulerService {
     for (FillRequest campaign : stuckCampaigns) {
       try {
         log.info("Marking stuck campaign as FAILED: {}", campaign.getId());
-        campaign.setStatus(Constants.FILL_REQUEST_STATUS_FAILED);
+        campaign.setStatus(FillRequestStatusEnum.FAILED);
         fillRequestRepository.save(campaign);
       } catch (Exception e) {
         log.error("Error updating stuck campaign status: {}", campaign.getId(), e);
@@ -166,23 +172,88 @@ public class SurveySchedulerService {
           campaign.getStartDate());
 
       // Update status to RUNNING
-      campaign.setStatus(Constants.FILL_REQUEST_STATUS_RUNNING);
+      campaign.setStatus(FillRequestStatusEnum.IN_PROCESS);
       fillRequestRepository.save(campaign);
+      try {
+        com.dienform.realtime.dto.FillRequestUpdateEvent evt =
+            com.dienform.realtime.dto.FillRequestUpdateEvent.builder()
+                .formId(campaign.getForm().getId().toString())
+                .requestId(campaign.getId().toString())
+                .status(FillRequestStatusEnum.IN_PROCESS.name())
+                .completedSurvey(campaign.getCompletedSurvey())
+                .surveyCount(campaign.getSurveyCount())
+                .updatedAt(java.time.Instant.now().toString()).build();
+
+        // Get current user ID if available
+        String userId = null;
+        try {
+          userId = currentUserUtil.getCurrentUserIdIfPresent().map(UUID::toString).orElse(null);
+        } catch (Exception ignore) {
+          log.debug("Failed to get current user ID: {}", ignore.getMessage());
+        }
+
+        // Use centralized emit method with deduplication
+        realtimeGateway.emitUpdateWithUser(campaign.getForm().getId().toString(), evt, userId);
+      } catch (Exception ignore) {
+        log.debug("Failed to emit IN_PROCESS update: {}", ignore.getMessage());
+      }
 
       // Get form and questions
       Form form = campaign.getForm();
       if (form == null) {
         log.error("Form not found for campaign: {}", campaign.getId());
-        campaign.setStatus(Constants.FILL_REQUEST_STATUS_FAILED);
+        campaign.setStatus(FillRequestStatusEnum.FAILED);
         fillRequestRepository.save(campaign);
+        try {
+          com.dienform.realtime.dto.FillRequestUpdateEvent evt =
+              com.dienform.realtime.dto.FillRequestUpdateEvent.builder()
+                  .formId(campaign.getForm().getId().toString())
+                  .requestId(campaign.getId().toString())
+                  .status(FillRequestStatusEnum.FAILED.name())
+                  .completedSurvey(campaign.getCompletedSurvey())
+                  .surveyCount(campaign.getSurveyCount())
+                  .updatedAt(java.time.Instant.now().toString()).build();
+          realtimeGateway.emitUpdate(campaign.getForm().getId().toString(), evt);
+          try {
+            currentUserUtil.getCurrentUserIdIfPresent().ifPresent(uid -> {
+              realtimeGateway.emitBulkStateForUser(uid.toString(),
+                  campaign.getForm().getId().toString());
+              realtimeGateway.emitUpdateForUser(uid.toString(),
+                  campaign.getForm().getId().toString(), evt);
+            });
+          } catch (Exception ignore) {
+          }
+        } catch (Exception ignore) {
+        }
         return;
       }
 
       List<Question> questions = questionRepository.findByFormIdOrderByPosition(form.getId());
       if (questions.isEmpty()) {
         log.error("No questions found for form: {}", form.getId());
-        campaign.setStatus(Constants.FILL_REQUEST_STATUS_FAILED);
+        campaign.setStatus(FillRequestStatusEnum.FAILED);
         fillRequestRepository.save(campaign);
+        try {
+          com.dienform.realtime.dto.FillRequestUpdateEvent evt =
+              com.dienform.realtime.dto.FillRequestUpdateEvent.builder()
+                  .formId(campaign.getForm().getId().toString())
+                  .requestId(campaign.getId().toString())
+                  .status(FillRequestStatusEnum.FAILED.name())
+                  .completedSurvey(campaign.getCompletedSurvey())
+                  .surveyCount(campaign.getSurveyCount())
+                  .updatedAt(java.time.Instant.now().toString()).build();
+          realtimeGateway.emitUpdate(campaign.getForm().getId().toString(), evt);
+          try {
+            currentUserUtil.getCurrentUserIdIfPresent().ifPresent(uid -> {
+              realtimeGateway.emitBulkStateForUser(uid.toString(),
+                  campaign.getForm().getId().toString());
+              realtimeGateway.emitUpdateForUser(uid.toString(),
+                  campaign.getForm().getId().toString(), evt);
+            });
+          } catch (Exception ignore) {
+          }
+        } catch (Exception ignore) {
+        }
         return;
       }
 
@@ -191,8 +262,20 @@ public class SurveySchedulerService {
           fillRequestMappingRepository.findByFillRequestId(campaign.getId());
       if (storedMappings.isEmpty()) {
         log.error("No mappings found for campaign: {}", campaign.getId());
-        campaign.setStatus(Constants.FILL_REQUEST_STATUS_FAILED);
+        campaign.setStatus(FillRequestStatusEnum.FAILED);
         fillRequestRepository.save(campaign);
+        try {
+          com.dienform.realtime.dto.FillRequestUpdateEvent evt =
+              com.dienform.realtime.dto.FillRequestUpdateEvent.builder()
+                  .formId(campaign.getForm().getId().toString())
+                  .requestId(campaign.getId().toString())
+                  .status(FillRequestStatusEnum.FAILED.name())
+                  .completedSurvey(campaign.getCompletedSurvey())
+                  .surveyCount(campaign.getSurveyCount())
+                  .updatedAt(java.time.Instant.now().toString()).build();
+          realtimeGateway.emitUpdate(campaign.getForm().getId().toString(), evt);
+        } catch (Exception ignore) {
+        }
         return;
       }
 
@@ -209,8 +292,33 @@ public class SurveySchedulerService {
       dataFillCampaignService.executeCampaign(campaign, reconstructedRequest, questions, schedule)
           .exceptionally(throwable -> {
             log.error("Campaign {} execution failed", campaign.getId(), throwable);
-            campaign.setStatus(Constants.FILL_REQUEST_STATUS_FAILED);
+            campaign.setStatus(FillRequestStatusEnum.FAILED);
             fillRequestRepository.save(campaign);
+            try {
+              com.dienform.realtime.dto.FillRequestUpdateEvent evt =
+                  com.dienform.realtime.dto.FillRequestUpdateEvent.builder()
+                      .formId(campaign.getForm().getId().toString())
+                      .requestId(campaign.getId().toString())
+                      .status(FillRequestStatusEnum.FAILED.name())
+                      .completedSurvey(campaign.getCompletedSurvey())
+                      .surveyCount(campaign.getSurveyCount())
+                      .updatedAt(java.time.Instant.now().toString()).build();
+
+              // Get current user ID if available
+              String userId = null;
+              try {
+                userId =
+                    currentUserUtil.getCurrentUserIdIfPresent().map(UUID::toString).orElse(null);
+              } catch (Exception ignore) {
+                log.debug("Failed to get current user ID: {}", ignore.getMessage());
+              }
+
+              // Use centralized emit method with deduplication
+              realtimeGateway.emitUpdateWithUser(campaign.getForm().getId().toString(), evt,
+                  userId);
+            } catch (Exception ignore) {
+              log.debug("Failed to emit FAILED update: {}", ignore.getMessage());
+            }
             return null;
           });
 
@@ -221,7 +329,7 @@ public class SurveySchedulerService {
       log.error("Failed to start campaign: {}", campaign.getId(), e);
 
       // Update status to FAILED
-      campaign.setStatus(Constants.FILL_REQUEST_STATUS_FAILED);
+      campaign.setStatus(FillRequestStatusEnum.FAILED);
       fillRequestRepository.save(campaign);
     }
   }

@@ -16,7 +16,6 @@ import org.springframework.transaction.event.TransactionPhase;
 import org.springframework.transaction.event.TransactionalEventListener;
 import com.dienform.common.exception.BadRequestException;
 import com.dienform.common.exception.ResourceNotFoundException;
-import com.dienform.common.util.Constants;
 import com.dienform.tool.dienformtudong.answerdistribution.entity.AnswerDistribution;
 import com.dienform.tool.dienformtudong.answerdistribution.repository.AnswerDistributionRepository;
 import com.dienform.tool.dienformtudong.datamapping.dto.request.DataFillRequestDTO;
@@ -25,6 +24,7 @@ import com.dienform.tool.dienformtudong.fillrequest.dto.request.FillRequestDTO;
 import com.dienform.tool.dienformtudong.fillrequest.dto.response.FillRequestResponse;
 import com.dienform.tool.dienformtudong.fillrequest.entity.FillRequest;
 import com.dienform.tool.dienformtudong.fillrequest.entity.FillRequestMapping;
+import com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum;
 import com.dienform.tool.dienformtudong.fillrequest.event.FillRequestCreatedEvent;
 import com.dienform.tool.dienformtudong.fillrequest.mapper.FillRequestMapper;
 import com.dienform.tool.dienformtudong.fillrequest.repository.FillRequestMappingRepository;
@@ -63,6 +63,8 @@ public class FillRequestServiceImpl implements FillRequestService {
   private final GoogleSheetsService googleSheetsService;
   private final DataFillCampaignService dataFillCampaignService;
   private final ApplicationEventPublisher eventPublisher;
+  private final com.dienform.realtime.FillRequestRealtimeGateway realtimeGateway;
+  private final com.dienform.common.util.CurrentUserUtil currentUserUtil;
 
   @PersistenceContext
   private EntityManager entityManager;
@@ -82,16 +84,33 @@ public class FillRequestServiceImpl implements FillRequestService {
     validateAnswerDistributions(fillRequestDTO.getAnswerDistributions(), questions);
 
     // Create fill request
-    FillRequest fillRequest = FillRequest.builder().form(form)
-        .surveyCount(fillRequestDTO.getSurveyCount())
-        .pricePerSurvey(fillRequestDTO.getPricePerSurvey())
-        .totalPrice(fillRequestDTO.getPricePerSurvey()
-            .multiply(BigDecimal.valueOf(fillRequestDTO.getSurveyCount())))
-        .humanLike(fillRequestDTO.getIsHumanLike()).startDate(fillRequestDTO.getStartDate())
-        .endDate(fillRequestDTO.getEndDate()).status(Constants.FILL_REQUEST_STATUS_PENDING).build();
+    FillRequest fillRequest =
+        FillRequest.builder().form(form).surveyCount(fillRequestDTO.getSurveyCount())
+            .completedSurvey(0).pricePerSurvey(fillRequestDTO.getPricePerSurvey())
+            .totalPrice(fillRequestDTO.getPricePerSurvey()
+                .multiply(BigDecimal.valueOf(fillRequestDTO.getSurveyCount())))
+            .humanLike(fillRequestDTO.getIsHumanLike()).startDate(fillRequestDTO.getStartDate())
+            .endDate(fillRequestDTO.getEndDate()).status(FillRequestStatusEnum.PENDING).build();
 
     FillRequest savedRequest = fillRequestRepository.save(fillRequest);
     log.info("Fill request saved with ID: {}", savedRequest.getId());
+
+    // Realtime: ensure current user joins user-specific room and receive bulk + initial update
+    try {
+      currentUserUtil.getCurrentUserIdIfPresent().ifPresent(uid -> {
+        String userId = uid.toString();
+        String formIdStr = form.getId().toString();
+        realtimeGateway.emitBulkStateForUser(userId, formIdStr);
+        com.dienform.realtime.dto.FillRequestUpdateEvent evt =
+            com.dienform.realtime.dto.FillRequestUpdateEvent.builder().formId(formIdStr)
+                .requestId(savedRequest.getId().toString()).status(savedRequest.getStatus().name())
+                .completedSurvey(savedRequest.getCompletedSurvey())
+                .surveyCount(savedRequest.getSurveyCount())
+                .updatedAt(java.time.Instant.now().toString()).build();
+        realtimeGateway.emitUpdateForUser(userId, formIdStr, evt);
+      });
+    } catch (Exception ignore) {
+    }
 
     // Create answer distributions
     List<AnswerDistribution> distributions = new ArrayList<>();
@@ -257,8 +276,26 @@ public class FillRequestServiceImpl implements FillRequestService {
             FillRequest request =
                 fillRequestRepository.findById(event.getFillRequestId()).orElse(null);
             if (request != null) {
-              request.setStatus(Constants.FILL_REQUEST_STATUS_FAILED);
+              request.setStatus(FillRequestStatusEnum.FAILED);
               fillRequestRepository.save(request);
+              try {
+                com.dienform.realtime.dto.FillRequestUpdateEvent evt =
+                    com.dienform.realtime.dto.FillRequestUpdateEvent.builder()
+                        .formId(request.getForm().getId().toString())
+                        .requestId(request.getId().toString())
+                        .status(FillRequestStatusEnum.FAILED.name())
+                        .completedSurvey(request.getCompletedSurvey())
+                        .surveyCount(request.getSurveyCount())
+                        .updatedAt(java.time.Instant.now().toString()).build();
+                realtimeGateway.emitUpdate(request.getForm().getId().toString(), evt);
+                currentUserUtil.getCurrentUserIdIfPresent().ifPresent(uid -> {
+                  String userId = uid.toString();
+                  String formIdStr = request.getForm().getId().toString();
+                  realtimeGateway.emitUpdateForUser(userId, formIdStr, evt);
+                  realtimeGateway.leaveUserFormRoom(userId, formIdStr);
+                });
+              } catch (Exception ignore) {
+              }
             }
           } catch (Exception ex) {
             log.error("Error updating fill request status: {}", ex.getMessage(), ex);
@@ -287,8 +324,8 @@ public class FillRequestServiceImpl implements FillRequestService {
         .orElseThrow(() -> new ResourceNotFoundException("Fill Request", "id", id));
 
     // Validate fill request status before starting
-    if (!Constants.FILL_REQUEST_STATUS_PENDING.equals(fillRequest.getStatus())
-        && !Constants.FILL_REQUEST_STATUS_RUNNING.equals(fillRequest.getStatus())) {
+    if (!(FillRequestStatusEnum.PENDING.equals(fillRequest.getStatus())
+        || FillRequestStatusEnum.IN_PROCESS.equals(fillRequest.getStatus()))) {
       log.warn("Fill request {} is not in valid state to start. Current status: {}", id,
           fillRequest.getStatus());
 
@@ -301,7 +338,7 @@ public class FillRequestServiceImpl implements FillRequestService {
     }
 
     // If already running, return current status
-    if (Constants.FILL_REQUEST_STATUS_RUNNING.equals(fillRequest.getStatus())) {
+    if (FillRequestStatusEnum.IN_PROCESS.equals(fillRequest.getStatus())) {
       log.info("Fill request {} is already running", id);
 
       Map<String, Object> response = new HashMap<>();
@@ -311,9 +348,34 @@ public class FillRequestServiceImpl implements FillRequestService {
       return response;
     }
 
-    // Update status to RUNNING
-    fillRequest.setStatus(Constants.FILL_REQUEST_STATUS_RUNNING);
+    // Update status to IN_PROCESS
+    fillRequest.setStatus(FillRequestStatusEnum.IN_PROCESS);
     fillRequestRepository.save(fillRequest);
+
+    // Emit realtime update for IN_PROCESS transition
+    try {
+      com.dienform.realtime.dto.FillRequestUpdateEvent evt =
+          com.dienform.realtime.dto.FillRequestUpdateEvent.builder()
+              .formId(fillRequest.getForm().getId().toString())
+              .requestId(fillRequest.getId().toString())
+              .status(FillRequestStatusEnum.IN_PROCESS.name())
+              .completedSurvey(fillRequest.getCompletedSurvey())
+              .surveyCount(fillRequest.getSurveyCount())
+              .updatedAt(java.time.Instant.now().toString()).build();
+
+      // Get current user ID if available
+      String userId = null;
+      try {
+        userId = currentUserUtil.getCurrentUserIdIfPresent().map(UUID::toString).orElse(null);
+      } catch (Exception ignore) {
+        log.debug("Failed to get current user ID: {}", ignore.getMessage());
+      }
+
+      // Use centralized emit method with deduplication
+      realtimeGateway.emitUpdateWithUser(fillRequest.getForm().getId().toString(), evt, userId);
+    } catch (Exception ignore) {
+      log.debug("Failed to emit IN_PROCESS update: {}", ignore.getMessage());
+    }
 
     // Start form filling process asynchronously
     CompletableFuture.runAsync(() -> {
@@ -328,9 +390,36 @@ public class FillRequestServiceImpl implements FillRequestService {
         try {
           FillRequest failedRequest = fillRequestRepository.findById(id).orElse(null);
           if (failedRequest != null) {
-            failedRequest.setStatus(Constants.FILL_REQUEST_STATUS_FAILED);
+            failedRequest.setStatus(FillRequestStatusEnum.FAILED);
             fillRequestRepository.save(failedRequest);
             log.info("Updated fill request {} status to FAILED due to error", id);
+
+            // Emit FAILED status update
+            try {
+              com.dienform.realtime.dto.FillRequestUpdateEvent evt =
+                  com.dienform.realtime.dto.FillRequestUpdateEvent.builder()
+                      .formId(failedRequest.getForm().getId().toString())
+                      .requestId(failedRequest.getId().toString())
+                      .status(FillRequestStatusEnum.FAILED.name())
+                      .completedSurvey(failedRequest.getCompletedSurvey())
+                      .surveyCount(failedRequest.getSurveyCount())
+                      .updatedAt(java.time.Instant.now().toString()).build();
+
+              // Get current user ID if available
+              String userId = null;
+              try {
+                userId =
+                    currentUserUtil.getCurrentUserIdIfPresent().map(UUID::toString).orElse(null);
+              } catch (Exception ignore) {
+                log.debug("Failed to get current user ID: {}", ignore.getMessage());
+              }
+
+              // Use centralized emit method with deduplication
+              realtimeGateway.emitUpdateWithUser(failedRequest.getForm().getId().toString(), evt,
+                  userId);
+            } catch (Exception emitException) {
+              log.debug("Failed to emit FAILED update: {}", emitException.getMessage());
+            }
           }
         } catch (Exception updateException) {
           log.error("Failed to update fill request status to FAILED: {}",
@@ -355,8 +444,8 @@ public class FillRequestServiceImpl implements FillRequestService {
         .orElseThrow(() -> new ResourceNotFoundException("Fill Request", "id", id));
 
     // Only allow reset if status is RUNNING or FAILED
-    if (!Constants.FILL_REQUEST_STATUS_RUNNING.equals(fillRequest.getStatus())
-        && !Constants.FILL_REQUEST_STATUS_FAILED.equals(fillRequest.getStatus())) {
+    if (!(FillRequestStatusEnum.IN_PROCESS.equals(fillRequest.getStatus())
+        || FillRequestStatusEnum.FAILED.equals(fillRequest.getStatus()))) {
       log.warn("Fill request {} cannot be reset. Current status: {}", id, fillRequest.getStatus());
 
       Map<String, Object> response = new HashMap<>();
@@ -368,8 +457,32 @@ public class FillRequestServiceImpl implements FillRequestService {
     }
 
     // Reset status to PENDING
-    fillRequest.setStatus(Constants.FILL_REQUEST_STATUS_PENDING);
+    fillRequest.setStatus(FillRequestStatusEnum.PENDING);
     fillRequestRepository.save(fillRequest);
+
+    try {
+      com.dienform.realtime.dto.FillRequestUpdateEvent evt =
+          com.dienform.realtime.dto.FillRequestUpdateEvent.builder()
+              .formId(fillRequest.getForm().getId().toString())
+              .requestId(fillRequest.getId().toString())
+              .status(FillRequestStatusEnum.PENDING.name())
+              .completedSurvey(fillRequest.getCompletedSurvey())
+              .surveyCount(fillRequest.getSurveyCount())
+              .updatedAt(java.time.Instant.now().toString()).build();
+
+      // Get current user ID if available
+      String userId = null;
+      try {
+        userId = currentUserUtil.getCurrentUserIdIfPresent().map(UUID::toString).orElse(null);
+      } catch (Exception ignore) {
+        log.debug("Failed to get current user ID: {}", ignore.getMessage());
+      }
+
+      // Use centralized emit method with deduplication
+      realtimeGateway.emitUpdateWithUser(fillRequest.getForm().getId().toString(), evt, userId);
+    } catch (Exception ignore) {
+      log.debug("Failed to emit PENDING update: {}", ignore.getMessage());
+    }
 
     log.info("Reset fill request {} status to PENDING", id);
 
@@ -433,12 +546,12 @@ public class FillRequestServiceImpl implements FillRequestService {
     // Persist the exact requested submission count. Data re-use will be handled at execution time.
     int requestedSubmissionCount = dataFillRequestDTO.getSubmissionCount();
     FillRequest fillRequest = FillRequest.builder().form(form).surveyCount(requestedSubmissionCount)
-        .pricePerSurvey(dataFillRequestDTO.getPricePerSurvey())
+        .completedSurvey(0).pricePerSurvey(dataFillRequestDTO.getPricePerSurvey())
         .totalPrice(dataFillRequestDTO.getPricePerSurvey()
             .multiply(BigDecimal.valueOf(requestedSubmissionCount)))
         .humanLike(Boolean.TRUE.equals(dataFillRequestDTO.getIsHumanLike()))
         .startDate(dataFillRequestDTO.getStartDate()).endDate(dataFillRequestDTO.getEndDate())
-        .status(Constants.FILL_REQUEST_STATUS_PENDING).build();
+        .status(FillRequestStatusEnum.PENDING).build();
 
     FillRequest savedRequest = fillRequestRepository.save(fillRequest);
 
@@ -622,10 +735,11 @@ public class FillRequestServiceImpl implements FillRequestService {
     // Tạo response với thông tin cơ bản từ FillRequest
     FillRequestResponse.FillRequestResponseBuilder responseBuilder = FillRequestResponse.builder()
         .id(fillRequest.getId()).surveyCount(fillRequest.getSurveyCount())
+        .completedSurvey(fillRequest.getCompletedSurvey())
         .pricePerSurvey(fillRequest.getPricePerSurvey()).totalPrice(fillRequest.getTotalPrice())
         .isHumanLike(fillRequest.isHumanLike()).createdAt(fillRequest.getCreatedAt())
         .startDate(fillRequest.getStartDate()).endDate(fillRequest.getEndDate())
-        .status(fillRequest.getStatus());
+        .status(fillRequest.getStatus() != null ? fillRequest.getStatus().name() : null);
 
     // Create answer distribution responses
     List<FillRequestResponse.AnswerDistributionResponse> distributionResponses =

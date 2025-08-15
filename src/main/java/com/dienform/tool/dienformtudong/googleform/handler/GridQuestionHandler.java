@@ -8,9 +8,9 @@ import org.openqa.selenium.By;
 import org.openqa.selenium.JavascriptExecutor;
 import org.openqa.selenium.WebDriver;
 import org.openqa.selenium.WebElement;
+import org.springframework.stereotype.Component;
 import com.dienform.tool.dienformtudong.googleform.dto.GridQuestionAnswer;
 import com.dienform.tool.dienformtudong.googleform.service.GridQuestionService;
-import com.dienform.tool.dienformtudong.googleform.service.impl.GridQuestionServiceImpl;
 import com.dienform.tool.dienformtudong.question.entity.Question;
 import com.dienform.tool.dienformtudong.question.entity.QuestionOption;
 import lombok.extern.slf4j.Slf4j;
@@ -19,18 +19,19 @@ import lombok.extern.slf4j.Slf4j;
  * Handler for filling grid questions in Google Forms Supports both multiple choice grid and
  * checkbox grid questions
  */
+@Component
 @Slf4j
 public class GridQuestionHandler {
 
   private final GridQuestionService gridQuestionService;
-  private final Random random = new Random();
+  private final Random random;
 
-  public GridQuestionHandler() {
-    this.gridQuestionService = new GridQuestionServiceImpl();
-  }
-
+  /**
+   * Constructor for testing purposes
+   */
   public GridQuestionHandler(GridQuestionService gridQuestionService) {
     this.gridQuestionService = gridQuestionService;
+    this.random = new Random();
   }
 
   /**

@@ -9,16 +9,27 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
-/**
- * response model for API responses
- * 
- * @param <T> Type of content data
- */
 @Data
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
 public class ResponseModel<T> {
+    private HttpStatus status;
+    private T content;
+    private Integer pageSize;
+    private Integer pageNumber;
+    private Integer totalPages;
+    private Long totalElements;
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private Integer errorCode;
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private String errorMessage;
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private Map<String, Object> errorDetails;
+    
     public static <T> ResponseModel<List<T>> success(List<T> data, Integer pageCount, Integer page,
             Integer size, Long total, HttpStatus status) {
         return ResponseModel.<List<T>>builder().status(status).content(data).pageSize(size)
@@ -45,22 +56,4 @@ public class ResponseModel<T> {
                 .errorCode(code != null ? code.getCode() : null).errorMessage(message)
                 .errorDetails(details).build();
     }
-
-    private HttpStatus status;
-    private T content;
-    private Integer pageSize;
-    private Integer pageNumber;
-
-    private Integer totalPages;
-
-    private Long totalElements;
-
-    @JsonInclude(JsonInclude.Include.NON_NULL)
-    private Integer errorCode;
-
-    @JsonInclude(JsonInclude.Include.NON_NULL)
-    private String errorMessage;
-
-    @JsonInclude(JsonInclude.Include.NON_NULL)
-    private Map<String, Object> errorDetails;
 }

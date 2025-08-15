@@ -8,9 +8,12 @@ import org.springframework.stereotype.Component;
 import com.dienform.tool.dienformtudong.datamapping.dto.request.DataFillRequestDTO;
 import com.dienform.tool.dienformtudong.question.entity.Question;
 import com.dienform.tool.dienformtudong.question.entity.QuestionOption;
+import com.dienform.tool.dienformtudong.question.repository.QuestionRepository;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
 @Component
+@RequiredArgsConstructor
 @Slf4j
 public class DataFillValidator {
 
@@ -49,6 +52,8 @@ public class DataFillValidator {
       .compile("^[a-zA-Z0-9_+&*-]+(?:\\.[a-zA-Z0-9_+&*-]+)*@(?:[a-zA-Z0-9-]+\\.)+[a-zA-Z]{2,7}$");
 
   private static final Pattern PHONE_PATTERN = Pattern.compile("^[+]?[0-9]{10,15}$");
+
+  private final QuestionRepository questionRepository;
 
   /**
    * Validate data fill request basic structure
@@ -317,7 +322,7 @@ public class DataFillValidator {
 
     // Build row list and find the requested row
     List<com.dienform.tool.dienformtudong.question.entity.QuestionOption> allOptions =
-        question.getOptions() == null ? java.util.Collections.emptyList() : question.getOptions();
+        getQuestionOptionsSafely(question);
     com.dienform.tool.dienformtudong.question.entity.QuestionOption matchedRow =
         allOptions.stream().filter(o -> o.isRow() && o.getText() != null
             && o.getText().trim().equalsIgnoreCase(rowLabel.trim())).findFirst().orElse(null);
@@ -446,7 +451,7 @@ public class DataFillValidator {
     String main = dashIdx > 0 ? raw.substring(0, dashIdx).trim() : raw;
     String otherText = dashIdx > 0 ? raw.substring(dashIdx + 1).trim() : null;
 
-    List<QuestionOption> options = question.getOptions().stream()
+    List<QuestionOption> options = getQuestionOptionsSafely(question).stream()
         .sorted((a, b) -> Integer.compare(a.getPosition(), b.getPosition())).toList();
 
     if (!isPositionNumber(main)) {
@@ -500,7 +505,7 @@ public class DataFillValidator {
     String main = dashIdx > 0 ? raw.substring(0, dashIdx).trim() : raw;
     String otherText = dashIdx > 0 ? raw.substring(dashIdx + 1).trim() : null;
 
-    List<QuestionOption> options = question.getOptions().stream()
+    List<QuestionOption> options = getQuestionOptionsSafely(question).stream()
         .sorted((a, b) -> Integer.compare(a.getPosition(), b.getPosition())).toList();
 
     String[] selectedOptions = main.split("\\|");
@@ -617,5 +622,26 @@ public class DataFillValidator {
       sb.append(String.format("%d='%s'", i + 1, options.get(i).getValue()));
     }
     return sb.toString();
+  }
+
+  /**
+   * Safely get question options, handling lazy initialization
+   */
+  private List<QuestionOption> getQuestionOptionsSafely(Question question) {
+    try {
+      return question.getOptions() == null ? new ArrayList<>() : question.getOptions();
+    } catch (org.hibernate.LazyInitializationException e) {
+      log.debug("Lazy initialization exception for question options, reloading question: {}",
+          question.getId());
+      try {
+        Question reloadedQuestion =
+            questionRepository.findWithOptionsById(question.getId()).orElse(question);
+        return reloadedQuestion.getOptions() == null ? new ArrayList<>()
+            : reloadedQuestion.getOptions();
+      } catch (Exception ex) {
+        log.warn("Failed to reload question with options: {}", question.getId(), ex);
+        return new ArrayList<>();
+      }
+    }
   }
 }

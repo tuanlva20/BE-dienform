@@ -9,7 +9,7 @@ public class Constants {
 
   // Fill request status constants
   public static final String FILL_REQUEST_STATUS_PENDING = "PENDING";
-  public static final String FILL_REQUEST_STATUS_RUNNING = "RUNNING";
+  public static final String FILL_REQUEST_STATUS_RUNNING = "IN_PROCESS"; // Legacy usage; map to enum
   public static final String FILL_REQUEST_STATUS_COMPLETED = "COMPLETED";
   public static final String FILL_REQUEST_STATUS_FAILED = "FAILED";
   public static final String FILL_REQUEST_STATUS_CANCELLED = "CANCELLED";

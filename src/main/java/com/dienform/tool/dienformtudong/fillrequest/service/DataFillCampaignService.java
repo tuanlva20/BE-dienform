@@ -2,6 +2,7 @@ package com.dienform.tool.dienformtudong.fillrequest.service;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -16,16 +17,18 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import com.dienform.common.util.Constants;
 import com.dienform.common.util.CopyUtil;
+import com.dienform.common.util.CurrentUserUtil;
 import com.dienform.tool.dienformtudong.datamapping.dto.request.DataFillRequestDTO;
 import com.dienform.tool.dienformtudong.fillrequest.entity.FillRequest;
+import com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum;
 import com.dienform.tool.dienformtudong.fillrequest.repository.FillRequestRepository;
 import com.dienform.tool.dienformtudong.fillrequest.service.ScheduleDistributionService.ScheduledTask;
 import com.dienform.tool.dienformtudong.fillrequest.validator.DataFillValidator;
 import com.dienform.tool.dienformtudong.googleform.service.GoogleFormService;
 import com.dienform.tool.dienformtudong.question.entity.Question;
 import com.dienform.tool.dienformtudong.question.entity.QuestionOption;
+import com.dienform.tool.dienformtudong.question.repository.QuestionRepository;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
@@ -46,10 +49,22 @@ public class DataFillCampaignService {
   @Autowired
   private FillRequestRepository fillRequestRepository;
 
+  @Autowired
+  private FillRequestCounterService fillRequestCounterService;
+
+  @Autowired
+  private QuestionRepository questionRepository;
+
   @Value("${google.form.thread-pool-size:1}")
   private int threadPoolSize;
 
   private ExecutorService executorService;
+
+  @Autowired
+  private com.dienform.realtime.FillRequestRealtimeGateway realtimeGateway;
+
+  @Autowired
+  private CurrentUserUtil currentUserUtil;
 
   @PostConstruct
   public void init() {
@@ -71,8 +86,9 @@ public class DataFillCampaignService {
     log.info("Starting data fill campaign for request: {} with {} tasks", fillRequest.getId(),
         schedule.size());
 
-    // Set initial status to RUNNING
-    updateFillRequestStatus(fillRequest, Constants.FILL_REQUEST_STATUS_RUNNING);
+    // Set initial status to IN_PROCESS and ensure user is in room
+    updateFillRequestStatus(fillRequest, FillRequestStatusEnum.IN_PROCESS);
+    ensureUserInRoom(fillRequest);
 
     CompletableFuture<Void> executionFuture = new CompletableFuture<>();
 
@@ -99,7 +115,7 @@ public class DataFillCampaignService {
 
       if (sheetData == null || sheetData.isEmpty()) {
         log.error("No data found in sheet for request: {}", fillRequest.getId());
-        updateFillRequestStatus(fillRequest, Constants.FILL_REQUEST_STATUS_FAILED);
+        updateFillRequestStatus(fillRequest, FillRequestStatusEnum.FAILED);
         executionFuture.complete(null);
         return executionFuture;
       }
@@ -128,17 +144,58 @@ public class DataFillCampaignService {
                 log.info("All tasks completed for campaign {}. Successful: {}/{}",
                     fillRequest.getId(), successfulTasks.get(), totalTasks);
 
-                String finalStatus =
-                    successfulTasks.get() == totalTasks ? Constants.FILL_REQUEST_STATUS_COMPLETED
-                        : Constants.FILL_REQUEST_STATUS_FAILED;
+                // Decide final status based on persisted completedSurvey to ensure accuracy
+                FillRequest fresh =
+                    fillRequestRepository.findById(fillRequest.getId()).orElse(null);
+                if (fresh == null) {
+                  updateFillRequestStatus(fillRequest, FillRequestStatusEnum.FAILED);
+                  executionFuture.complete(null);
+                  return;
+                }
+
+                FillRequestStatusEnum finalStatus;
+                if (fresh.getCompletedSurvey() >= fresh.getSurveyCount()
+                    && successfulTasks.get() == totalTasks) {
+                  finalStatus = FillRequestStatusEnum.COMPLETED;
+                } else if (successfulTasks.get() == 0 || successfulTasks.get() < totalTasks) {
+                  finalStatus = FillRequestStatusEnum.FAILED;
+                } else {
+                  // Not all persisted yet, keep IN_PROCESS; caller may check later
+                  finalStatus = FillRequestStatusEnum.IN_PROCESS;
+                }
 
                 updateFillRequestStatus(fillRequest, finalStatus);
+                try {
+                  com.dienform.realtime.dto.FillRequestUpdateEvent evt =
+                      com.dienform.realtime.dto.FillRequestUpdateEvent.builder()
+                          .formId(fresh.getForm().getId().toString())
+                          .requestId(fresh.getId().toString()).status(finalStatus.name())
+                          .completedSurvey(fresh.getCompletedSurvey())
+                          .surveyCount(fresh.getSurveyCount())
+                          .updatedAt(java.time.Instant.now().toString()).build();
+
+                  // Get current user ID if available
+                  String userId = null;
+                  try {
+                    userId = currentUserUtil.getCurrentUserIdIfPresent().map(UUID::toString)
+                        .orElse(null);
+                  } catch (Exception ignore) {
+                    log.debug("Failed to get current user ID: {}", ignore.getMessage());
+                  }
+
+                  // Use centralized emit method with deduplication
+                  realtimeGateway.emitUpdateWithUser(fresh.getForm().getId().toString(), evt,
+                      userId);
+                } catch (Exception ignore) {
+                  log.debug("Failed to emit final status update: {}", ignore.getMessage());
+                }
+
                 executionFuture.complete(null);
               }
             }).exceptionally(throwable -> {
               log.error("Task execution failed", throwable);
               if (completedTasks.incrementAndGet() == totalTasks) {
-                updateFillRequestStatus(fillRequest, Constants.FILL_REQUEST_STATUS_FAILED);
+                updateFillRequestStatus(fillRequest, FillRequestStatusEnum.FAILED);
                 executionFuture.complete(null);
               }
               return null;
@@ -147,7 +204,7 @@ public class DataFillCampaignService {
 
     } catch (Exception e) {
       log.error("Failed to initialize campaign: {}", fillRequest.getId(), e);
-      updateFillRequestStatus(fillRequest, Constants.FILL_REQUEST_STATUS_FAILED);
+      updateFillRequestStatus(fillRequest, FillRequestStatusEnum.FAILED);
       executionFuture.complete(null);
     }
 
@@ -155,18 +212,99 @@ public class DataFillCampaignService {
   }
 
   @Transactional
-  protected void updateFillRequestStatus(FillRequest fillRequest, String newStatus) {
+  protected void updateFillRequestStatus(FillRequest fillRequest, FillRequestStatusEnum newStatus) {
     try {
       FillRequest freshRequest = fillRequestRepository.findById(fillRequest.getId()).orElseThrow(
           () -> new RuntimeException("Fill request not found: " + fillRequest.getId()));
 
-      if (!newStatus.equals(freshRequest.getStatus())) {
+      if (newStatus != freshRequest.getStatus()) {
         freshRequest.setStatus(newStatus);
         fillRequestRepository.save(freshRequest);
-        log.info("Updated fill request {} status to: {}", fillRequest.getId(), newStatus);
+        log.info("Updated fill request {} status to: {}", fillRequest.getId(), newStatus.name());
+        // Emit realtime update for any status change
+        try {
+          com.dienform.realtime.dto.FillRequestUpdateEvent evt =
+              com.dienform.realtime.dto.FillRequestUpdateEvent.builder()
+                  .formId(freshRequest.getForm().getId().toString())
+                  .requestId(freshRequest.getId().toString()).status(newStatus.name())
+                  .completedSurvey(freshRequest.getCompletedSurvey())
+                  .surveyCount(freshRequest.getSurveyCount())
+                  .updatedAt(java.time.Instant.now().toString()).build();
+          realtimeGateway.emitUpdate(freshRequest.getForm().getId().toString(), evt);
+        } catch (Exception ignore) {
+          log.debug("Failed to emit status update: {}", ignore.getMessage());
+        }
+      } else {
+        log.debug("Fill request {} status unchanged: {}", fillRequest.getId(), newStatus.name());
       }
     } catch (Exception e) {
       log.error("Failed to update fill request status: {}", fillRequest.getId(), e);
+    }
+  }
+
+  /**
+   * Ensure current user is in the form room and send initial updates
+   */
+  private void ensureUserInRoom(FillRequest fillRequest) {
+    try {
+      currentUserUtil.getCurrentUserIdIfPresent().ifPresent(uid -> {
+        String userId = uid.toString();
+        String formId = fillRequest.getForm().getId().toString();
+
+        // Ensure user joins the room
+        realtimeGateway.ensureUserJoinedFormRoom(userId, formId);
+
+        // Send bulk state update
+        realtimeGateway.emitBulkStateForUser(userId, formId);
+
+        // Send current fill request update
+        com.dienform.realtime.dto.FillRequestUpdateEvent evt =
+            com.dienform.realtime.dto.FillRequestUpdateEvent.builder().formId(formId)
+                .requestId(fillRequest.getId().toString()).status(fillRequest.getStatus().name())
+                .completedSurvey(fillRequest.getCompletedSurvey())
+                .surveyCount(fillRequest.getSurveyCount())
+                .updatedAt(java.time.Instant.now().toString()).build();
+        realtimeGateway.emitUpdateForUser(userId, formId, evt);
+
+        log.debug("Ensured user {} is in room for form {} and sent initial updates", userId,
+            formId);
+      });
+    } catch (Exception e) {
+      log.warn("Failed to ensure user in room: {}", e.getMessage());
+    }
+  }
+
+  /**
+   * Emit progress update to both form room and user-specific room
+   */
+  private void emitProgressUpdate(UUID fillRequestId) {
+    try {
+      com.dienform.tool.dienformtudong.fillrequest.entity.FillRequest current =
+          fillRequestRepository.findById(fillRequestId).orElse(null);
+      if (current != null && current.getForm() != null) {
+        // Only emit if there's meaningful progress (completedSurvey > 0)
+        if (current.getCompletedSurvey() > 0) {
+          com.dienform.realtime.dto.FillRequestUpdateEvent evt =
+              com.dienform.realtime.dto.FillRequestUpdateEvent.builder()
+                  .formId(current.getForm().getId().toString())
+                  .requestId(current.getId().toString())
+                  .status(current.getStatus() == null
+                      ? com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.IN_PROCESS
+                          .name()
+                      : current.getStatus().name())
+                  .completedSurvey(current.getCompletedSurvey())
+                  .surveyCount(current.getSurveyCount())
+                  .updatedAt(java.time.Instant.now().toString()).build();
+
+          // Emit to form room only (avoid duplicate user-specific emissions)
+          realtimeGateway.emitUpdate(current.getForm().getId().toString(), evt);
+
+          log.debug("Emitted progress update for fillRequest: {} - {}/{}", fillRequestId,
+              current.getCompletedSurvey(), current.getSurveyCount());
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Failed to emit progress update: {}", e.getMessage());
     }
   }
 
@@ -263,12 +401,27 @@ public class DataFillCampaignService {
 
       // Submit form using browser automation
       String formUrl = fillRequest.getForm().getEditLink();
-      boolean success =
-          googleFormService.submitFormWithBrowser(fillRequest.getForm().getId(), formUrl, formData);
+      boolean success = googleFormService.submitFormWithBrowser(fillRequest.getId(),
+          fillRequest.getForm().getId(), formUrl, formData);
 
       if (success) {
         log.info("Form submission successful for request: {}, row: {}", fillRequest.getId(),
             task.getRowIndex());
+        try {
+          // Use dedicated counter service with REQUIRES_NEW transaction and retry logic
+          boolean incrementSuccess =
+              fillRequestCounterService.incrementCompletedSurveyWithDelay(fillRequest.getId());
+          if (!incrementSuccess) {
+            log.warn(
+                "Failed to increment completedSurvey for {} after retries (may have reached limit)",
+                fillRequest.getId());
+          }
+          // Emit progress update after successful increment
+          emitProgressUpdate(fillRequest.getId());
+        } catch (Exception e) {
+          log.error("Failed to increment completedSurvey for {}: {}", fillRequest.getId(),
+              e.getMessage());
+        }
       } else {
         log.error("Form submission failed for request: {}, row: {}", fillRequest.getId(),
             task.getRowIndex());
@@ -366,15 +519,15 @@ public class DataFillCampaignService {
           if ("checkbox".equalsIgnoreCase(question.getType())
               || "multiselect".equalsIgnoreCase(question.getType())) {
             if (main.contains("|")) {
-              String converted =
-                  dataFillValidator.convertMultiplePositionsToValues(main, question.getOptions());
+              String converted = dataFillValidator.convertMultiplePositionsToValues(main,
+                  getQuestionOptionsSafely(question));
               return (other != null && !other.isEmpty()) ? converted + "-" + other : converted;
             }
           }
           // Single numeric position
           if (main.matches("\\d+")) {
             String converted =
-                dataFillValidator.convertPositionToValue(main, question.getOptions());
+                dataFillValidator.convertPositionToValue(main, getQuestionOptionsSafely(question));
             return (other != null && !other.isEmpty()) ? converted + "-" + other : converted;
           }
           // Already explicit value(s); keep optional -other suffix
@@ -391,10 +544,11 @@ public class DataFillCampaignService {
           String v = value.trim();
           // Map numeric index (1-based) to column option value
           if (v.matches("\\d+")) {
-            List<QuestionOption> columns = question.getOptions().stream().filter(o -> !o.isRow())
-                .sorted((a, b) -> Integer.compare(a.getPosition() == null ? 0 : a.getPosition(),
-                    b.getPosition() == null ? 0 : b.getPosition()))
-                .toList();
+            List<QuestionOption> columns =
+                getQuestionOptionsSafely(question).stream().filter(o -> !o.isRow())
+                    .sorted((a, b) -> Integer.compare(a.getPosition() == null ? 0 : a.getPosition(),
+                        b.getPosition() == null ? 0 : b.getPosition()))
+                    .toList();
             int pos = Integer.parseInt(v);
             if (pos >= 1 && pos <= columns.size()) {
               v = columns.get(pos - 1).getValue();
@@ -411,10 +565,11 @@ public class DataFillCampaignService {
             return null;
           }
           String[] parts = value.split("[,|]");
-          List<QuestionOption> columns = question.getOptions().stream().filter(o -> !o.isRow())
-              .sorted((a, b) -> Integer.compare(a.getPosition() == null ? 0 : a.getPosition(),
-                  b.getPosition() == null ? 0 : b.getPosition()))
-              .toList();
+          List<QuestionOption> columns =
+              getQuestionOptionsSafely(question).stream().filter(o -> !o.isRow())
+                  .sorted((a, b) -> Integer.compare(a.getPosition() == null ? 0 : a.getPosition(),
+                      b.getPosition() == null ? 0 : b.getPosition()))
+                  .toList();
           java.util.List<String> mapped = new java.util.ArrayList<>();
           for (String p : parts) {
             String t = p.trim();
@@ -467,6 +622,27 @@ public class DataFillCampaignService {
       return formattedColumnName.substring(start + 1, end).trim();
     }
     return null;
+  }
+
+  /**
+   * Safely get question options, handling lazy initialization
+   */
+  private List<QuestionOption> getQuestionOptionsSafely(Question question) {
+    try {
+      return question.getOptions() == null ? new ArrayList<>() : question.getOptions();
+    } catch (org.hibernate.LazyInitializationException e) {
+      log.debug("Lazy initialization exception for question options, reloading question: {}",
+          question.getId());
+      try {
+        Question reloadedQuestion =
+            questionRepository.findWithOptionsById(question.getId()).orElse(question);
+        return reloadedQuestion.getOptions() == null ? new ArrayList<>()
+            : reloadedQuestion.getOptions();
+      } catch (Exception ex) {
+        log.warn("Failed to reload question with options: {}", question.getId(), ex);
+        return new ArrayList<>();
+      }
+    }
   }
 }
 
