@@ -1,7 +1,6 @@
 package com.dienform.tool.dienformtudong.fillrequest.dto.request;
 
 import java.math.BigDecimal;
-import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
 import jakarta.validation.Valid;
@@ -30,11 +29,14 @@ public class FillRequestDTO {
 
         @NotNull(message = "Percentage is required")
         @Min(value = 0, message = "Percentage must be non-negative")
-        private Integer percentage;
+        private Double percentage;
 
         private String valueString;
 
         private String rowId; // For matrix questions
+
+        // Thêm trường positionIndex để đảm bảo tính nhất quán giữa các câu hỏi text
+        private Integer positionIndex;
     }
 
     @NotNull(message = "Survey count is required")
@@ -48,9 +50,9 @@ public class FillRequestDTO {
     @NotNull(message = "Human-like flag is required")
     private Boolean isHumanLike;
 
-    private LocalDateTime startDate;
+    private String startDate;
 
-    private LocalDateTime endDate;
+    private String endDate;
 
     @NotNull(message = "Answer distributions are required")
     @Valid

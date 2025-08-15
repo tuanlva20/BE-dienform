@@ -1011,11 +1011,19 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             Map<Question, List<AnswerDistribution>> distributionsByQuestion, int serveyCount) {
 
         List<Map<Question, QuestionOption>> plans = new ArrayList<>(serveyCount);
-        // Round-robin index per question for user-provided values (text/date/time)
-        Map<UUID, AtomicInteger> rrIndexByQuestion = new HashMap<>();
+
+        // Tạo mapping theo vị trí cho text questions để đảm bảo tính nhất quán
+        Map<Integer, Map<UUID, String>> positionMapping =
+                buildPositionMapping(distributionsByQuestion);
+        int maxPositionCount =
+                positionMapping.isEmpty() ? 0 : Collections.max(positionMapping.keySet()) + 1;
 
         for (int i = 0; i < serveyCount; i++) {
             Map<Question, QuestionOption> plan = new HashMap<>();
+
+            // Sử dụng cùng position cho tất cả text questions trong lần điền này
+            int currentPosition = maxPositionCount > 0 ? i % maxPositionCount : 0;
+            Map<UUID, String> currentPositionValues = positionMapping.get(currentPosition);
 
             // For each question, select an option based on distributions
             for (Map.Entry<Question, List<AnswerDistribution>> entry : distributionsByQuestion
@@ -1023,7 +1031,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                 Question question = entry.getKey();
                 List<AnswerDistribution> questionDistributions = entry.getValue();
 
-                // Unified handling: free-text and date/time use valueString with round-robin;
+                // Unified handling: free-text and date/time use valueString with position mapping;
                 // others use distribution
                 String type;
                 try {
@@ -1049,29 +1057,12 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                 boolean isTime = type.equals("time");
 
                 if (isFreeText || isDate || isTime) {
-                    // Collect user-provided values for this question
-                    List<String> userValues =
-                            questionDistributions.stream().map(AnswerDistribution::getValueString)
-                                    .filter(v -> v != null && !v.trim().isEmpty()).map(String::trim)
-                                    .collect(Collectors.toList());
+                    String value = getTextValueForPosition(question.getId(), currentPositionValues,
+                            questionDistributions, type);
 
-                    String value;
-                    if (!userValues.isEmpty()) {
-                        AtomicInteger idx = rrIndexByQuestion.computeIfAbsent(question.getId(),
-                                k -> new AtomicInteger(0));
-                        int iVal = Math.abs(idx.getAndIncrement());
-                        value = userValues.get(iVal % userValues.size());
-                    } else {
-                        if (isDate) {
-                            // simple default: today in yyyy-MM-dd
-                            java.time.LocalDate today = java.time.LocalDate.now();
-                            value = today.toString();
-                        } else if (isTime) {
-                            // simple default: 09:00
-                            value = "09:00";
-                        } else {
-                            value = generateTextByQuestionType(question.getTitle());
-                        }
+                    // If no value from position mapping, generate based on question title
+                    if (value == null) {
+                        value = generateTextByQuestionType(question.getTitle());
                     }
 
                     QuestionOption textOption = new QuestionOption();
@@ -2096,49 +2087,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             } catch (Exception ignored) {
             }
 
-            String sampleText = null;
-            // Prefer per-submission explicit 'Other' text provided via data-fill API
-            try {
-                Map<UUID, String> local = dataFillOtherTextByQuestion.get();
-                if (local != null && questionId != null) {
-                    String v = local.get(questionId);
-                    if (v != null && !v.trim().isEmpty()) {
-                        sampleText = v.trim();
-                    }
-                }
-            } catch (Exception ignore) {
-            }
-            try {
-                UUID fillId =
-                        fillRequestId != null ? fillRequestId : currentFillRequestIdHolder.get();
-                if (fillId != null && questionId != null) {
-                    Map<UUID, Queue<String>> pools = otherTextPoolsByFillRequest.get(fillId);
-                    if (pools != null) {
-                        Queue<String> q = pools.get(questionId);
-                        if (q != null) {
-                            String v = q.poll();
-                            if (v != null && !v.trim().isEmpty()) {
-                                sampleText = v.trim();
-                            }
-                        }
-                    }
-                    if (sampleText == null) {
-                        Map<UUID, java.util.List<String>> baseMap =
-                                otherTextBaseByFillRequest.get(fillId);
-                        Map<UUID, AtomicInteger> idxMap = otherTextIndexByFillRequest.get(fillId);
-                        if (baseMap != null && idxMap != null) {
-                            java.util.List<String> base = baseMap.get(questionId);
-                            if (base != null && !base.isEmpty()) {
-                                AtomicInteger ai = idxMap.computeIfAbsent(questionId,
-                                        k -> new AtomicInteger(0));
-                                int i = Math.abs(ai.getAndIncrement());
-                                sampleText = base.get(i % base.size());
-                            }
-                        }
-                    }
-                }
-            } catch (Exception ignored) {
-            }
+            String sampleText = getOtherTextForPosition(questionId, fillRequestId);
 
             if (sampleText == null) {
                 sampleText = generateAutoOtherText();
@@ -3489,6 +3438,159 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             }
         }
         return questionMap;
+    }
+
+    /**
+     * Build position mapping for text questions to ensure consistency
+     * 
+     * @param distributionsByQuestion Map of questions to their distributions
+     * @return Map of position index to question values
+     */
+    private Map<Integer, Map<UUID, String>> buildPositionMapping(
+            Map<Question, List<AnswerDistribution>> distributionsByQuestion) {
+
+        Map<Integer, Map<UUID, String>> positionMapping = new HashMap<>();
+
+        // Process each question's distributions
+        for (Map.Entry<Question, List<AnswerDistribution>> entry : distributionsByQuestion
+                .entrySet()) {
+            Question question = entry.getKey();
+            List<AnswerDistribution> distributions = entry.getValue();
+
+            // Only process text questions
+            if (isTextQuestion(question.getType())) {
+                for (AnswerDistribution dist : distributions) {
+                    if (dist.getValueString() != null && !dist.getValueString().trim().isEmpty()) {
+                        // Use positionIndex if available, otherwise default to 0
+                        int position =
+                                dist.getPositionIndex() != null ? dist.getPositionIndex() : 0;
+
+                        positionMapping.computeIfAbsent(position, k -> new HashMap<>())
+                                .put(question.getId(), dist.getValueString().trim());
+                    }
+                }
+            }
+        }
+
+        log.debug("Built position mapping with {} positions", positionMapping.size());
+        return positionMapping;
+    }
+
+    /**
+     * Get text value for a specific position and question
+     * 
+     * @param questionId The question ID
+     * @param currentPositionValues Map of current position values
+     * @param questionDistributions List of distributions for the question
+     * @param questionType The type of question
+     * @return The text value to use
+     */
+    private String getTextValueForPosition(UUID questionId, Map<UUID, String> currentPositionValues,
+            List<AnswerDistribution> questionDistributions, String questionType) {
+
+        // First, try to get value from position mapping
+        if (currentPositionValues != null && currentPositionValues.containsKey(questionId)) {
+            String value = currentPositionValues.get(questionId);
+            log.debug("Using position-mapped value for question {}: {}", questionId, value);
+            return value;
+        }
+
+        // Fallback to original round-robin logic if no position mapping
+        List<String> userValues =
+                questionDistributions.stream().map(AnswerDistribution::getValueString)
+                        .filter(v -> v != null && !v.trim().isEmpty()).map(String::trim)
+                        .collect(Collectors.toList());
+
+        if (!userValues.isEmpty()) {
+            // Use simple round-robin for backward compatibility
+            int index = (int) (System.currentTimeMillis() % userValues.size());
+            String value = userValues.get(index);
+            log.debug("Using round-robin value for question {}: {}", questionId, value);
+            return value;
+        }
+
+        // Generate default value based on question type
+        if ("date".equals(questionType)) {
+            java.time.LocalDate today = java.time.LocalDate.now();
+            return today.toString();
+        } else if ("time".equals(questionType)) {
+            return "09:00";
+        } else {
+            // This will be handled by the calling method which has access to question title
+            return null;
+        }
+    }
+
+    /**
+     * Check if a question type is a text question
+     * 
+     * @param questionType The question type to check
+     * @return True if it's a text question
+     */
+    private boolean isTextQuestion(String questionType) {
+        if (questionType == null)
+            return false;
+        String type = questionType.toLowerCase();
+        return type.equals("text") || type.equals("email") || type.equals("textarea")
+                || type.equals("short_answer") || type.equals("paragraph") || type.equals("date")
+                || type.equals("time");
+    }
+
+    /**
+     * Get other text for a specific position and question
+     * 
+     * @param questionId The question ID
+     * @param fillRequestId The fill request ID
+     * @return The other text value to use
+     */
+    private String getOtherTextForPosition(UUID questionId, UUID fillRequestId) {
+        String sampleText = null;
+
+        // Prefer per-submission explicit 'Other' text provided via data-fill API
+        try {
+            Map<UUID, String> local = dataFillOtherTextByQuestion.get();
+            if (local != null && questionId != null) {
+                String v = local.get(questionId);
+                if (v != null && !v.trim().isEmpty()) {
+                    sampleText = v.trim();
+                }
+            }
+        } catch (Exception ignore) {
+        }
+
+        // Fallback to position-based mapping
+        try {
+            UUID fillId = fillRequestId != null ? fillRequestId : currentFillRequestIdHolder.get();
+            if (fillId != null && questionId != null) {
+                Map<UUID, Queue<String>> pools = otherTextPoolsByFillRequest.get(fillId);
+                if (pools != null) {
+                    Queue<String> q = pools.get(questionId);
+                    if (q != null) {
+                        String v = q.poll();
+                        if (v != null && !v.trim().isEmpty()) {
+                            sampleText = v.trim();
+                        }
+                    }
+                }
+                if (sampleText == null) {
+                    Map<UUID, java.util.List<String>> baseMap =
+                            otherTextBaseByFillRequest.get(fillId);
+                    Map<UUID, AtomicInteger> idxMap = otherTextIndexByFillRequest.get(fillId);
+                    if (baseMap != null && idxMap != null) {
+                        java.util.List<String> base = baseMap.get(questionId);
+                        if (base != null && !base.isEmpty()) {
+                            AtomicInteger ai =
+                                    idxMap.computeIfAbsent(questionId, k -> new AtomicInteger(0));
+                            int i = Math.abs(ai.getAndIncrement());
+                            sampleText = base.get(i % base.size());
+                        }
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+
+        return sampleText;
     }
 }
 

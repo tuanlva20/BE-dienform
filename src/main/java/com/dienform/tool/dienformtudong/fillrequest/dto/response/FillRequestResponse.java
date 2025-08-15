@@ -35,6 +35,8 @@ public class FillRequestResponse {
         private String valueString;
         private String rowId; // For matrix questions
 
+        private Integer positionIndex; // Để mapping vị trí giữa các câu hỏi text
+
         private OptionInfo option;
     }
 
