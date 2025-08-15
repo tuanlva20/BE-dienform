@@ -261,6 +261,7 @@ public class FillRequestServiceImpl implements FillRequestService {
           AnswerDistribution distribution = AnswerDistribution.builder().fillRequest(savedRequest)
               .question(question).option(null).percentage(100) // 100% since it's required
               .count(count).valueString(null) // Will be auto-generated during form filling
+              .positionIndex(0) // Default position index for auto-generated distributions
               .build();
 
           distributions.add(distribution);
@@ -847,6 +848,9 @@ public class FillRequestServiceImpl implements FillRequestService {
                 .option(FillRequestResponse.AnswerDistributionResponse.OptionInfo.builder()
                     .id(distribution.getOption().getId()).text(distribution.getOption().getText())
                     .build());
+          } else {
+            // Set optionId to null explicitly for text questions
+            builder.optionId(null);
           }
 
           return builder.build();
