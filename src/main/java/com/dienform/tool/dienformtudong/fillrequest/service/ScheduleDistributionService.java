@@ -112,8 +112,8 @@ public class ScheduleDistributionService {
       TimeSlot selectedSlot = selectWeightedTimeSlot(timeSlots);
       LocalDateTime executionTime = selectedSlot.getRandomTimeInSlot();
 
-      // Random delay between 2-120 seconds for human-like behavior
-      int delaySeconds = 2 + random.nextInt(119); // 2-120 seconds
+      // Random delay between 36-399 seconds for human-like behavior
+      int delaySeconds = 36 + random.nextInt(364); // 36-399 seconds
 
       // Occasionally add longer delays (1-5 minutes) to simulate breaks
       if (random.nextDouble() < 0.1) { // 10% chance
@@ -175,8 +175,8 @@ public class ScheduleDistributionService {
       int delaySeconds;
 
       if (isHumanLike) {
-        // Human-like delays: 2-120 seconds, with occasional longer breaks
-        delaySeconds = 2 + random.nextInt(119);
+        // Human-like delays: 36-399 seconds, with occasional longer breaks
+        delaySeconds = 36 + random.nextInt(364);
         if (random.nextDouble() < 0.15) { // 15% chance for longer break
           delaySeconds += 120 + random.nextInt(300); // Add 2-7 minutes
         }

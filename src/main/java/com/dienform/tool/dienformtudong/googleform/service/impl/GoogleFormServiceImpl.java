@@ -429,11 +429,11 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             for (Map<Question, QuestionOption> plan : executionPlans) {
                 try {
                     if (fillRequest.isHumanLike()) {
-                        // Human-like behavior: random delay between 0.5-2s
-                        int delayMillis = 500 + random.nextInt(1501);
-                        Thread.sleep(delayMillis);
-                        log.debug("Human-like mode: Scheduled task with delay of {}ms",
-                                delayMillis);
+                        // Human-like behavior: use proper delay range 36-399 seconds
+                        int delaySeconds = 36 + random.nextInt(364); // 36-399 seconds
+                        Thread.sleep(delaySeconds * 1000L);
+                        log.debug("Human-like mode: Scheduled task with delay of {} seconds",
+                                delaySeconds);
                     } else {
                         // Fast mode: only 1 second delay between forms, no delay during filling
                         if (totalProcessed.get() > 0) {
@@ -3593,5 +3593,3 @@ public class GoogleFormServiceImpl implements GoogleFormService {
         return sampleText;
     }
 }
-
-
