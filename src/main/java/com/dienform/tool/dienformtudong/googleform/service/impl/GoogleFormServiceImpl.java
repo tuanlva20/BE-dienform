@@ -411,6 +411,16 @@ public class GoogleFormServiceImpl implements GoogleFormService {
         List<Map<Question, QuestionOption>> executionPlans =
                 createExecutionPlans(distributionsByQuestion, fillRequest.getSurveyCount());
 
+        // Add critical logging to debug execution plans
+        log.info("Created {} execution plans for {} surveys (fillRequestId: {})",
+                executionPlans.size(), fillRequest.getSurveyCount(), fillRequestId);
+
+        if (executionPlans.size() != fillRequest.getSurveyCount()) {
+            log.error(
+                    "CRITICAL: Execution plans count ({}) does not match survey count ({}) for fillRequestId: {}",
+                    executionPlans.size(), fillRequest.getSurveyCount(), fillRequestId);
+        }
+
         // Initialize counters
         AtomicInteger successCount = new AtomicInteger(0);
         AtomicInteger failCount = new AtomicInteger(0);
@@ -426,8 +436,15 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             currentFillRequestIdHolder.set(fillRequestId);
 
             // Execute form filling tasks
+            log.info("Starting execution of {} form filling tasks for fillRequestId: {}",
+                    executionPlans.size(), fillRequestId);
+
+            int planIndex = 0;
             for (Map<Question, QuestionOption> plan : executionPlans) {
+                planIndex++;
                 try {
+                    log.debug("Processing execution plan {}/{} for fillRequestId: {}", planIndex,
+                            executionPlans.size(), fillRequestId);
                     if (fillRequest.isHumanLike()) {
                         // Human-like behavior: use proper delay range 36-399 seconds
                         int delaySeconds = 36 + random.nextInt(364); // 36-399 seconds
@@ -442,13 +459,29 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                         }
                     }
 
+                    final int currentPlanIndex = planIndex; // capture for lambda
                     CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
                         executeFormFillTask(fillRequestId, link, plan, fillRequest.isHumanLike(),
                                 successCount, failCount);
                     }, executor).whenComplete((v, t) -> {
                         int processed = totalProcessed.incrementAndGet();
+                        if (t != null) {
+                            log.error("Async task failed for plan {}/{} (fillRequestId: {}): {}",
+                                    currentPlanIndex, executionPlans.size(), fillRequestId,
+                                    t.getMessage());
+                        } else {
+                            log.debug("Async task completed for plan {}/{} (fillRequestId: {})",
+                                    currentPlanIndex, executionPlans.size(), fillRequestId);
+                        }
+
+                        log.info("Progress: {}/{} tasks completed for fillRequestId: {}", processed,
+                                fillRequest.getSurveyCount(), fillRequestId);
+
                         if (processed == fillRequest.getSurveyCount()) {
                             // All tasks finished execution, update final status based on DB state
+                            log.info(
+                                    "All {} tasks completed for fillRequestId: {}. Updating final status...",
+                                    processed, fillRequestId);
                             updateFinalStatus(fillRequest, sessionExecute, successCount.get(),
                                     failCount.get());
                         }
@@ -457,20 +490,43 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                     futures.add(future);
 
                 } catch (Exception e) {
-                    log.error("Error during form filling: {}", e.getMessage(), e);
+                    log.error(
+                            "Error creating CompletableFuture for plan {}/{} (fillRequestId: {}): {}",
+                            planIndex, executionPlans.size(), fillRequestId, e.getMessage(), e);
                     failCount.incrementAndGet();
+
+                    // Since CompletableFuture creation failed, we need to manually handle progress
+                    int processed = totalProcessed.incrementAndGet();
+                    log.warn(
+                            "Plan {}/{} failed during setup - marking as processed: {}/{} for fillRequestId: {}",
+                            planIndex, executionPlans.size(), processed,
+                            fillRequest.getSurveyCount(), fillRequestId);
+
+                    // Check if this was the last task
+                    if (processed == fillRequest.getSurveyCount()) {
+                        log.info(
+                                "Last task failed during setup - updating final status for fillRequestId: {}",
+                                fillRequestId);
+                        updateFinalStatus(fillRequest, sessionExecute, successCount.get(),
+                                failCount.get());
+                    }
                 }
             }
 
             // Shut down executor and wait for completion
+            log.info("Waiting for {} async tasks to complete (fillRequestId: {})", futures.size(),
+                    fillRequestId);
             CompletableFuture<Void> allTasks =
                     CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
             try {
                 // Wait for all tasks with timeout
                 allTasks.get(300, TimeUnit.SECONDS); // Increased timeout to 300 seconds (5 minutes)
-                log.info("All form filling tasks completed successfully");
+                log.info("All {} form filling tasks completed successfully for fillRequestId: {}",
+                        futures.size(), fillRequestId);
             } catch (Exception e) {
-                log.error("Form filling execution was interrupted or timed out", e);
+                log.error(
+                        "Form filling execution was interrupted or timed out for fillRequestId: {}",
+                        fillRequestId, e);
                 updateFillRequestStatus(fillRequest, Constants.FILL_REQUEST_STATUS_FAILED);
                 return 0;
             }
@@ -1010,6 +1066,9 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     private List<Map<Question, QuestionOption>> createExecutionPlans(
             Map<Question, List<AnswerDistribution>> distributionsByQuestion, int serveyCount) {
 
+        log.debug("Creating execution plans for {} surveys with {} questions", serveyCount,
+                distributionsByQuestion.size());
+
         List<Map<Question, QuestionOption>> plans = new ArrayList<>(serveyCount);
 
         // Tạo mapping theo vị trí cho text questions để đảm bảo tính nhất quán
@@ -1019,67 +1078,131 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                 positionMapping.isEmpty() ? 0 : Collections.max(positionMapping.keySet()) + 1;
 
         for (int i = 0; i < serveyCount; i++) {
-            Map<Question, QuestionOption> plan = new HashMap<>();
+            try {
+                log.debug("Creating execution plan {}/{}", i + 1, serveyCount);
+                Map<Question, QuestionOption> plan = new HashMap<>();
 
-            // Sử dụng cùng position cho tất cả text questions trong lần điền này
-            int currentPosition = maxPositionCount > 0 ? i % maxPositionCount : 0;
-            Map<UUID, String> currentPositionValues = positionMapping.get(currentPosition);
+                // Sử dụng cùng position cho tất cả text questions trong lần điền này
+                int currentPosition = maxPositionCount > 0 ? i % maxPositionCount : 0;
+                Map<UUID, String> currentPositionValues = positionMapping.get(currentPosition);
 
-            // For each question, select an option based on distributions
-            for (Map.Entry<Question, List<AnswerDistribution>> entry : distributionsByQuestion
-                    .entrySet()) {
-                Question question = entry.getKey();
-                List<AnswerDistribution> questionDistributions = entry.getValue();
-
-                // Unified handling: free-text and date/time use valueString with position mapping;
-                // others use distribution
-                String type;
-                try {
-                    // Defensive: access fields inside try to avoid LazyInitializationException
-                    type = question.getType() == null ? "" : question.getType().toLowerCase();
-                } catch (org.hibernate.LazyInitializationException lie) {
-                    // Reload managed entity if proxy got detached
+                // For each question, select an option based on distributions
+                for (Map.Entry<Question, List<AnswerDistribution>> entry : distributionsByQuestion
+                        .entrySet()) {
                     try {
-                        Question managed =
-                                questionRepository.findById(question.getId()).orElse(null);
-                        type = managed != null && managed.getType() != null
-                                ? managed.getType().toLowerCase()
-                                : "";
-                        question = managed != null ? managed : question;
-                    } catch (Exception ex) {
-                        type = "";
+                        Question question = entry.getKey();
+                        List<AnswerDistribution> questionDistributions = entry.getValue();
+
+                        // Unified handling: free-text and date/time use valueString with position
+                        // mapping;
+                        // others use distribution
+                        String type;
+                        try {
+                            // Defensive: access fields inside try to avoid
+                            // LazyInitializationException
+                            type = question.getType() == null ? ""
+                                    : question.getType().toLowerCase();
+                        } catch (org.hibernate.LazyInitializationException lie) {
+                            // Reload managed entity if proxy got detached
+                            try {
+                                Question managed =
+                                        questionRepository.findById(question.getId()).orElse(null);
+                                type = managed != null && managed.getType() != null
+                                        ? managed.getType().toLowerCase()
+                                        : "";
+                                question = managed != null ? managed : question;
+                            } catch (Exception ex) {
+                                type = "";
+                            }
+                        }
+                        boolean isFreeText = type.equals("text") || type.equals("email")
+                                || type.equals("textarea") || type.equals("short_answer")
+                                || type.equals("paragraph");
+                        boolean isDate = type.equals("date");
+                        boolean isTime = type.equals("time");
+
+                        if (isFreeText || isDate || isTime) {
+                            String value = getTextValueForPosition(question.getId(),
+                                    currentPositionValues, questionDistributions, type);
+
+                            // If no value from position mapping, generate based on question title
+                            if (value == null) {
+                                value = generateTextByQuestionType(question.getTitle());
+                            }
+
+                            QuestionOption textOption = new QuestionOption();
+                            textOption.setQuestion(question);
+                            textOption.setText(value);
+                            plan.put(question, textOption);
+                        } else {
+                            // radio/checkbox/combobox/grid use option distributions
+                            QuestionOption selectedOption =
+                                    selectOptionBasedOnDistribution(questionDistributions);
+                            if (selectedOption != null) {
+                                plan.put(question, selectedOption);
+                            }
+                        }
+                    } catch (Exception questionEx) {
+                        log.warn("Failed to process question {} in plan {}/{}: {}",
+                                entry.getKey().getId(), i + 1, serveyCount,
+                                questionEx.getMessage());
+                        // Continue processing other questions
                     }
                 }
-                boolean isFreeText =
-                        type.equals("text") || type.equals("email") || type.equals("textarea")
-                                || type.equals("short_answer") || type.equals("paragraph");
-                boolean isDate = type.equals("date");
-                boolean isTime = type.equals("time");
 
-                if (isFreeText || isDate || isTime) {
-                    String value = getTextValueForPosition(question.getId(), currentPositionValues,
-                            questionDistributions, type);
+                plans.add(plan);
+                log.debug("Successfully created execution plan {}/{} with {} questions", i + 1,
+                        serveyCount, plan.size());
 
-                    // If no value from position mapping, generate based on question title
-                    if (value == null) {
-                        value = generateTextByQuestionType(question.getTitle());
-                    }
+            } catch (Exception planEx) {
+                log.error("Failed to create execution plan {}/{}: {}", i + 1, serveyCount,
+                        planEx.getMessage(), planEx);
 
-                    QuestionOption textOption = new QuestionOption();
-                    textOption.setQuestion(question);
-                    textOption.setText(value);
-                    plan.put(question, textOption);
-                } else {
-                    // radio/checkbox/combobox/grid use option distributions
-                    QuestionOption selectedOption =
-                            selectOptionBasedOnDistribution(questionDistributions);
-                    if (selectedOption != null) {
-                        plan.put(question, selectedOption);
+                // Create a minimal fallback plan to ensure we don't skip this iteration
+                Map<Question, QuestionOption> fallbackPlan = new HashMap<>();
+
+                // Try to add at least one question-option pair for each question with a safe
+                // default
+                for (Map.Entry<Question, List<AnswerDistribution>> entry : distributionsByQuestion
+                        .entrySet()) {
+                    try {
+                        Question question = entry.getKey();
+                        List<AnswerDistribution> questionDistributions = entry.getValue();
+
+                        if (!questionDistributions.isEmpty()) {
+                            // Use the first available option as fallback
+                            AnswerDistribution firstDist = questionDistributions.get(0);
+                            if (firstDist.getOption() != null) {
+                                fallbackPlan.put(question, firstDist.getOption());
+                            }
+                        }
+                    } catch (Exception fallbackEx) {
+                        log.warn("Failed to create fallback for question in plan {}/{}: {}", i + 1,
+                                serveyCount, fallbackEx.getMessage());
                     }
                 }
+
+                plans.add(fallbackPlan);
+                log.warn("Added fallback plan {}/{} with {} questions due to error", i + 1,
+                        serveyCount, fallbackPlan.size());
             }
+        }
 
-            plans.add(plan);
+        log.info("Finished creating {} execution plans (expected: {})", plans.size(), serveyCount);
+
+        // Critical validation: ensure we have the exact number of plans expected
+        if (plans.size() != serveyCount) {
+            log.error(
+                    "CRITICAL ERROR: Created {} plans but expected {}. This will cause missing submissions!",
+                    plans.size(), serveyCount);
+
+            // Emergency fix: create missing plans by duplicating the last plan if we have any
+            while (plans.size() < serveyCount && !plans.isEmpty()) {
+                Map<Question, QuestionOption> lastPlan = new HashMap<>(plans.get(plans.size() - 1));
+                plans.add(lastPlan);
+                log.warn("Emergency: Created duplicate plan {}/{} to reach expected count",
+                        plans.size(), serveyCount);
+            }
         }
 
         return plans;

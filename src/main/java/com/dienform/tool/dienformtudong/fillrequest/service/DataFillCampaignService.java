@@ -10,6 +10,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
@@ -55,7 +56,7 @@ public class DataFillCampaignService {
   @Autowired
   private QuestionRepository questionRepository;
 
-  @Value("${google.form.thread-pool-size:1}")
+  @Value("${google.form.thread-pool-size:2}")
   private int threadPoolSize;
 
   private ExecutorService executorService;
@@ -68,8 +69,11 @@ public class DataFillCampaignService {
 
   @PostConstruct
   public void init() {
-    log.info("Initializing executor service with thread pool size: {}", threadPoolSize);
+    log.info("DataFillCampaignService: Initializing executor service with thread pool size: {}",
+        threadPoolSize);
     executorService = Executors.newFixedThreadPool(threadPoolSize);
+    log.info("DataFillCampaignService: Executor service initialized successfully with {} threads",
+        threadPoolSize);
   }
 
   @PreDestroy
@@ -83,8 +87,8 @@ public class DataFillCampaignService {
   public CompletableFuture<Void> executeCampaign(FillRequest fillRequest,
       DataFillRequestDTO originalRequest, List<Question> questions, List<ScheduledTask> schedule) {
 
-    log.info("Starting data fill campaign for request: {} with {} tasks", fillRequest.getId(),
-        schedule.size());
+    log.info("Starting data fill campaign for request: {} with {} tasks using {} threads",
+        fillRequest.getId(), schedule.size(), threadPoolSize);
 
     // Set initial status to IN_PROCESS and ensure user is in room
     updateFillRequestStatus(fillRequest, FillRequestStatusEnum.IN_PROCESS);
@@ -129,18 +133,53 @@ public class DataFillCampaignService {
 
       AtomicInteger completedTasks = new AtomicInteger(0);
       AtomicInteger successfulTasks = new AtomicInteger(0);
+      AtomicInteger submittedTasks = new AtomicInteger(0);
       int totalTasks = schedule.size();
 
+      log.info("TASK EXECUTION PLAN: Total {} tasks will be processed with {} threads", totalTasks,
+          threadPoolSize);
+      log.info(
+          "EXPECTED FLOW: First {} tasks start immediately, remaining tasks queue and wait for thread availability",
+          Math.min(totalTasks, threadPoolSize));
+
       // Execute each task
-      for (ScheduledTask task : schedule) {
+      log.info("Submitting {} tasks to executor service for fillRequest: {} (thread pool size: {})",
+          schedule.size(), fillRequest.getId(), threadPoolSize);
+
+      for (int i = 0; i < schedule.size(); i++) {
+        ScheduledTask task = schedule.get(i);
+        final int taskIndex = i + 1;
+        int submitted = submittedTasks.incrementAndGet();
+        log.info("Submitting task {}/{} (row {}) for fillRequest: {} - SUBMITTED: {}/{}", taskIndex,
+            schedule.size(), task.getRowIndex(), fillRequest.getId(), submitted, totalTasks);
+
+        // Add small delay between task submissions for low-spec machines
+        if (i > 0) {
+          try {
+            Thread.sleep(500); // 500ms delay between submissions
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("Task submission delay interrupted for fillRequest: {}", fillRequest.getId());
+          }
+        }
+
+        // Monitor thread pool status
+        logThreadPoolStatus("After submitting task " + taskIndex);
+
         scheduleFormFill(fillRequest, originalRequest, questionMap, sheetData, task)
             .thenAccept(success -> {
+              int completed = completedTasks.incrementAndGet();
               if (success) {
                 successfulTasks.incrementAndGet();
+                log.info("Task completed successfully: {}/{} for fillRequest: {}", completed,
+                    totalTasks, fillRequest.getId());
+              } else {
+                log.warn("Task failed: {}/{} for fillRequest: {}", completed, totalTasks,
+                    fillRequest.getId());
               }
 
               // Check if all tasks are complete
-              if (completedTasks.incrementAndGet() == totalTasks) {
+              if (completed == totalTasks) {
                 log.info("All tasks completed for campaign {}. Successful: {}/{}",
                     fillRequest.getId(), successfulTasks.get(), totalTasks);
 
@@ -200,6 +239,17 @@ public class DataFillCampaignService {
               }
               return null;
             });
+      }
+
+      // Validate all tasks were submitted
+      int finalSubmittedCount = submittedTasks.get();
+      if (finalSubmittedCount != totalTasks) {
+        log.error(
+            "CRITICAL: Only {}/{} tasks were submitted! Missing tasks detected for fillRequest: {}",
+            finalSubmittedCount, totalTasks, fillRequest.getId());
+      } else {
+        log.info("SUCCESS: All {}/{} tasks submitted to executor queue for fillRequest: {}",
+            finalSubmittedCount, totalTasks, fillRequest.getId());
       }
 
     } catch (Exception e) {
@@ -326,15 +376,22 @@ public class DataFillCampaignService {
       DataFillRequestDTO originalRequest, Map<UUID, Question> questionMap,
       List<Map<String, Object>> sheetData, ScheduledTask task) {
 
-    return CompletableFuture.supplyAsync(() -> {
+    log.info(
+        "Scheduling form fill for task row {} (fillRequest: {}) - Submitting to executor queue",
+        task.getRowIndex(), fillRequest.getId());
+
+    CompletableFuture<Boolean> future = CompletableFuture.supplyAsync(() -> {
       try {
+        log.info("THREAD ASSIGNED: Task row {} started execution on thread: {} (fillRequest: {})",
+            task.getRowIndex(), Thread.currentThread().getName(), fillRequest.getId());
+
         // Calculate delay
         long delaySeconds = Math.max(0,
             Duration.between(LocalDateTime.now(), task.getExecutionTime()).getSeconds());
 
         if (delaySeconds > 0) {
-          log.info("Waiting {} seconds before executing task for row {}", delaySeconds,
-              task.getRowIndex());
+          log.info("Waiting {} seconds before executing task for row {} on thread: {}",
+              delaySeconds, task.getRowIndex(), Thread.currentThread().getName());
           Thread.sleep(delaySeconds * 1000);
         }
 
@@ -368,12 +425,46 @@ public class DataFillCampaignService {
           log.error("All form fill attempts failed for row {}", task.getRowIndex());
         }
 
+        log.info(
+            "THREAD RELEASED: Task row {} finished execution on thread: {} (success: {}, fillRequest: {})",
+            task.getRowIndex(), Thread.currentThread().getName(), success, fillRequest.getId());
+
         return success;
       } catch (Exception e) {
         log.error("Error in scheduled form fill: {}", e.getMessage(), e);
         return false;
       }
     }, executorService);
+
+    // Add timeout mechanism to prevent hanging tasks (reduced for low-spec machines)
+    CompletableFuture<Boolean> timeoutFuture =
+        future.orTimeout(180, TimeUnit.SECONDS).exceptionally(throwable -> {
+          if (throwable instanceof java.util.concurrent.TimeoutException) {
+            log.error("Task for row {} timed out after 180 seconds (fillRequest: {})",
+                task.getRowIndex(), fillRequest.getId());
+          } else {
+            log.error("Task for row {} failed with exception (fillRequest: {}): {}",
+                task.getRowIndex(), fillRequest.getId(), throwable.getMessage());
+          }
+          return false;
+        });
+
+    log.debug("Scheduled task for row {} with timeout protection (fillRequest: {})",
+        task.getRowIndex(), fillRequest.getId());
+
+    return timeoutFuture;
+  }
+
+  /**
+   * Log thread pool status for debugging
+   */
+  private void logThreadPoolStatus(String context) {
+    if (executorService instanceof ThreadPoolExecutor) {
+      ThreadPoolExecutor threadPool = (ThreadPoolExecutor) executorService;
+      log.debug("THREAD POOL STATUS [{}]: Active={}, Pool={}, Queue={}, Completed={}", context,
+          threadPool.getActiveCount(), threadPool.getPoolSize(), threadPool.getQueue().size(),
+          threadPool.getCompletedTaskCount());
+    }
   }
 
   /**
