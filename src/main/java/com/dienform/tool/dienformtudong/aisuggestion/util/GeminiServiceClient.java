@@ -221,7 +221,7 @@ public class GeminiServiceClient implements AIServiceClient {
         + "   - Thỉnh thoảng có lỗi chính tả nhẹ (2-3% để thể hiện tính người thật)\n"
         + "   - Có thể để trống (2-5% để mô phỏng việc bỏ qua câu hỏi)\n"
         + "   - Đảm bảo tính logic với các câu trả lời khác trong form\n"
-        + "   - Với email: dùng domain thật như gmail.com, yahoo.com, company.vn\n"
+        + "   - Với email: dùng domain thật như gmail.com, outlook.com, yahoo.com và đuôi *.edu.vn – trường đại học/giáo dục (ví dụ: @hcmut.edu.vn, @hust.edu.vn)\n"
         + "   - Với ghi chú/comment: thể hiện cảm xúc, ý kiến cá nhân\n");
     prompt.append("4. Với câu hỏi 'Khác' (Other options):\n"
         + "   - Tạo ra các giá trị mẫu thực tế, phù hợp với context của câu hỏi\n"
