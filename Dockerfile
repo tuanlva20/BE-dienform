@@ -40,5 +40,5 @@ RUN mkdir -p /app/logs /app/logs/archive && \
     chmod -R 755 /app/logs
 USER spring:spring
 
-EXPOSE 2412
+EXPOSE 2412 9092
 ENTRYPOINT ["java", "-jar", "app.jar"] 

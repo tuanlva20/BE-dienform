@@ -59,6 +59,7 @@ google:
 # Realtime Socket settings
 realtime:
   socket:
+    port: 9092
     path: /socket.io
     progress-emit-interval-ms: ${FILLREQ_PROGRESS_EMIT_INTERVAL_MS:1000}
     progress-emit-delta: ${FILLREQ_PROGRESS_EMIT_DELTA:1}
