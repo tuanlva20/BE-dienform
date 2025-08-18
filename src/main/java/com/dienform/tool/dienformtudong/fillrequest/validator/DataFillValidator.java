@@ -454,6 +454,21 @@ public class DataFillValidator {
     List<QuestionOption> options = getQuestionOptionsSafely(question).stream()
         .sorted((a, b) -> Integer.compare(a.getPosition(), b.getPosition())).toList();
 
+    // Check if question has __other_option__
+    // boolean hasOtherOption = options.stream().anyMatch(
+    //     opt -> opt.getValue() != null && "__other_option__".equalsIgnoreCase(opt.getValue()));
+
+    // // If question has __other_option__ and this is not a numeric position, allow it as custom text
+    // if (hasOtherOption && !isPositionNumber(main)) {
+    //   // This is likely custom text for the "other" option, validate it's reasonable
+    //   if (main.length() > 500) { // Reasonable length limit
+    //     errors.add(String.format(
+    //         "Dòng %d, cột %s: Văn bản tùy chỉnh cho lựa chọn 'Khác' quá dài (tối đa 500 ký tự)",
+    //         rowIndex, columnName));
+    //   }
+    //   return errors.isEmpty() ? ValidationResult.valid() : ValidationResult.invalid(errors);
+    // }
+
     if (!isPositionNumber(main)) {
       errors.add(String.format(
           "Dòng %d, cột %s: Chỉ chấp nhận số thứ tự (1-%d) cho câu hỏi một lựa chọn. Danh sách: %s",
@@ -508,6 +523,10 @@ public class DataFillValidator {
     List<QuestionOption> options = getQuestionOptionsSafely(question).stream()
         .sorted((a, b) -> Integer.compare(a.getPosition(), b.getPosition())).toList();
 
+    // Check if question has __other_option__
+    // boolean hasOtherOption = options.stream().anyMatch(
+    //     opt -> opt.getValue() != null && "__other_option__".equalsIgnoreCase(opt.getValue()));
+
     String[] selectedOptions = main.split("\\|");
     List<Integer> selectedPositions = new ArrayList<>();
 
@@ -515,6 +534,19 @@ public class DataFillValidator {
       String trimmed = optionToken.trim();
       if (trimmed.isEmpty())
         continue;
+
+      // If question has __other_option__ and this is not a numeric position, allow it as custom
+      // text
+      // if (hasOtherOption && !isPositionNumber(trimmed)) {
+      //   // This is likely custom text for the "other" option, validate it's reasonable
+      //   if (trimmed.length() > 500) { // Reasonable length limit
+      //     errors.add(String.format(
+      //         "Dòng %d, cột %s: Văn bản tùy chỉnh cho lựa chọn 'Khác' quá dài (tối đa 500 ký tự)",
+      //         rowIndex, columnName));
+      //   }
+      //   continue; // Skip further validation for this token
+      // }
+
       if (!isPositionNumber(trimmed)) {
         errors.add(String.format(
             "Dòng %d, cột %s: Chỉ chấp nhận số thứ tự (1-%d) cho câu hỏi nhiều lựa chọn. Danh sách: %s",

@@ -157,8 +157,12 @@ public class DataEncodingServiceImpl implements DataEncodingService {
             throw new IllegalArgumentException(
                 "Đã nhập ghi chú cho 'Khác' nhưng câu hỏi không có lựa chọn 'Khác'.");
           }
-          // Không ép thêm index 'Khác' vào bên trái. Ưu tiên để nguyên text user ở hậu tố
-          return (left == null || left.isEmpty()) ? otherText : (left + "-" + otherText);
+          // Luôn thêm otherIndex khi có otherText
+          if (left == null || left.isEmpty()) {
+            return otherIndex + "-" + otherText;
+          } else {
+            return left + "|" + otherIndex + "-" + otherText;
+          }
         }
         return left;
       } else {
@@ -167,9 +171,9 @@ public class DataEncodingServiceImpl implements DataEncodingService {
         if (idx != null) {
           return String.valueOf(idx);
         }
-        // Không thêm otherIndex-text. Nếu có 'Khác' thì ưu tiên giữ nguyên text người dùng
+        // Nếu có 'Khác' thì mã hóa thành otherIndex-text
         if (otherIndex != null) {
-          return raw;
+          return otherIndex + "-" + raw;
         }
         throw new IllegalArgumentException(
             "Đáp án '" + value + "' không tồn tại và câu hỏi không có lựa chọn 'Khác'.");
@@ -223,7 +227,7 @@ public class DataEncodingServiceImpl implements DataEncodingService {
       return tokens;
     }
   }
-  
+
   private static class GridEncoder implements QuestionEncoder {
     private final Map<String, Integer> columnIndexByText = new HashMap<>();
     private final String rowTitle;

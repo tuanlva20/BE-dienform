@@ -515,6 +515,10 @@ public class DataFillCampaignService {
           String main = dashIdx > 0 ? raw.substring(0, dashIdx).trim() : raw;
           String other = dashIdx > 0 ? raw.substring(dashIdx + 1).trim() : null;
 
+          // Check if question has __other_option__
+          boolean hasOtherOption = getQuestionOptionsSafely(question).stream().anyMatch(
+              opt -> opt.getValue() != null && "__other_option__".equalsIgnoreCase(opt.getValue()));
+
           // Support multi-select encoding for checkbox with '|' only
           if ("checkbox".equalsIgnoreCase(question.getType())
               || "multiselect".equalsIgnoreCase(question.getType())) {
@@ -524,6 +528,15 @@ public class DataFillCampaignService {
               return (other != null && !other.isEmpty()) ? converted + "-" + other : converted;
             }
           }
+
+          // If question has __other_option__ and this is not a numeric position, treat as custom
+          // text for other option
+          if (hasOtherOption && !main.matches("\\d+")) {
+            // For custom text in __other_option__, convert to the __other_option__ value with
+            // custom text
+            return "__other_option__" + (main.isEmpty() ? "" : "-" + main);
+          }
+
           // Single numeric position
           if (main.matches("\\d+")) {
             String converted =
