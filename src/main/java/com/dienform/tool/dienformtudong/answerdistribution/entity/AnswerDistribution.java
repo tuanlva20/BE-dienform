@@ -44,6 +44,9 @@ public class AnswerDistribution extends AuditEntity {
   @Column(name = "row_id")
   private String rowId; // For matrix questions
 
+  @Column(name = "position_index")
+  private Integer positionIndex; // Để mapping vị trí giữa các câu hỏi text
+
   @ManyToOne(fetch = FetchType.LAZY)
   @JoinColumn(name = "fill_request_id", nullable = false)
   private FillRequest fillRequest;

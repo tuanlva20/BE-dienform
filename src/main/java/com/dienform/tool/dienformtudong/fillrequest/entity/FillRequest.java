@@ -6,10 +6,13 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import com.dienform.tool.dienformtudong.answerdistribution.entity.AnswerDistribution;
+import com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum;
 import com.dienform.tool.dienformtudong.fillschedule.entity.FillSchedule;
 import com.dienform.tool.dienformtudong.form.entity.Form;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.FetchType;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
@@ -30,6 +33,7 @@ import lombok.NoArgsConstructor;
 @NoArgsConstructor
 @AllArgsConstructor
 @Entity
+@org.hibernate.annotations.DynamicUpdate
 @Table(name = "fill_request")
 public class FillRequest {
     @Id
@@ -38,6 +42,10 @@ public class FillRequest {
 
     @Column(name = "survey_count", nullable = false)
     private int surveyCount;
+
+    @Builder.Default
+    @Column(name = "completed_survey", nullable = false)
+    private int completedSurvey = 0;
 
     @Column(name = "price_per_survey", nullable = false)
     private BigDecimal pricePerSurvey;
@@ -57,8 +65,9 @@ public class FillRequest {
     @Column(name = "end_date")
     private LocalDateTime endDate;
 
+    @Enumerated(EnumType.STRING)
     @Column(name = "status", nullable = false)
-    private String status;
+    private FillRequestStatusEnum status;
 
     @OneToMany(mappedBy = "fillRequest")
     private List<AnswerDistribution> answerDistributions = new ArrayList<>();
@@ -75,6 +84,9 @@ public class FillRequest {
         createdAt = LocalDateTime.now();
         if (totalPrice == null && pricePerSurvey != null) {
             totalPrice = pricePerSurvey.multiply(BigDecimal.valueOf(surveyCount));
+        }
+        if (completedSurvey < 0) {
+            completedSurvey = 0;
         }
     }
 }

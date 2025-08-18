@@ -56,6 +56,13 @@ google:
     client-id: 576659994866-msfjs05kr5mqtk8nsli7hmmrid9qlc3t.apps.googleusercontent.com
 
 # Campaign Scheduler Configuration for production
+# Realtime Socket settings
+realtime:
+  socket:
+    path: /socket.io
+    progress-emit-interval-ms: ${FILLREQ_PROGRESS_EMIT_INTERVAL_MS:1000}
+    progress-emit-delta: ${FILLREQ_PROGRESS_EMIT_DELTA:1}
+    burst-max-per-sec: ${FILLREQ_BURST_MAX_EVENTS_PER_SEC:10}
 campaign:
   scheduler:
     fixed-rate: 30000 # Check every 30 seconds in production

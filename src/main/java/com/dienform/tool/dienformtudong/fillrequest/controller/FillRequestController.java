@@ -35,9 +35,8 @@ public class FillRequestController {
                     fillRequestService.createFillRequest(formId, fillRequestDTO);
             return new ResponseEntity<>(response, HttpStatus.CREATED);
         } catch (Exception e) {
-            // Log the error for debugging
             log.error("Error creating fill request for form {}: {}", formId, e.getMessage(), e);
-            throw e; // Re-throw to let GlobalExceptionHandler handle it
+            throw e;
         }
     }
 
@@ -48,7 +47,7 @@ public class FillRequestController {
             return ResponseEntity.ok(response);
         } catch (Exception e) {
             log.error("Error getting fill request {}: {}", requestId, e.getMessage(), e);
-            throw e; // Re-throw to let GlobalExceptionHandler handle it
+            throw e;
         }
     }
 
@@ -59,7 +58,7 @@ public class FillRequestController {
             return ResponseEntity.ok(response);
         } catch (Exception e) {
             log.error("Error starting fill request {}: {}", requestId, e.getMessage(), e);
-            throw e; // Re-throw to let GlobalExceptionHandler handle it
+            throw e;
         }
     }
 

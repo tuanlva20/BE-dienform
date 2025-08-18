@@ -8,9 +8,12 @@ import org.springframework.stereotype.Component;
 import com.dienform.tool.dienformtudong.datamapping.dto.request.DataFillRequestDTO;
 import com.dienform.tool.dienformtudong.question.entity.Question;
 import com.dienform.tool.dienformtudong.question.entity.QuestionOption;
+import com.dienform.tool.dienformtudong.question.repository.QuestionRepository;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
 @Component
+@RequiredArgsConstructor
 @Slf4j
 public class DataFillValidator {
 
@@ -49,6 +52,8 @@ public class DataFillValidator {
       .compile("^[a-zA-Z0-9_+&*-]+(?:\\.[a-zA-Z0-9_+&*-]+)*@(?:[a-zA-Z0-9-]+\\.)+[a-zA-Z]{2,7}$");
 
   private static final Pattern PHONE_PATTERN = Pattern.compile("^[+]?[0-9]{10,15}$");
+
+  private final QuestionRepository questionRepository;
 
   /**
    * Validate data fill request basic structure
@@ -317,7 +322,7 @@ public class DataFillValidator {
 
     // Build row list and find the requested row
     List<com.dienform.tool.dienformtudong.question.entity.QuestionOption> allOptions =
-        question.getOptions() == null ? java.util.Collections.emptyList() : question.getOptions();
+        getQuestionOptionsSafely(question);
     com.dienform.tool.dienformtudong.question.entity.QuestionOption matchedRow =
         allOptions.stream().filter(o -> o.isRow() && o.getText() != null
             && o.getText().trim().equalsIgnoreCase(rowLabel.trim())).findFirst().orElse(null);
@@ -440,25 +445,62 @@ public class DataFillValidator {
       String columnName) {
     List<String> errors = new ArrayList<>();
 
-    List<QuestionOption> options = question.getOptions().stream()
+    // Support optional "-<otherText>" suffix; we only validate the left part (indices)
+    String raw = value == null ? "" : value.trim();
+    int dashIdx = raw.lastIndexOf('-');
+    String main = dashIdx > 0 ? raw.substring(0, dashIdx).trim() : raw;
+    String otherText = dashIdx > 0 ? raw.substring(dashIdx + 1).trim() : null;
+
+    List<QuestionOption> options = getQuestionOptionsSafely(question).stream()
         .sorted((a, b) -> Integer.compare(a.getPosition(), b.getPosition())).toList();
 
-    List<String> validOptions = options.stream().map(QuestionOption::getValue).toList();
+    // Check if question has __other_option__
+    // boolean hasOtherOption = options.stream().anyMatch(
+    //     opt -> opt.getValue() != null && "__other_option__".equalsIgnoreCase(opt.getValue()));
 
-    // Check if value is a position number (1, 2, 3, etc.)
-    if (isPositionNumber(value)) {
-      int position = Integer.parseInt(value);
-      if (position < 1 || position > options.size()) {
-        errors.add(String.format(
-            "Dòng %d, cột %s: Vị trí '%s' không hợp lệ. Các vị trí hợp lệ: 1-%d. Danh sách: %s",
-            rowIndex, columnName, value, options.size(), formatOptionsWithPosition(options)));
+    // // If question has __other_option__ and this is not a numeric position, allow it as custom text
+    // if (hasOtherOption && !isPositionNumber(main)) {
+    //   // This is likely custom text for the "other" option, validate it's reasonable
+    //   if (main.length() > 500) { // Reasonable length limit
+    //     errors.add(String.format(
+    //         "Dòng %d, cột %s: Văn bản tùy chỉnh cho lựa chọn 'Khác' quá dài (tối đa 500 ký tự)",
+    //         rowIndex, columnName));
+    //   }
+    //   return errors.isEmpty() ? ValidationResult.valid() : ValidationResult.invalid(errors);
+    // }
+
+    if (!isPositionNumber(main)) {
+      errors.add(String.format(
+          "Dòng %d, cột %s: Chỉ chấp nhận số thứ tự (1-%d) cho câu hỏi một lựa chọn. Danh sách: %s",
+          rowIndex, columnName, options.size(), formatOptionsWithPosition(options)));
+      return ValidationResult.invalid(errors);
+    }
+
+    int position = Integer.parseInt(main);
+    if (position < 1 || position > options.size()) {
+      errors.add(String.format(
+          "Dòng %d, cột %s: Vị trí '%s' không hợp lệ. Các vị trí hợp lệ: 1-%d. Danh sách: %s",
+          rowIndex, columnName, main, options.size(), formatOptionsWithPosition(options)));
+    }
+
+    // If other text provided, ensure the selected index corresponds to the 'Other' option
+    if (otherText != null && !otherText.isEmpty()) {
+      int otherIndex = -1;
+      for (int i = 0; i < options.size(); i++) {
+        QuestionOption opt = options.get(i);
+        if (opt.getValue() != null && "__other_option__".equalsIgnoreCase(opt.getValue())) {
+          otherIndex = i + 1; // 1-based
+          break;
+        }
       }
-    } else {
-      // Check if value matches option text exactly
-      if (!validOptions.contains(value)) {
+      if (otherIndex == -1) {
         errors.add(String.format(
-            "Dòng %d, cột %s: Giá trị '%s' không có trong danh sách lựa chọn. Có thể sử dụng số thứ tự (1-%d) hoặc text chính xác. Danh sách: %s",
-            rowIndex, columnName, value, options.size(), formatOptionsWithPosition(options)));
+            "Dòng %d, cột %s: Đã cung cấp ghi chú cho 'Khác' nhưng câu hỏi không có lựa chọn 'Khác'",
+            rowIndex, columnName));
+      } else if (position != otherIndex) {
+        errors.add(String.format(
+            "Dòng %d, cột %s: Đã cung cấp ghi chú '%s' nhưng vị trí được chọn (%d) không phải 'Khác'. Vui lòng chọn vị trí %d để nhập ghi chú cho 'Khác'",
+            rowIndex, columnName, otherText, position, otherIndex));
       }
     }
 
@@ -472,34 +514,73 @@ public class DataFillValidator {
       String columnName) {
     List<String> errors = new ArrayList<>();
 
-    List<QuestionOption> options = question.getOptions().stream()
+    // Support optional "-<otherText>" suffix; validate left part (indices) with '|' only
+    String raw = value == null ? "" : value.trim();
+    int dashIdx = raw.lastIndexOf('-');
+    String main = dashIdx > 0 ? raw.substring(0, dashIdx).trim() : raw;
+    String otherText = dashIdx > 0 ? raw.substring(dashIdx + 1).trim() : null;
+
+    List<QuestionOption> options = getQuestionOptionsSafely(question).stream()
         .sorted((a, b) -> Integer.compare(a.getPosition(), b.getPosition())).toList();
 
-    List<String> validOptions = options.stream().map(QuestionOption::getValue).toList();
+    // Check if question has __other_option__
+    // boolean hasOtherOption = options.stream().anyMatch(
+    //     opt -> opt.getValue() != null && "__other_option__".equalsIgnoreCase(opt.getValue()));
 
-    // Split by | delimiter
-    String[] selectedOptions = value.split("\\|");
+    String[] selectedOptions = main.split("\\|");
+    List<Integer> selectedPositions = new ArrayList<>();
 
-    for (String option : selectedOptions) {
-      String trimmedOption = option.trim();
+    for (String optionToken : selectedOptions) {
+      String trimmed = optionToken.trim();
+      if (trimmed.isEmpty())
+        continue;
 
-      // Check if option is a position number (1, 2, 3, etc.)
-      if (isPositionNumber(trimmedOption)) {
-        int position = Integer.parseInt(trimmedOption);
-        if (position < 1 || position > options.size()) {
-          errors.add(String.format(
-              "Dòng %d, cột %s: Vị trí '%s' không hợp lệ. Các vị trí hợp lệ: 1-%d. Danh sách: %s",
-              rowIndex, columnName, trimmedOption, options.size(),
-              formatOptionsWithPosition(options)));
-        }
+      // If question has __other_option__ and this is not a numeric position, allow it as custom
+      // text
+      // if (hasOtherOption && !isPositionNumber(trimmed)) {
+      //   // This is likely custom text for the "other" option, validate it's reasonable
+      //   if (trimmed.length() > 500) { // Reasonable length limit
+      //     errors.add(String.format(
+      //         "Dòng %d, cột %s: Văn bản tùy chỉnh cho lựa chọn 'Khác' quá dài (tối đa 500 ký tự)",
+      //         rowIndex, columnName));
+      //   }
+      //   continue; // Skip further validation for this token
+      // }
+
+      if (!isPositionNumber(trimmed)) {
+        errors.add(String.format(
+            "Dòng %d, cột %s: Chỉ chấp nhận số thứ tự (1-%d) cho câu hỏi nhiều lựa chọn. Danh sách: %s",
+            rowIndex, columnName, options.size(), formatOptionsWithPosition(options)));
+        continue;
+      }
+      int position = Integer.parseInt(trimmed);
+      if (position < 1 || position > options.size()) {
+        errors.add(String.format(
+            "Dòng %d, cột %s: Vị trí '%s' không hợp lệ. Các vị trí hợp lệ: 1-%d. Danh sách: %s",
+            rowIndex, columnName, trimmed, options.size(), formatOptionsWithPosition(options)));
       } else {
-        // Check if option matches text exactly
-        if (!validOptions.contains(trimmedOption)) {
-          errors.add(String.format(
-              "Dòng %d, cột %s: Giá trị '%s' không có trong danh sách lựa chọn. Có thể sử dụng số thứ tự (1-%d) hoặc text chính xác. Danh sách: %s",
-              rowIndex, columnName, trimmedOption, options.size(),
-              formatOptionsWithPosition(options)));
+        selectedPositions.add(position);
+      }
+    }
+
+    // If other text provided, ensure 'Other' is among selections
+    if (otherText != null && !otherText.isEmpty()) {
+      int otherIndex = -1;
+      for (int i = 0; i < options.size(); i++) {
+        QuestionOption opt = options.get(i);
+        if (opt.getValue() != null && "__other_option__".equalsIgnoreCase(opt.getValue())) {
+          otherIndex = i + 1;
+          break;
         }
+      }
+      if (otherIndex == -1) {
+        errors.add(String.format(
+            "Dòng %d, cột %s: Đã cung cấp ghi chú cho 'Khác' nhưng câu hỏi không có lựa chọn 'Khác'",
+            rowIndex, columnName));
+      } else if (!selectedPositions.contains(otherIndex)) {
+        errors.add(String.format(
+            "Dòng %d, cột %s: Đã cung cấp ghi chú '%s' nhưng lựa chọn không bao gồm 'Khác'. Vui lòng thêm vị trí %d để nhập ghi chú cho 'Khác'",
+            rowIndex, columnName, otherText, otherIndex));
       }
     }
 
@@ -573,5 +654,26 @@ public class DataFillValidator {
       sb.append(String.format("%d='%s'", i + 1, options.get(i).getValue()));
     }
     return sb.toString();
+  }
+
+  /**
+   * Safely get question options, handling lazy initialization
+   */
+  private List<QuestionOption> getQuestionOptionsSafely(Question question) {
+    try {
+      return question.getOptions() == null ? new ArrayList<>() : question.getOptions();
+    } catch (org.hibernate.LazyInitializationException e) {
+      log.debug("Lazy initialization exception for question options, reloading question: {}",
+          question.getId());
+      try {
+        Question reloadedQuestion =
+            questionRepository.findWithOptionsById(question.getId()).orElse(question);
+        return reloadedQuestion.getOptions() == null ? new ArrayList<>()
+            : reloadedQuestion.getOptions();
+      } catch (Exception ex) {
+        log.warn("Failed to reload question with options: {}", question.getId(), ex);
+        return new ArrayList<>();
+      }
+    }
   }
 }

@@ -401,7 +401,8 @@ public class ComboboxHandler {
           String dataValue = normalize(option.getAttribute("data-value"));
           if (!dataValue.isEmpty()) {
             log.debug("Option {} data-value: '{}'", i + 1, dataValue);
-            if (dataValue.equals(normalizedOptionText)) {
+            if (dataValue.equals(normalizedOptionText)
+                || dataValue.contains(normalizedOptionText)) {
               log.debug("Found option by data-value: '{}'", dataValue);
               return option;
             }
@@ -411,7 +412,8 @@ public class ComboboxHandler {
           String ariaLabel = normalize(option.getAttribute("aria-label"));
           if (!ariaLabel.isEmpty()) {
             log.debug("Option {} aria-label: '{}'", i + 1, ariaLabel);
-            if (ariaLabel.equals(normalizedOptionText)) {
+            if (ariaLabel.equals(normalizedOptionText)
+                || ariaLabel.contains(normalizedOptionText)) {
               log.debug("Found option by aria-label: '{}'", ariaLabel);
               return option;
             }
@@ -423,7 +425,8 @@ public class ComboboxHandler {
             String spanText = normalize(span.getText());
             if (!spanText.isEmpty()) {
               log.debug("Option {} span[jsslot] text: '{}'", i + 1, spanText);
-              if (spanText.equals(normalizedOptionText)) {
+              if (spanText.equals(normalizedOptionText)
+                  || spanText.contains(normalizedOptionText)) {
                 log.debug("Found option by span text: '{}'", spanText);
                 return option;
               }
@@ -436,7 +439,8 @@ public class ComboboxHandler {
           String optionTextContent = normalize(option.getText());
           if (!optionTextContent.isEmpty()) {
             log.debug("Option {} text content: '{}'", i + 1, optionTextContent);
-            if (optionTextContent.equals(normalizedOptionText)) {
+            if (optionTextContent.equals(normalizedOptionText)
+                || optionTextContent.contains(normalizedOptionText)) {
               log.debug("Found option by text content: '{}'", optionTextContent);
               return option;
             }
@@ -568,8 +572,25 @@ public class ComboboxHandler {
         // Wait a bit for the selection to register
         Thread.sleep(200);
 
-        // Verify the selection was successful
-        if (verifyOptionSelection(driver, optionText, questionTitle)) {
+        // Verify the selection was successful; if not, also consider popup closure as success
+        boolean verified = verifyOptionSelection(driver, optionText, questionTitle);
+        if (!verified) {
+          try {
+            // If popup disappeared, likely the selection was applied
+            boolean popupStillVisible = popupContainer.isDisplayed();
+            if (!popupStillVisible) {
+              log.debug("Popup closed after click; treating selection as successful for '{}': {}",
+                  questionTitle, optionText);
+              verified = true;
+            }
+          } catch (Exception ignore) {
+            // Stale element or not visible -> assume closed
+            log.debug("Popup container not visible/stale; assuming it closed after selection");
+            verified = true;
+          }
+        }
+
+        if (verified) {
           log.info("Option selection verified successfully for question: {}", questionTitle);
           return true;
         } else {
@@ -639,7 +660,12 @@ public class ComboboxHandler {
     if (s == null)
       return "";
 
-    String normalized = s.trim();
+    String normalized = s.replace('\u00A0', ' ') // non-breaking space
+        .replace('\u200B', ' ') // zero-width space
+        .replace('\u200C', ' ') // zero-width non-joiner
+        .replace('\u200D', ' ') // zero-width joiner
+        .replace('\u2060', ' ') // word joiner
+        .trim();
 
     // Decode HTML entities
     normalized = normalized.replace("&amp;", "&");
@@ -651,6 +677,8 @@ public class ComboboxHandler {
     // Unicode normalization and lowercase
     normalized =
         java.text.Normalizer.normalize(normalized, java.text.Normalizer.Form.NFC).toLowerCase();
+    // Collapse multiple spaces
+    normalized = normalized.replaceAll("\\s+", " ");
 
     return normalized;
   }

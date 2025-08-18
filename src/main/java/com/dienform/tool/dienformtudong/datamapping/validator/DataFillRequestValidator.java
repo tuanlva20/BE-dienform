@@ -4,6 +4,7 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import org.springframework.stereotype.Component;
+import com.dienform.common.util.DateTimeUtil;
 import com.dienform.tool.dienformtudong.datamapping.dto.request.ColumnMapping;
 import com.dienform.tool.dienformtudong.datamapping.dto.request.DataFillRequestDTO;
 import lombok.extern.slf4j.Slf4j;
@@ -214,13 +215,14 @@ public class DataFillRequestValidator {
         errors.add("Ngày kết thúc phải sau ngày bắt đầu");
       }
 
-      // Start date cannot be in the past (with some tolerance)
-      if (startDate.isBefore(LocalDateTime.now().minusMinutes(5))) {
+      // Start date cannot be in the past (with timezone consideration)
+      LocalDateTime nowVietnam = DateTimeUtil.nowVietnam();
+      if (startDate.isBefore(nowVietnam.minusMinutes(5))) {
         errors.add("Ngày bắt đầu không thể là thời điểm trong quá khứ");
       }
 
       // Check reasonable time range (not too far in future)
-      if (startDate.isAfter(LocalDateTime.now().plusYears(1))) {
+      if (startDate.isAfter(nowVietnam.plusYears(1))) {
         errors.add("Ngày bắt đầu không được quá 1 năm trong tương lai");
       }
     }

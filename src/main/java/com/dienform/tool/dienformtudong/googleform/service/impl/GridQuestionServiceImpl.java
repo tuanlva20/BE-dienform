@@ -11,6 +11,8 @@ import com.dienform.tool.dienformtudong.googleform.dto.GridQuestionAnswer;
 import com.dienform.tool.dienformtudong.googleform.service.GridQuestionService;
 import com.dienform.tool.dienformtudong.question.entity.Question;
 import com.dienform.tool.dienformtudong.question.entity.QuestionOption;
+import com.dienform.tool.dienformtudong.question.repository.QuestionRepository;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
 /**
@@ -18,11 +20,14 @@ import lombok.extern.slf4j.Slf4j;
  * question answers
  */
 @Service
+@RequiredArgsConstructor
 @Slf4j
 public class GridQuestionServiceImpl implements GridQuestionService {
 
   private static final Pattern GRID_OPTION_PATTERN = Pattern.compile("(.+):(.+)");
   private static final Pattern MULTIPLE_OPTIONS_PATTERN = Pattern.compile("(.+?),(.+)");
+
+  private final QuestionRepository questionRepository;
 
   @Override
   public GridQuestionAnswer parseGridAnswer(Question question, String rawAnswerText) {
@@ -135,11 +140,29 @@ public class GridQuestionServiceImpl implements GridQuestionService {
   public List<String> getRowLabels(Question question) {
     List<String> rowLabels = new ArrayList<>();
 
-    if (question.getOptions() != null) {
-      for (QuestionOption option : question.getOptions()) {
-        if (option.isRow()) {
-          rowLabels.add(option.getText());
+    try {
+      if (question.getOptions() != null) {
+        for (QuestionOption option : question.getOptions()) {
+          if (option.isRow()) {
+            rowLabels.add(option.getText());
+          }
         }
+      }
+    } catch (org.hibernate.LazyInitializationException e) {
+      log.debug("Lazy initialization exception for question options, reloading question: {}",
+          question.getId());
+      try {
+        Question reloadedQuestion =
+            questionRepository.findWithOptionsById(question.getId()).orElse(question);
+        if (reloadedQuestion.getOptions() != null) {
+          for (QuestionOption option : reloadedQuestion.getOptions()) {
+            if (option.isRow()) {
+              rowLabels.add(option.getText());
+            }
+          }
+        }
+      } catch (Exception ex) {
+        log.warn("Failed to reload question with options: {}", question.getId(), ex);
       }
     }
 
@@ -150,11 +173,29 @@ public class GridQuestionServiceImpl implements GridQuestionService {
   public List<String> getColumnOptions(Question question) {
     List<String> columnOptions = new ArrayList<>();
 
-    if (question.getOptions() != null) {
-      for (QuestionOption option : question.getOptions()) {
-        if (!option.isRow()) {
-          columnOptions.add(option.getText());
+    try {
+      if (question.getOptions() != null) {
+        for (QuestionOption option : question.getOptions()) {
+          if (!option.isRow()) {
+            columnOptions.add(option.getText());
+          }
         }
+      }
+    } catch (org.hibernate.LazyInitializationException e) {
+      log.debug("Lazy initialization exception for question options, reloading question: {}",
+          question.getId());
+      try {
+        Question reloadedQuestion =
+            questionRepository.findWithOptionsById(question.getId()).orElse(question);
+        if (reloadedQuestion.getOptions() != null) {
+          for (QuestionOption option : reloadedQuestion.getOptions()) {
+            if (!option.isRow()) {
+              columnOptions.add(option.getText());
+            }
+          }
+        }
+      } catch (Exception ex) {
+        log.warn("Failed to reload question with options: {}", question.getId(), ex);
       }
     }
 

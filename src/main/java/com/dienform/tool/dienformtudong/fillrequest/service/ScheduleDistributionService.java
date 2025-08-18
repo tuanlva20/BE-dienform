@@ -80,6 +80,14 @@ public class ScheduleDistributionService {
       return distributeWithoutEndDate(submissionCount, startDate, isHumanLike);
     }
 
+    // CRITICAL FIX: If startDate equals endDate OR non-human-like, execute immediately without
+    // scheduling delays
+    if (startDate.equals(endDate) || !isHumanLike) {
+      log.info("Execute immediately - startDate equals endDate: {} OR non-human-like: {}",
+          startDate.equals(endDate), !isHumanLike);
+      return distributeWithoutEndDate(submissionCount, startDate, isHumanLike);
+    }
+
     // Convert to Vietnam timezone for realistic scheduling
     ZonedDateTime startZoned = startDate.atZone(VIETNAM_TIMEZONE);
     ZonedDateTime endZoned = endDate.atZone(VIETNAM_TIMEZONE);
@@ -112,8 +120,8 @@ public class ScheduleDistributionService {
       TimeSlot selectedSlot = selectWeightedTimeSlot(timeSlots);
       LocalDateTime executionTime = selectedSlot.getRandomTimeInSlot();
 
-      // Random delay between 2-120 seconds for human-like behavior
-      int delaySeconds = 2 + random.nextInt(119); // 2-120 seconds
+      // Random delay between 36-399 seconds for human-like behavior
+      int delaySeconds = 36 + random.nextInt(364); // 36-399 seconds
 
       // Occasionally add longer delays (1-5 minutes) to simulate breaks
       if (random.nextDouble() < 0.1) { // 10% chance
@@ -171,26 +179,35 @@ public class ScheduleDistributionService {
     List<ScheduledTask> schedule = new ArrayList<>();
     LocalDateTime currentTime = startDate;
 
+    log.info("Creating immediate execution schedule for {} tasks (humanLike: {})", submissionCount,
+        isHumanLike);
+
     for (int i = 0; i < submissionCount; i++) {
       int delaySeconds;
 
       if (isHumanLike) {
-        // Human-like delays: 2-120 seconds, with occasional longer breaks
-        delaySeconds = 2 + random.nextInt(119);
+        // Human-like delays: 36-399 seconds, with occasional longer breaks
+        delaySeconds = 36 + random.nextInt(364);
         if (random.nextDouble() < 0.15) { // 15% chance for longer break
           delaySeconds += 120 + random.nextInt(300); // Add 2-7 minutes
         }
+
+        // Set execution time in the future for human-like behavior
+        currentTime = currentTime.plusSeconds(delaySeconds);
+        log.debug("Human-like task {} scheduled at {} with {} seconds delay", i, currentTime,
+            delaySeconds);
       } else {
-        // Fast filling: 1-3 seconds
-        delaySeconds = 1 + random.nextInt(3);
+        // NON-HUMAN-LIKE: All tasks execute immediately, no delays
+        // Thread pool will handle queuing automatically
+        delaySeconds = 0; // No additional delay
+        currentTime = startDate; // All tasks start at the same time
+        log.debug("Fast task {} scheduled immediately at {} (no delay)", i, currentTime);
       }
 
       schedule.add(new ScheduledTask(currentTime, delaySeconds, i));
-
-      // Calculate next execution time
-      currentTime = currentTime.plusSeconds(delaySeconds);
     }
 
+    log.info("Created {} immediate execution tasks starting at {}", schedule.size(), startDate);
     return schedule;
   }
 

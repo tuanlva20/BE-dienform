@@ -35,6 +35,8 @@ public class FillRequestResponse {
         private String valueString;
         private String rowId; // For matrix questions
 
+        private Integer positionIndex; // Để mapping vị trí giữa các câu hỏi text
+
         private OptionInfo option;
     }
 
@@ -47,6 +49,8 @@ public class FillRequestResponse {
     private LocalDateTime startDate;
     private LocalDateTime endDate;
     private String status;
+
+    private int completedSurvey;
 
     private List<AnswerDistributionResponse> answerDistributions;
 }

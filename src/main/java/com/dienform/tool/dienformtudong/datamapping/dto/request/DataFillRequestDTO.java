@@ -3,6 +3,7 @@ package com.dienform.tool.dienformtudong.datamapping.dto.request;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
+import com.fasterxml.jackson.annotation.JsonFormat;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.Min;
@@ -31,7 +32,11 @@ public class DataFillRequestDTO {
   private BigDecimal pricePerSurvey;
 
   private Boolean isHumanLike = false;
+
+  @JsonFormat(pattern = "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
   private LocalDateTime startDate;
+
+  @JsonFormat(pattern = "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
   private LocalDateTime endDate;
 }
 

@@ -47,17 +47,25 @@ public class DataEncodingServiceImpl implements DataEncodingService {
     private final Map<String, Integer> optionIndexByText;
     private final boolean multiSelect;
     private final String questionTitle;
+    private final Integer otherIndex; // 1-based index of "Khác" if present
 
     SimpleEncoder(ExtractedQuestion q) {
       this.optionIndexByText = new HashMap<>();
       int idx = 1; // index starts from 1
+      Integer tempOtherIndex = null;
       for (ExtractedOption opt : q.getOptions()) {
         optionIndexByText.put(opt.getText() == null ? "" : opt.getText().trim().toLowerCase(),
             idx++);
+        String val = opt.getValue();
+        if (tempOtherIndex == null && val != null && "__other_option__".equalsIgnoreCase(val)) {
+          // The index we just assigned corresponds to this option
+          tempOtherIndex = idx - 1;
+        }
       }
       String type = q.getType() == null ? "" : q.getType().toLowerCase();
       this.multiSelect = type.contains("checkbox");
       this.questionTitle = q.getTitle();
+      this.otherIndex = tempOtherIndex;
     }
 
     @Override
@@ -68,28 +76,107 @@ public class DataEncodingServiceImpl implements DataEncodingService {
         return value; // free text
 
       if (multiSelect) {
-        List<String> tokens = tokenizeMultiValues(value);
-        List<Integer> encoded = new ArrayList<>();
-        for (String token : tokens) {
-          if (token.isBlank())
-            continue;
-          String key = token.trim().toLowerCase();
-          Integer idx = optionIndexByText.get(key);
-          if (idx == null) {
-            throw new IllegalArgumentException("Đáp án '" + token + "' không tồn tại!");
+        // Multi-select encoding with support for 'Khác' text when unmatched input remains
+        String raw = value.trim();
+
+        List<Integer> matchedIndices = new ArrayList<>();
+        String otherText = null;
+
+        if (raw.contains("|")) {
+          // User explicitly separated options with '|'
+          String[] parts = raw.split("\\|", -1);
+          List<String> unmatchedParts = new ArrayList<>();
+          for (String p : parts) {
+            String token = p == null ? "" : p.trim();
+            if (token.isEmpty())
+              continue;
+            Integer idx = optionIndexByText.get(token.toLowerCase());
+            if (idx != null) {
+              matchedIndices.add(idx);
+            } else {
+              unmatchedParts.add(token);
+            }
           }
-          encoded.add(idx);
+          if (!unmatchedParts.isEmpty()) {
+            // Treat all unmatched as Other text if 'Khác' exists
+            if (otherIndex == null) {
+              throw new IllegalArgumentException(
+                  "Giá trị không khớp lựa chọn: '" + String.join("|", unmatchedParts)
+                      + "'. Câu hỏi không có lựa chọn 'Khác'. Vui lòng chọn đúng tiêu đề đáp án.");
+            }
+            otherText = String.join(" ", unmatchedParts).trim();
+          }
+        } else {
+          // User separated by commas; options/text may contain commas -> greedy matching
+          String[] segs = raw.split(",");
+          List<String> otherSegments = new ArrayList<>();
+          int i = 0;
+          while (i < segs.length) {
+            String bestMatch = null;
+            int bestJ = i;
+            StringBuilder sb = new StringBuilder();
+            for (int j = i; j < segs.length; j++) {
+              if (j > i)
+                sb.append(",");
+              sb.append(segs[j]);
+              String candidate = sb.toString().trim().toLowerCase();
+              if (optionIndexByText.containsKey(candidate)) {
+                bestMatch = candidate;
+                bestJ = j;
+              }
+            }
+            if (bestMatch != null) {
+              matchedIndices.add(optionIndexByText.get(bestMatch));
+              i = bestJ + 1;
+            } else {
+              // accumulate to Other text
+              otherSegments.add(segs[i].trim());
+              i++;
+            }
+          }
+          if (!otherSegments.isEmpty()) {
+            if (otherIndex == null) {
+              throw new IllegalArgumentException(
+                  "Một phần giá trị không khớp bất kỳ lựa chọn nào: '"
+                      + String.join(", ", otherSegments)
+                      + "'. Câu hỏi không có lựa chọn 'Khác'. Vui lòng chọn đúng tiêu đề đáp án.");
+            }
+            otherText = String.join(",", otherSegments).trim();
+          }
         }
-        return encoded.stream().map(String::valueOf).collect(Collectors.joining("|"));
+
+        if (matchedIndices.isEmpty() && (otherText == null || otherText.isEmpty())) {
+          throw new IllegalArgumentException("Không tìm thấy đáp án hợp lệ để mã hóa.");
+        }
+
+        matchedIndices = matchedIndices.stream().distinct().collect(Collectors.toList());
+        matchedIndices.sort(Integer::compareTo);
+        String left = matchedIndices.stream().map(String::valueOf).collect(Collectors.joining("|"));
+        if (otherText != null && !otherText.isEmpty()) {
+          if (otherIndex == null) {
+            throw new IllegalArgumentException(
+                "Đã nhập ghi chú cho 'Khác' nhưng câu hỏi không có lựa chọn 'Khác'.");
+          }
+          // Luôn thêm otherIndex khi có otherText
+          if (left == null || left.isEmpty()) {
+            return otherIndex + "-" + otherText;
+          } else {
+            return left + "|" + otherIndex + "-" + otherText;
+          }
+        }
+        return left;
       } else {
-        Integer idx = optionIndexByText.get(value.trim().toLowerCase());
-        if (idx == null) {
-          // keep original if it seems free text question
-          if (optionIndexByText.isEmpty())
-            return value;
-          throw new IllegalArgumentException("Đáp án '" + value + "' không tồn tại!");
+        String raw = value.trim();
+        Integer idx = optionIndexByText.get(raw.toLowerCase());
+        if (idx != null) {
+          return String.valueOf(idx);
         }
-        return String.valueOf(idx);
+        // Nếu có 'Khác' thì mã hóa thành otherIndex-text
+        if (otherIndex != null) {
+          return otherIndex + "-" + raw;
+        }
+        throw new IllegalArgumentException(
+            "Đáp án '" + value + "' không tồn tại và câu hỏi không có lựa chọn 'Khác'.");
       }
     }
 
@@ -140,6 +227,7 @@ public class DataEncodingServiceImpl implements DataEncodingService {
       return tokens;
     }
   }
+
   private static class GridEncoder implements QuestionEncoder {
     private final Map<String, Integer> columnIndexByText = new HashMap<>();
     private final String rowTitle;
