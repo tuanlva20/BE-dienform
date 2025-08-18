@@ -56,6 +56,7 @@ import com.dienform.tool.dienformtudong.googleform.dto.FormSubmissionResponse;
 import com.dienform.tool.dienformtudong.googleform.handler.ComboboxHandler;
 import com.dienform.tool.dienformtudong.googleform.handler.GridQuestionHandler;
 import com.dienform.tool.dienformtudong.googleform.service.GoogleFormService;
+import com.dienform.tool.dienformtudong.googleform.service.SectionNavigationService;
 import com.dienform.tool.dienformtudong.googleform.util.DataProcessingUtils;
 import com.dienform.tool.dienformtudong.googleform.util.GoogleFormParser;
 import com.dienform.tool.dienformtudong.googleform.util.GoogleFormParser.ExtractedQuestion;
@@ -113,6 +114,9 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     private final ComboboxHandler comboboxHandler;
     private final QuestionRepository questionRepository;
     private final GridQuestionHandler gridQuestionHandler;
+
+    // Navigate multi-section forms to collect per-section HTML before parsing
+    private final SectionNavigationService sectionNavigationService;
 
     // In-memory cache of form questions (URL -> Questions)
     private final Map<String, List<ExtractedQuestion>> formQuestionsCache =
@@ -252,58 +256,73 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     @Override
     public List<ExtractedQuestion> readGoogleForm(String formUrl) {
         try {
-            log.info("Fetching Google Form from URL: {}", formUrl);
+            // Always try Selenium-based section navigation first
+            List<String> sectionHtmls = sectionNavigationService.captureSectionHtmls(formUrl);
 
-            // Create HTTP client with reasonable timeout
-            HttpClient client = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NORMAL)
-                    .connectTimeout(Duration.ofSeconds(20)).build();
-
-            // Prepare the request
-            HttpRequest request = HttpRequest.newBuilder().uri(URI.create(formUrl)).header(
-                    "User-Agent",
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-                    .GET().build();
-
-            // Execute the request and get the response
-            HttpResponse<String> response =
-                    client.send(request, HttpResponse.BodyHandlers.ofString());
-
-            if (response.statusCode() != 200) {
-                log.error("Failed to fetch Google Form. Status code: {}", response.statusCode());
-                return Collections.emptyList();
+            if (sectionHtmls == null) {
+                // No Next button found on first page → treat as single-section (fallback)
+                return readSingleSectionViaHttp(formUrl);
             }
 
-            String htmlContent = response.body();
-
-            if (htmlContent == null || htmlContent.isEmpty()) {
-                log.error("Empty HTML content received from Google Form URL");
-                return Collections.emptyList();
+            // Multi-section: also try capturing section metadata (skip first section per
+            // requirement)
+            List<SectionNavigationService.SectionMetadata> sectionMetadata = null;
+            try {
+                sectionMetadata = sectionNavigationService.captureSectionMetadata(formUrl);
+            } catch (Exception ignore) {
             }
 
-            // Parse question from URL Google Form
-            List<ExtractedQuestion> extractedQuestions =
-                    googleFormParser.extractQuestionsFromHtml(htmlContent);
-
-            if (ArrayUtils.isEmpty(extractedQuestions)) {
-                log.warn("No questions extracted from the form at URL: {}", formUrl);
-                return Collections.emptyList();
+            // Parse each section HTML with existing parser logic and attach metadata if available
+            List<ExtractedQuestion> all = new ArrayList<>();
+            int position = 0;
+            // Create a map to align sectionHtmls index with sectionMetadata
+            // sectionHtmls: [section0, section1, section2, section3] (all sections)
+            // sectionMetadata: [section1, section2, section3] (skip first section)
+            java.util.Map<Integer, SectionNavigationService.SectionMetadata> metadataMap =
+                    new java.util.HashMap<>();
+            if (sectionMetadata != null) {
+                for (SectionNavigationService.SectionMetadata md : sectionMetadata) {
+                    metadataMap.put(md.getSectionIndex(), md);
+                }
             }
 
-            log.info("Successfully extracted {} questions from Google Form",
-                    extractedQuestions.size());
-            return extractedQuestions;
+            for (int i = 0; i < sectionHtmls.size(); i++) {
+                String html = sectionHtmls.get(i);
+                try {
+                    List<ExtractedQuestion> qs = googleFormParser.extractQuestionsFromHtml(html);
+                    if (!ArrayUtils.isEmpty(qs)) {
+                        for (ExtractedQuestion q : qs) {
+                            q.setPosition(position++);
+                            // Attach section metadata: section0 gets no metadata, section1+ get
+                            // their metadata
+                            if (i > 0 && metadataMap.containsKey(i)) {
+                                SectionNavigationService.SectionMetadata md = metadataMap.get(i);
+                                if (q.getAdditionalData() == null) {
+                                    q.setAdditionalData(new java.util.HashMap<>());
+                                }
+                                q.getAdditionalData().put("section_index",
+                                        String.valueOf(md.getSectionIndex()));
+                                q.getAdditionalData().put("section_title", md.getSectionTitle());
+                                if (md.getSectionDescription() != null) {
+                                    q.getAdditionalData().put("section_description",
+                                            md.getSectionDescription());
+                                }
+                            }
+                            all.add(q);
+                        }
+                    }
+                } catch (Exception ex) {
+                    log.warn("Failed to parse section HTML: {}", ex.getMessage());
+                }
+            }
 
-        } catch (IOException e) {
-            log.error("IO exception occurred while fetching Google Form: {}", e.getMessage(), e);
-            return Collections.emptyList();
-        } catch (InterruptedException e) {
-            log.error("Thread was interrupted while fetching Google Form: {}", e.getMessage(), e);
-            Thread.currentThread().interrupt();
-            return Collections.emptyList();
+            log.info("Extracted {} questions across {} sections via Selenium navigation",
+                    all.size(), sectionHtmls.size());
+            return all;
         } catch (Exception e) {
-            log.error("Unexpected error occurred while processing Google Form: {}", e.getMessage(),
-                    e);
-            return Collections.emptyList();
+            log.warn("Selenium navigation failed, falling back to single-section parse: {}",
+                    e.getMessage());
+            return readSingleSectionViaHttp(formUrl);
         }
     }
 
@@ -1020,6 +1039,54 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             } catch (Exception ignore) {
                 log.debug("Failed to handle fatal error: {}", ignore.getMessage());
             }
+        }
+    }
+
+    private List<ExtractedQuestion> readSingleSectionViaHttp(String formUrl) {
+        try {
+            log.info("Fetching Google Form via HTTP (single-section fallback): {}", formUrl);
+
+            HttpClient client = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NORMAL)
+                    .connectTimeout(Duration.ofSeconds(20)).build();
+
+            HttpRequest request = HttpRequest.newBuilder().uri(URI.create(formUrl)).header(
+                    "User-Agent",
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+                    .GET().build();
+
+            HttpResponse<String> response =
+                    client.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() != 200) {
+                log.error("Failed to fetch Google Form. Status code: {}", response.statusCode());
+                return Collections.emptyList();
+            }
+
+            String htmlContent = response.body();
+            if (htmlContent == null || htmlContent.isEmpty()) {
+                log.error("Empty HTML content received from Google Form URL");
+                return Collections.emptyList();
+            }
+
+            List<ExtractedQuestion> extractedQuestions =
+                    googleFormParser.extractQuestionsFromHtml(htmlContent);
+            if (ArrayUtils.isEmpty(extractedQuestions)) {
+                log.warn("No questions extracted from the form at URL: {}", formUrl);
+                return Collections.emptyList();
+            }
+            log.info("Successfully extracted {} questions from Google Form (fallback)",
+                    extractedQuestions.size());
+            return extractedQuestions;
+        } catch (IOException e) {
+            log.error("IO exception occurred while fetching Google Form: {}", e.getMessage(), e);
+            return Collections.emptyList();
+        } catch (InterruptedException e) {
+            log.error("Thread was interrupted while fetching Google Form: {}", e.getMessage(), e);
+            Thread.currentThread().interrupt();
+            return Collections.emptyList();
+        } catch (Exception e) {
+            log.error("Unexpected error occurred while processing Google Form: {}", e.getMessage(),
+                    e);
+            return Collections.emptyList();
         }
     }
 
