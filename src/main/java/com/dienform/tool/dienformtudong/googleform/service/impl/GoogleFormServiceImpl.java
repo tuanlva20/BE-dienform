@@ -55,6 +55,8 @@ import com.dienform.tool.dienformtudong.googleform.dto.FormSubmissionRequest;
 import com.dienform.tool.dienformtudong.googleform.dto.FormSubmissionResponse;
 import com.dienform.tool.dienformtudong.googleform.handler.ComboboxHandler;
 import com.dienform.tool.dienformtudong.googleform.handler.GridQuestionHandler;
+import com.dienform.tool.dienformtudong.googleform.service.FormFillingHelper;
+import com.dienform.tool.dienformtudong.googleform.service.FormFillingOrchestrator;
 import com.dienform.tool.dienformtudong.googleform.service.GoogleFormService;
 import com.dienform.tool.dienformtudong.googleform.service.SectionNavigationService;
 import com.dienform.tool.dienformtudong.googleform.util.DataProcessingUtils;
@@ -114,9 +116,13 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     private final ComboboxHandler comboboxHandler;
     private final QuestionRepository questionRepository;
     private final GridQuestionHandler gridQuestionHandler;
+    private final FormFillingHelper formFillingHelper;
 
     // Navigate multi-section forms to collect per-section HTML before parsing
     private final SectionNavigationService sectionNavigationService;
+
+    // Form filling orchestrator for section-aware form filling
+    private final FormFillingOrchestrator formFillingOrchestrator;
 
     // In-memory cache of form questions (URL -> Questions)
     private final Map<String, List<ExtractedQuestion>> formQuestionsCache =
@@ -670,8 +676,9 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             // expose per-submission other text map
             dataFillOtherTextByQuestion.set(localOtherText);
 
-            // Use existing executeFormFill method with formId as cache key
-            return executeFormFill(fillRequestId, formId, formUrl, selections, true);
+            // Use FormFillingOrchestrator to handle section-aware form filling
+            return formFillingOrchestrator.orchestrateFormFill(fillRequestId, formId, formUrl,
+                    selections, true, this::executeFormFill);
         } catch (Exception e) {
             log.error("Error submitting form: {}", e.getMessage(), e);
             return false;
@@ -1364,7 +1371,8 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                     log.info("Processing question: {} (type: {})", question.getTitle(),
                             question.getType());
 
-                    WebElement questionElement = resolveQuestionElement(driver, formUrl, question);
+                    WebElement questionElement =
+                            formFillingHelper.resolveQuestionElement(driver, formUrl, question);
                     long questionFoundTime = System.currentTimeMillis();
 
                     if (questionElement == null) {
@@ -1377,8 +1385,8 @@ public class GoogleFormServiceImpl implements GoogleFormService {
 
                     // OPTIMIZED: Fill question based on type with shorter timeouts
                     long fillStartTime = System.currentTimeMillis();
-                    boolean fillSuccess = fillQuestionByType(driver, questionElement, question,
-                            option, humanLike);
+                    boolean fillSuccess = formFillingHelper.fillQuestionByType(driver,
+                            questionElement, question, option, humanLike);
                     // If this question used 'Other', fill its text now.
                     try {
                         if (fillSuccess && option != null) {
@@ -3467,7 +3475,8 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                 }
             } catch (Exception ignore) {
             }
-            boolean success = executeFormFill(fillRequestId, formIdSafe, link, plan, humanLike);
+            boolean success = formFillingOrchestrator.orchestrateFormFill(fillRequestId, formIdSafe,
+                    link, plan, humanLike, this::executeFormFill);
             if (success) {
                 successCount.incrementAndGet();
                 log.info("Form fill task succeeded for fillRequest {}", fillRequestId);

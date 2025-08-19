@@ -3,6 +3,8 @@ package com.dienform.tool.dienformtudong.googleform.service.impl;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Random;
 import org.openqa.selenium.By;
 import org.openqa.selenium.WebDriver;
 import org.openqa.selenium.WebElement;
@@ -12,8 +14,11 @@ import org.openqa.selenium.support.ui.ExpectedConditions;
 import org.openqa.selenium.support.ui.WebDriverWait;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import com.dienform.tool.dienformtudong.googleform.service.FormFillingHelper;
 import com.dienform.tool.dienformtudong.googleform.service.RequiredQuestionAutofillService;
 import com.dienform.tool.dienformtudong.googleform.service.SectionNavigationService;
+import com.dienform.tool.dienformtudong.question.entity.Question;
+import com.dienform.tool.dienformtudong.question.entity.QuestionOption;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
@@ -28,6 +33,7 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
       "//div[@role='button' and (.//span[normalize-space()='Gửi'] or .//span[normalize-space()='Submit'])]");
 
   private final RequiredQuestionAutofillService requiredQuestionAutofillService;
+  private final FormFillingHelper formFillingHelper;
 
   @Value("${google.form.timeout-seconds:30}")
   private int timeoutSeconds;
@@ -39,15 +45,8 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
   public List<String> captureSectionHtmls(String formUrl) {
     WebDriver driver = null;
     try {
-      ChromeOptions options = new ChromeOptions();
-      if (headless) {
-        options.addArguments("--headless=new");
-      }
-      options.addArguments("--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage");
-      driver = new ChromeDriver(options);
-
+      driver = openBrowser(formUrl, false);
       WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(timeoutSeconds));
-      driver.get(formUrl);
 
       // First page HTML
       wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("form")));
@@ -115,15 +114,8 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
   public List<SectionMetadata> captureSectionMetadata(String formUrl) {
     WebDriver driver = null;
     try {
-      ChromeOptions options = new ChromeOptions();
-      if (headless) {
-        options.addArguments("--headless=new");
-      }
-      options.addArguments("--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage");
-      driver = new ChromeDriver(options);
-
+      driver = openBrowser(formUrl, false);
       WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(timeoutSeconds));
-      driver.get(formUrl);
 
       // Wait for form to load
       wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("form")));
@@ -196,6 +188,309 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
         } catch (Exception ignore) {
         }
       }
+    }
+  }
+
+  @Override
+  public boolean fillSections(String formUrl, Map<Question, QuestionOption> selections,
+      boolean humanLike) {
+    WebDriver driver = null;
+    try {
+      driver = openBrowser(formUrl, humanLike);
+      WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(15));
+      try {
+        wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("form")));
+      } catch (Exception ignore) {
+      }
+
+      int sectionCounter = 0;
+      while (true) {
+        // Fill current section using single-section logic
+        int filled = fillCurrentSection(driver, selections, humanLike, sectionCounter);
+
+        // If submit button visible → submit and exit
+        if (isVisible(driver, SUBMIT_BUTTON)) {
+          clickSubmit(driver, wait, humanLike);
+          return true;
+        }
+
+        // If Next visible → click Next to go to next section
+        if (isVisible(driver, NEXT_BUTTON)) {
+          if (filled == 0) {
+            // Try minimal autofill to unlock Next
+            try {
+              requiredQuestionAutofillService.satisfyRequiredQuestions(driver);
+            } catch (Exception ignore) {
+            }
+          }
+          clickNext(driver, wait, humanLike);
+          sectionCounter++;
+          try {
+            Thread.sleep(800);
+          } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+          }
+          try {
+            wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("form")));
+          } catch (Exception ignore) {
+          }
+          continue;
+        }
+
+        // Neither Next nor Submit → assume last page without submit (stop)
+        return filled > 0;
+      }
+    } catch (Exception e) {
+      log.error("fillSections failed: {}", e.getMessage(), e);
+      return false;
+    } finally {
+      if (driver != null) {
+        try {
+          driver.quit();
+        } catch (Exception ignore) {
+        }
+      }
+    }
+  }
+
+  // ===== Helpers: mimic GoogleFormServiceImpl single-section filling =====
+
+  private WebDriver openBrowser(String formUrl, boolean humanLike) {
+    ChromeOptions options = new ChromeOptions();
+    options.addArguments("--remote-allow-origins=*");
+    options.addArguments("--no-sandbox");
+    options.addArguments("--disable-dev-shm-usage");
+    options.addArguments("--disable-gpu");
+    options.addArguments("--disable-extensions");
+    options.addArguments("--disable-plugins");
+    options.addArguments("--disable-images");
+    options.addArguments("--disable-web-security");
+    options.addArguments("--disable-features=VizDisplayCompositor");
+    options.addArguments("--disable-blink-features=AutomationControlled");
+    options.addArguments("--disable-infobars");
+    options.addArguments("--disable-notifications");
+    options.addArguments("--disable-popup-blocking");
+    options.addArguments("--disable-save-password-bubble");
+    options.addArguments("--disable-translate");
+    options.addArguments("--no-first-run");
+    options.addArguments("--no-default-browser-check");
+    options.setPageLoadStrategy(org.openqa.selenium.PageLoadStrategy.EAGER);
+
+    java.util.Map<String, Object> prefs = new java.util.HashMap<>();
+    prefs.put("profile.managed_default_content_settings.images", 2);
+    options.setExperimentalOption("prefs", prefs);
+
+    if (headless) {
+      options.addArguments("--headless=new");
+    }
+
+    options.setExperimentalOption("excludeSwitches",
+        java.util.Collections.singletonList("enable-automation"));
+    options.setExperimentalOption("useAutomationExtension", false);
+
+    WebDriver driver = new ChromeDriver(options);
+
+    driver.manage().timeouts().pageLoadTimeout(Duration.ofSeconds(10));
+    driver.manage().timeouts().implicitlyWait(Duration.ZERO);
+
+    WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(15));
+    driver.get(formUrl);
+
+    try {
+      wait.until(ExpectedConditions.presenceOfElementLocated(By.xpath("//div[@role='listitem']")));
+    } catch (Exception e) {
+      // proceed
+    }
+    return driver;
+  }
+
+  private int fillCurrentSection(WebDriver driver, Map<Question, QuestionOption> selections,
+      boolean humanLike, int sectionIndex) {
+    int processed = 0;
+    try {
+      List<WebElement> questionElements =
+          driver.findElements(By.cssSelector("div[role='listitem']"));
+      new WebDriverWait(driver, Duration.ofSeconds(10));
+
+      for (Map.Entry<Question, QuestionOption> entry : selections.entrySet()) {
+        Question question = entry.getKey();
+        QuestionOption option = entry.getValue();
+        if (option == null)
+          continue;
+
+        // Resolution rules:
+        // - sectionIndex == 0 (first section): use position primarily
+        // - sectionIndex >= 1: use additionalData.section_index primarily
+        WebElement questionElement = null;
+        if (sectionIndex == 0) {
+          // First section: prefer liIndex (0-based) for questions without section_index
+          Map<String, String> add = question.getAdditionalData();
+          String secIdxStr = add != null ? add.get("section_index") : null;
+          String liIndexStr = add != null ? add.get("liIndex") : null;
+
+          if (secIdxStr == null && liIndexStr != null) {
+            try {
+              int li = Integer.parseInt(liIndexStr);
+              if (questionElements != null && li >= 0 && li < questionElements.size()) {
+                questionElement = questionElements.get(li);
+              }
+            } catch (Exception ignore) {
+            }
+          }
+
+          // Next: position (0-based)
+          if (questionElement == null) {
+            Integer pos = question.getPosition();
+            if (pos != null && pos >= 0) {
+              try {
+                if (questionElements != null && pos < questionElements.size()) {
+                  questionElement = questionElements.get(pos);
+                } else {
+                  int index = pos + 1; // XPath is 1-based
+                  questionElement =
+                      driver.findElement(By.xpath("(//div[@role='listitem'])[" + index + "]"));
+                }
+              } catch (Exception ignore) {
+              }
+            }
+          }
+        } else {
+          // From second section onwards: prefer additionalData.section_index
+          Map<String, String> add = question.getAdditionalData();
+          String secIdx = add != null ? add.get("section_index") : null;
+          if (secIdx != null) {
+            try {
+              int sIdx = Integer.parseInt(secIdx);
+              if (sIdx == sectionIndex) {
+                // Use helper first (it knows liIndex/containerXPath/headingNormalized)
+                questionElement = formFillingHelper.resolveQuestionElement(driver, "", question);
+              }
+            } catch (Exception ignore) {
+            }
+          }
+        }
+        if (questionElement == null) {
+          // Fallback to local resolver within current section
+          questionElement = resolveQuestionElementInSection(driver, question, questionElements);
+        }
+        if (questionElement == null)
+          continue;
+
+        boolean ok = formFillingHelper.fillQuestionByType(driver, questionElement, question, option,
+            humanLike);
+        if (ok) {
+          processed++;
+          if (humanLike) {
+            try {
+              Thread.sleep(25 + new Random().nextInt(26));
+            } catch (InterruptedException ie) {
+              Thread.currentThread().interrupt();
+            }
+          }
+        }
+      }
+    } catch (Exception e) {
+      log.warn("fillCurrentSection error: {}", e.getMessage());
+    }
+    return processed;
+  }
+
+  // Prioritize additionalData (liIndex/containerXPath/headingNormalized, and section_index intent)
+  private WebElement resolveQuestionElementInSection(WebDriver driver, Question question,
+      List<WebElement> questionElements) {
+    try {
+      Map<String, String> add = question.getAdditionalData();
+
+      // Priority 1: liIndex within page
+      if (add != null && add.get("liIndex") != null) {
+        try {
+          int idx = Integer.parseInt(add.get("liIndex"));
+          List<WebElement> all = driver.findElements(By.cssSelector("div[role='listitem']"));
+          if (idx >= 0 && idx < all.size())
+            return all.get(idx);
+        } catch (Exception ignore) {
+        }
+      }
+
+      // Priority 2: containerXPath
+      if (add != null && add.get("containerXPath") != null
+          && !add.get("containerXPath").isBlank()) {
+        try {
+          return driver.findElement(By.xpath(add.get("containerXPath")));
+        } catch (Exception ignore) {
+        }
+      }
+
+      // Priority 3: headingNormalized
+      if (add != null && add.get("headingNormalized") != null
+          && !add.get("headingNormalized").isBlank()) {
+        try {
+          String t = add.get("headingNormalized");
+          return driver.findElement(
+              By.xpath("//div[@role='listitem'][.//div[@role='heading' and normalize-space()=\""
+                  + t.replace("\"", "\\\"") + "\"]]"));
+        } catch (Exception ignore) {
+        }
+      }
+
+      // Fallback: match by visible title within current listitems
+      String title = question.getTitle() == null ? "" : question.getTitle();
+      for (WebElement el : questionElements) {
+        try {
+          List<WebElement> headings = el.findElements(By.cssSelector("[role='heading']"));
+          if (!headings.isEmpty()) {
+            String h = headings.get(0).getText().replace("*", "").trim();
+            if (!h.isEmpty() && h.equals(title)) {
+              return el;
+            }
+          }
+        } catch (Exception ignore) {
+        }
+      }
+    } catch (Exception e) {
+      log.debug("resolveQuestionElementInSection error: {}", e.getMessage());
+    }
+    return null;
+  }
+
+  private void clickNext(WebDriver driver, WebDriverWait wait, boolean humanLike) {
+    try {
+      WebElement next = wait.until(ExpectedConditions.elementToBeClickable(NEXT_BUTTON));
+      if (humanLike) {
+        try {
+          Thread.sleep(250 + new Random().nextInt(251));
+        } catch (InterruptedException ie) {
+          Thread.currentThread().interrupt();
+        }
+      }
+      next.click();
+      try {
+        wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("form")));
+      } catch (Exception ignore) {
+      }
+    } catch (Exception e) {
+      log.warn("clickNext failed: {}", e.getMessage());
+    }
+  }
+
+  private void clickSubmit(WebDriver driver, WebDriverWait wait, boolean humanLike) {
+    try {
+      WebElement submit = wait.until(ExpectedConditions.elementToBeClickable(SUBMIT_BUTTON));
+      if (humanLike) {
+        try {
+          Thread.sleep(250 + new Random().nextInt(251));
+        } catch (InterruptedException ie) {
+          Thread.currentThread().interrupt();
+        }
+      }
+      submit.click();
+      try {
+        WebDriverWait submitWait = new WebDriverWait(driver, Duration.ofSeconds(10));
+        submitWait.until(ExpectedConditions.urlContains("formResponse"));
+      } catch (Exception ignore) {
+      }
+    } catch (Exception e) {
+      log.warn("clickSubmit failed: {}", e.getMessage());
     }
   }
 

@@ -54,6 +54,23 @@ public interface SectionNavigationService {
    * @return list of section metadata, or null if multi-section navigation is not available
    */
   List<SectionMetadata> captureSectionMetadata(String formUrl);
+
+  /**
+   * Fill a multi-section Google Form using provided selections. The filling logic for each section
+   * matches the single-section flow, with added navigation: click "Tiếp" (Next) after finishing a
+   * section until the "Gửi" (Submit) button appears, then submit.
+   *
+   * Prioritize resolving questions using section-related metadata in additionalData (e.g.,
+   * section_index/position) before title-based strategies.
+   *
+   * @param formUrl public form URL
+   * @param selections map of questions to selected options
+   * @param humanLike whether to simulate human-like behavior
+   * @return true if submitted successfully, false otherwise
+   */
+  boolean fillSections(String formUrl,
+      java.util.Map<com.dienform.tool.dienformtudong.question.entity.Question, com.dienform.tool.dienformtudong.question.entity.QuestionOption> selections,
+      boolean humanLike);
 }
 
 
