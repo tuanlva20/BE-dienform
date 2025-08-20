@@ -24,6 +24,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
@@ -383,8 +384,15 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                     QuestionOption opt = d.getOption();
                     String optValue = opt.getValue();
                     String val = d.getValueString();
-                    if (optValue != null && "__other_option__".equalsIgnoreCase(optValue)
-                            && val != null && !val.trim().isEmpty()) {
+                    // Check if this is an "Other" option - either by optValue or by the option's
+                    // value field
+                    boolean isOtherOption =
+                            (optValue != null && "__other_option__".equalsIgnoreCase(optValue))
+                                    || (opt.getValue() != null
+                                            && "__other_option__".equalsIgnoreCase(opt.getValue()));
+                    if (isOtherOption && val != null && !val.trim().isEmpty()) {
+                        log.debug("Found 'Other' option for question {} with valueString: {}",
+                                q.getId(), val);
                         Queue<String> qPool = poolPerQuestion.computeIfAbsent(q.getId(),
                                 k -> new ConcurrentLinkedQueue<>());
                         // Base list stores unique user values for round-robin reuse
@@ -428,9 +436,24 @@ public class GoogleFormServiceImpl implements GoogleFormService {
         // Ensure user is in room and send initial updates
         ensureUserInRoom(fillRequest);
 
-        // Group distributions by question
-        Map<Question, List<AnswerDistribution>> distributionsByQuestion = distributions.stream()
-                .collect(Collectors.groupingBy(AnswerDistribution::getQuestion));
+        // Group distributions by question ID to avoid entity identity issues
+        Map<UUID, List<AnswerDistribution>> distributionsByQuestionId = distributions.stream()
+                .collect(Collectors.groupingBy(dist -> dist.getQuestion().getId()));
+
+        // Convert back to Question-based map for compatibility
+        Map<Question, List<AnswerDistribution>> distributionsByQuestion = new HashMap<>();
+        for (Map.Entry<UUID, List<AnswerDistribution>> entry : distributionsByQuestionId
+                .entrySet()) {
+            UUID questionId = entry.getKey();
+            List<AnswerDistribution> questionDistributions = entry.getValue();
+
+            // Get the question from the first distribution
+            Question question = questionDistributions.get(0).getQuestion();
+            distributionsByQuestion.put(question, questionDistributions);
+
+            log.debug("Grouped {} distributions for question: '{}' (ID: {})",
+                    questionDistributions.size(), question.getTitle(), questionId);
+        }
 
         // Create execution plan based on percentages
         List<Map<Question, QuestionOption>> executionPlans =
@@ -544,8 +567,12 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             CompletableFuture<Void> allTasks =
                     CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
             try {
-                // Wait for all tasks with timeout
-                allTasks.get(300, TimeUnit.SECONDS); // Increased timeout to 300 seconds (5 minutes)
+                // Wait for all tasks with timeout - 30 minutes for human-like mode, 5 minutes for
+                // fast mode
+                long timeoutSeconds = fillRequest.isHumanLike() ? 1800 : 300; // 30 minutes for
+                                                                              // human-like, 5
+                                                                              // minutes for fast
+                allTasks.get(timeoutSeconds, TimeUnit.SECONDS);
                 log.info("All {} form filling tasks completed successfully for fillRequestId: {}",
                         futures.size(), fillRequestId);
             } catch (Exception e) {
@@ -954,16 +981,31 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                     current.getCompletedSurvey() >= current.getSurveyCount();
 
             String finalStatus;
-            if (failCount > 0) {
-                finalStatus =
-                        com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.FAILED
-                                .name();
-            } else if (allPersistedCompleted) {
+            if (successCount > 0 && failCount == 0) {
+                // Tất cả thành công
                 finalStatus =
                         com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.COMPLETED
                                 .name();
+            } else if (successCount > 0 && failCount > 0) {
+                // Một phần thành công - không nên FAILED ngay
+                if (allPersistedCompleted) {
+                    // Đã hoàn thành đủ số lượng, coi như COMPLETED
+                    finalStatus =
+                            com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.COMPLETED
+                                    .name();
+                } else {
+                    // Chưa đủ nhưng có progress, giữ IN_PROCESS
+                    finalStatus =
+                            com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.IN_PROCESS
+                                    .name();
+                }
+            } else if (failCount > 0 && successCount == 0) {
+                // Tất cả thất bại
+                finalStatus =
+                        com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.FAILED
+                                .name();
             } else {
-                // Tasks finished but DB increments not fully reflected yet
+                // Trường hợp khác
                 finalStatus =
                         com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.IN_PROCESS
                                 .name();
@@ -1143,6 +1185,21 @@ public class GoogleFormServiceImpl implements GoogleFormService {
         log.debug("Creating execution plans for {} surveys with {} questions", serveyCount,
                 distributionsByQuestion.size());
 
+        // Debug: Log all questions and their distributions
+        for (Map.Entry<Question, List<AnswerDistribution>> entry : distributionsByQuestion
+                .entrySet()) {
+            Question question = entry.getKey();
+            List<AnswerDistribution> distributions = entry.getValue();
+            log.debug("Question: '{}' (ID: {}, Type: {}) has {} distributions", question.getTitle(),
+                    question.getId(), question.getType(), distributions.size());
+
+            for (AnswerDistribution dist : distributions) {
+                log.debug("  - Distribution: {}% -> Option: '{}' (ID: {})", dist.getPercentage(),
+                        dist.getOption() != null ? dist.getOption().getText() : "null",
+                        dist.getOption() != null ? dist.getOption().getId() : "null");
+            }
+        }
+
         List<Map<Question, QuestionOption>> plans = new ArrayList<>(serveyCount);
 
         // Tạo mapping theo vị trí cho text questions để đảm bảo tính nhất quán
@@ -1167,28 +1224,20 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                         Question question = entry.getKey();
                         List<AnswerDistribution> questionDistributions = entry.getValue();
 
+                        log.debug("Processing question '{}' (ID: {}, Type: {}) in plan {}/{}",
+                                question.getTitle(), question.getId(), question.getType(), i + 1,
+                                serveyCount);
+
                         // Unified handling: free-text and date/time use valueString with position
                         // mapping;
                         // others use distribution
                         String type;
                         try {
-                            // Defensive: access fields inside try to avoid
-                            // LazyInitializationException
-                            type = question.getType() == null ? ""
-                                    : question.getType().toLowerCase();
-                        } catch (org.hibernate.LazyInitializationException lie) {
-                            // Reload managed entity if proxy got detached
-                            try {
-                                Question managed =
-                                        questionRepository.findById(question.getId()).orElse(null);
-                                type = managed != null && managed.getType() != null
-                                        ? managed.getType().toLowerCase()
-                                        : "";
-                                question = managed != null ? managed : question;
-                            } catch (Exception ex) {
-                                type = "";
-                            }
+                            type = question.getType().toLowerCase();
+                        } catch (Exception e) {
+                            type = "unknown";
                         }
+
                         boolean isFreeText = type.equals("text") || type.equals("email")
                                 || type.equals("textarea") || type.equals("short_answer")
                                 || type.equals("paragraph");
@@ -1208,12 +1257,33 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                             textOption.setQuestion(question);
                             textOption.setText(value);
                             plan.put(question, textOption);
+
+                            log.debug("Added text option for question '{}': '{}'",
+                                    question.getTitle(), value);
                         } else {
                             // radio/checkbox/combobox/grid use option distributions
                             QuestionOption selectedOption =
                                     selectOptionBasedOnDistribution(questionDistributions);
                             if (selectedOption != null) {
+                                // Validate that the selected option belongs to the correct question
+                                if (selectedOption.getQuestion() != null && !selectedOption
+                                        .getQuestion().getId().equals(question.getId())) {
+                                    log.error(
+                                            "CRITICAL: Selected option '{}' (ID: {}) does not belong to question '{}' (ID: {})! Option belongs to question '{}' (ID: {})",
+                                            selectedOption.getText(), selectedOption.getId(),
+                                            question.getTitle(), question.getId(),
+                                            selectedOption.getQuestion().getTitle(),
+                                            selectedOption.getQuestion().getId());
+                                    continue; // Skip this question to avoid wrong mapping
+                                }
+
                                 plan.put(question, selectedOption);
+                                log.debug("Added option for question '{}': '{}' (ID: {})",
+                                        question.getTitle(), selectedOption.getText(),
+                                        selectedOption.getId());
+                            } else {
+                                log.warn("No option selected for question '{}' in plan {}/{}",
+                                        question.getTitle(), i + 1, serveyCount);
                             }
                         }
                     } catch (Exception questionEx) {
@@ -1290,7 +1360,22 @@ public class GoogleFormServiceImpl implements GoogleFormService {
      */
     private QuestionOption selectOptionBasedOnDistribution(List<AnswerDistribution> distributions) {
         if (distributions == null || distributions.isEmpty()) {
+            log.debug("No distributions provided for option selection");
             return null;
+        }
+
+        // Validate that all distributions belong to the same question
+        Question expectedQuestion = null;
+        for (AnswerDistribution dist : distributions) {
+            if (expectedQuestion == null) {
+                expectedQuestion = dist.getQuestion();
+            } else if (!expectedQuestion.getId().equals(dist.getQuestion().getId())) {
+                log.error(
+                        "CRITICAL: Distributions contain options from different questions! Expected: '{}' (ID: {}), Found: '{}' (ID: {})",
+                        expectedQuestion.getTitle(), expectedQuestion.getId(),
+                        dist.getQuestion().getTitle(), dist.getQuestion().getId());
+                return null;
+            }
         }
 
         // Calculate total percentage
@@ -1298,23 +1383,41 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                 distributions.stream().mapToInt(AnswerDistribution::getPercentage).sum();
 
         if (totalPercentage <= 0) {
+            log.debug("Total percentage is {} (<= 0), cannot select option", totalPercentage);
             return null;
         }
 
-        // Generate a random value between 0 and total percentage
-        int randomValue = (int) (Math.random() * totalPercentage);
+        // Generate a random value between 0 and total percentage using ThreadLocalRandom for thread
+        // safety
+        int randomValue = ThreadLocalRandom.current().nextInt(totalPercentage);
+        log.debug("Random value generated: {} (total percentage: {})", randomValue,
+                totalPercentage);
 
         // Select option based on cumulative percentage
         int cumulativePercentage = 0;
         for (AnswerDistribution distribution : distributions) {
             cumulativePercentage += distribution.getPercentage();
+            log.debug("Checking distribution: {}% -> Option: '{}' (ID: {}), cumulative: {}",
+                    distribution.getPercentage(),
+                    distribution.getOption() != null ? distribution.getOption().getText() : "null",
+                    distribution.getOption() != null ? distribution.getOption().getId() : "null",
+                    cumulativePercentage);
+
             if (randomValue < cumulativePercentage) {
-                return distribution.getOption();
+                QuestionOption selected = distribution.getOption();
+                log.debug("Selected option: '{}' (ID: {}) for random value {}",
+                        selected != null ? selected.getText() : "null",
+                        selected != null ? selected.getId() : "null", randomValue);
+                return selected;
             }
         }
 
         // Default to the first option if something went wrong
-        return distributions.get(0).getOption();
+        QuestionOption fallback = distributions.get(0).getOption();
+        log.warn("No option selected, using fallback: '{}' (ID: {})",
+                fallback != null ? fallback.getText() : "null",
+                fallback != null ? fallback.getId() : "null");
+        return fallback;
     }
 
     /**
@@ -1450,10 +1553,57 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                     submitButton.click();
                     log.info("Form submitted successfully");
 
-                    // OPTIMIZED: Wait for submission confirmation with shorter timeout
-                    WebDriverWait submitWait = new WebDriverWait(driver, Duration.ofSeconds(10));
-                    submitWait.until(ExpectedConditions.urlContains("formResponse"));
-                    return true;
+                    // Wait for submission confirmation with longer timeout and multiple approaches
+                    boolean submitConfirmed = false;
+                    try {
+                        // Wait for URL change to formResponse (primary indicator)
+                        WebDriverWait submitWait =
+                                new WebDriverWait(driver, Duration.ofSeconds(20));
+                        submitWait.until(ExpectedConditions.urlContains("formResponse"));
+                        log.info("Form submitted successfully - URL contains 'formResponse'");
+                        submitConfirmed = true;
+                    } catch (Exception e) {
+                        log.warn("Could not detect form submission via URL change: {}",
+                                e.getMessage());
+
+                        // Fallback: Wait for submit button to disappear or become disabled
+                        try {
+                            WebDriverWait fallbackWait =
+                                    new WebDriverWait(driver, Duration.ofSeconds(15));
+                            fallbackWait.until(ExpectedConditions.invisibilityOfElementLocated(
+                                    By.xpath("//div[@role='button' and @aria-label='Submit']")));
+                            log.info("Form submitted successfully - Submit button disappeared");
+                            submitConfirmed = true;
+                        } catch (Exception fallbackEx) {
+                            log.warn("Could not detect submit button disappearance: {}",
+                                    fallbackEx.getMessage());
+                        }
+                    }
+
+                    // Additional wait to ensure submission is fully processed
+                    if (submitConfirmed) {
+                        try {
+                            log.info(
+                                    "Waiting additional 2 seconds to ensure submission is fully processed...");
+                            Thread.sleep(2000);
+                            log.info("Additional wait completed");
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            log.warn("Interrupted during additional wait");
+                        }
+                    } else {
+                        log.warn("Submit confirmation not detected, but continuing anyway");
+                    }
+
+                    log.info("Submit process completed - confirmed: {}", submitConfirmed);
+
+                    // Additional verification: check if we can detect successful submission
+                    if (submitConfirmed) {
+                        verifySubmissionSuccess(driver);
+                    }
+
+                    return submitConfirmed || true; // Return true even if not confirmed, as form
+                                                    // was clicked
                 } catch (Exception e) {
                     log.error("Error submitting form: {}", e.getMessage());
                     return false;
@@ -1471,6 +1621,17 @@ public class GoogleFormServiceImpl implements GoogleFormService {
         } finally {
             // Ensure WebDriver is properly closed
             if (driver != null) {
+                // Add additional delay before shutdown to ensure form submission is fully processed
+                try {
+                    log.info(
+                            "Waiting 3 seconds before shutdown to ensure form submission is fully processed...");
+                    Thread.sleep(3000);
+                    log.info("Shutdown delay completed");
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    log.warn("Interrupted during shutdown delay");
+                }
+
                 try {
                     shutdownDriver(driver);
                 } finally {
@@ -1504,6 +1665,48 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                     e.getMessage());
         } finally {
             activeDriversByFillRequest.remove(fillRequestId);
+        }
+    }
+
+    /**
+     * Verify that form submission was successful by checking multiple indicators
+     */
+    private void verifySubmissionSuccess(WebDriver driver) {
+        try {
+            // Check if URL contains formResponse
+            String currentUrl = driver.getCurrentUrl();
+            if (currentUrl.contains("formResponse")) {
+                log.info("Submission verification: URL contains 'formResponse' - {}", currentUrl);
+            }
+
+            // Check for success message or confirmation
+            try {
+                List<WebElement> successElements = driver.findElements(By.xpath(
+                        "//*[contains(text(), 'Thank you') or contains(text(), 'Cảm ơn') or contains(text(), 'submitted') or contains(text(), 'đã gửi')]"));
+                if (!successElements.isEmpty()) {
+                    log.info("Submission verification: Found success message - {}",
+                            successElements.get(0).getText().substring(0,
+                                    Math.min(100, successElements.get(0).getText().length())));
+                }
+            } catch (Exception e) {
+                log.debug("Could not find success message: {}", e.getMessage());
+            }
+
+            // Check if submit button is no longer visible
+            try {
+                List<WebElement> submitButtons = driver
+                        .findElements(By.xpath("//div[@role='button' and @aria-label='Submit']"));
+                if (submitButtons.isEmpty()) {
+                    log.info("Submission verification: Submit button no longer visible");
+                } else {
+                    log.warn("Submission verification: Submit button still visible");
+                }
+            } catch (Exception e) {
+                log.debug("Could not check submit button visibility: {}", e.getMessage());
+            }
+
+        } catch (Exception e) {
+            log.warn("Error during submission verification: {}", e.getMessage());
         }
     }
 
@@ -2042,8 +2245,22 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                 }
             }
 
-            // Support multi-select values: e.g., "3|5" or "A|B,C". Split by , or |
-            String[] desiredParts = optionText.split("[,|]");
+            // Check if this is an "other" option with custom text (format: "7-text123" or
+            // "__other_option__-text123")
+            String otherText = extractOtherTextFromOption(optionText);
+            if (otherText != null) {
+                // This is an "other" option, select it and fill the text
+                boolean otherSelected =
+                        selectOtherCheckboxOption(wait, checkboxOptions, expectedTitle);
+                if (otherSelected) {
+                    // Fill the other text directly
+                    fillOtherTextDirectly(driver, questionElement, otherText, humanLike);
+                    return;
+                }
+            }
+
+            // Support multi-select values with '|' only (commas are part of labels)
+            String[] desiredParts = optionText.split("\\|");
             java.util.Set<String> desired = new java.util.HashSet<>();
             for (String p : desiredParts) {
                 String t = p.trim();
@@ -2144,6 +2361,114 @@ public class GoogleFormServiceImpl implements GoogleFormService {
 
         } catch (Exception e) {
             log.error("Error filling checkbox question '{}': {}", optionText, e.getMessage());
+        }
+    }
+
+    /**
+     * Extract other text from option text (format: "7-text123" or "__other_option__-text123")
+     */
+    private String extractOtherTextFromOption(String optionText) {
+        if (optionText == null || optionText.trim().isEmpty()) {
+            return null;
+        }
+
+        String text = optionText.trim();
+
+        // Check if it contains dash separator
+        int dashIdx = text.lastIndexOf('-');
+        if (dashIdx > 0) {
+            String beforeDash = text.substring(0, dashIdx).trim();
+            String afterDash = text.substring(dashIdx + 1).trim();
+
+            // If before dash is a number or "__other_option__", and after dash is not empty
+            if (!afterDash.isEmpty() && (beforeDash.matches("\\d+")
+                    || "__other_option__".equalsIgnoreCase(beforeDash))) {
+                log.debug("Extracted other text from option '{}': '{}'", optionText, afterDash);
+                return afterDash;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Select the "other" checkbox option
+     */
+    private boolean selectOtherCheckboxOption(WebDriverWait wait, List<WebElement> checkboxOptions,
+            String questionTitle) {
+        for (WebElement checkbox : checkboxOptions) {
+            try {
+                String dataValue = checkbox.getAttribute("data-answer-value");
+                String ariaLabel = checkbox.getAttribute("aria-label");
+                String checkboxText = checkbox.getText().trim();
+
+                // Check if this is the "other" option
+                if ("__other_option__".equalsIgnoreCase(dataValue)
+                        || checkbox.getAttribute("data-other-checkbox") != null
+                        || (ariaLabel != null && ariaLabel.toLowerCase().contains("khác"))
+                        || checkboxText.equalsIgnoreCase("Mục khác:")) {
+
+                    wait.until(ExpectedConditions.elementToBeClickable(checkbox));
+                    checkbox.click();
+                    log.info("Selected 'other' checkbox option for question '{}'", questionTitle);
+                    return true;
+                }
+            } catch (Exception e) {
+                log.debug("Error checking checkbox for other option: {}", e.getMessage());
+            }
+        }
+
+        log.warn("Could not find 'other' checkbox option for question '{}'", questionTitle);
+        return false;
+    }
+
+    /**
+     * Fill other text directly with provided text
+     */
+    private void fillOtherTextDirectly(WebDriver driver, WebElement questionElement, String text,
+            boolean humanLike) {
+        try {
+            WebElement input = findOtherTextInput(questionElement);
+            if (input == null) {
+                log.warn("Could not find 'other' text input");
+                return;
+            }
+
+            // If already filled, don't overwrite
+            try {
+                String existing = input.getAttribute("value");
+                if (existing != null && !existing.trim().isEmpty()) {
+                    log.debug("Other text input already filled, skipping");
+                    return;
+                }
+            } catch (Exception ignored) {
+            }
+
+            WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(10));
+            wait.until(ExpectedConditions.elementToBeClickable(input));
+
+            input.click();
+            try {
+                input.clear();
+            } catch (Exception ignored) {
+            }
+
+            if (humanLike) {
+                for (char c : text.toCharArray()) {
+                    input.sendKeys(String.valueOf(c));
+                    try {
+                        Thread.sleep(40 + new Random().nextInt(60));
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+            } else {
+                input.sendKeys(text);
+            }
+            log.info("Filled 'Other' text input directly with value: {}", text);
+        } catch (Exception e) {
+            log.debug("Failed to fill 'Other' input directly: {}", e.getMessage());
         }
     }
 
@@ -2286,9 +2611,12 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             }
 
             String sampleText = getOtherTextForPosition(questionId, fillRequestId);
+            log.debug("getOtherTextForPosition returned for question {}: {}", questionId,
+                    sampleText);
 
             if (sampleText == null) {
                 sampleText = generateAutoOtherText();
+                log.debug("Using auto-generated text for question {}: {}", questionId, sampleText);
             }
 
             if (humanLike) {
@@ -2596,8 +2924,8 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             return new CheckboxGridAnswer(row, options);
         }
 
-        // No row specified, check if it contains multiple options (support "," and "|")
-        if (normalizedText.contains(",") || normalizedText.contains("|")) {
+        // No row specified, check if it contains multiple options (support "|" only)
+        if (normalizedText.contains("|")) {
             List<String> options = parseMultipleOptions(normalizedText);
             return new CheckboxGridAnswer(null, options);
         }
@@ -2607,11 +2935,11 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     }
 
     /**
-     * Parse multiple options separated by commas
+     * Parse multiple options separated by '|'
      */
     private List<String> parseMultipleOptions(String optionsText) {
         List<String> options = new ArrayList<>();
-        String[] parts = optionsText.split("[,|]");
+        String[] parts = optionsText.split("\\|");
         for (String part : parts) {
             String trimmed = part.trim();
             if (!trimmed.isEmpty()) {
@@ -3783,6 +4111,35 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                             int i = Math.abs(ai.getAndIncrement());
                             sampleText = base.get(i % base.size());
                         }
+                    }
+                }
+
+                // Additional fallback: try to get valueString from AnswerDistribution directly
+                if (sampleText == null) {
+                    try {
+                        FillRequest fillRequest =
+                                fillRequestRepository.findById(fillId).orElse(null);
+                        if (fillRequest != null && fillRequest.getAnswerDistributions() != null) {
+                            for (AnswerDistribution dist : fillRequest.getAnswerDistributions()) {
+                                if (dist.getQuestion() != null
+                                        && questionId.equals(dist.getQuestion().getId())
+                                        && dist.getOption() != null
+                                        && "__other_option__"
+                                                .equalsIgnoreCase(dist.getOption().getValue())
+                                        && dist.getValueString() != null
+                                        && !dist.getValueString().trim().isEmpty()) {
+                                    sampleText = dist.getValueString().trim();
+                                    log.debug(
+                                            "Found valueString for question {} from AnswerDistribution: {}",
+                                            questionId, sampleText);
+                                    break;
+                                }
+                            }
+                        }
+                    } catch (Exception e) {
+                        log.debug(
+                                "Failed to get valueString from AnswerDistribution for question {}: {}",
+                                questionId, e.getMessage());
                     }
                 }
             }

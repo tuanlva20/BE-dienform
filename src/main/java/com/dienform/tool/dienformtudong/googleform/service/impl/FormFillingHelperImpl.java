@@ -46,7 +46,25 @@ public class FormFillingHelperImpl implements FormFillingHelper {
     WebElement element = null;
     Map<String, String> additionalData = question.getAdditionalData();
 
-    // Strategy 1: Try with section index and title (highest priority)
+    // Strategy 1: Prefer liIndex (0-based) for fastest O(1) lookup within current section/page
+    try {
+      if (additionalData != null) {
+        String liIndexStr = additionalData.get("liIndex");
+        if (liIndexStr != null) {
+          int liIndex = Integer.parseInt(liIndexStr);
+          List<WebElement> listItems = driver.findElements(By.cssSelector("div[role='listitem']"));
+          if (liIndex >= 0 && liIndex < listItems.size()) {
+            log.info("Found question element using liIndex (0-based) at {} of {} items", liIndex,
+                listItems.size());
+            return listItems.get(liIndex);
+          }
+        }
+      }
+    } catch (Exception e) {
+      log.debug("liIndex fast-path failed: {}", e.getMessage());
+    }
+
+    // Strategy 2: Try with section index and title (contextual title match)
     if (additionalData != null) {
       String sectionIndex = additionalData.get("section_index");
       String questionTitle = question.getTitle();
@@ -72,7 +90,7 @@ public class FormFillingHelperImpl implements FormFillingHelper {
       }
     }
 
-    // Strategy 2: Try with cached locator
+    // Strategy 3: Try with cached locator
     if (formId != null) {
       Map<UUID, By> perForm =
           formLocatorCache.computeIfAbsent(formId, k -> new ConcurrentHashMap<>());
@@ -89,7 +107,7 @@ public class FormFillingHelperImpl implements FormFillingHelper {
       }
     }
 
-    // Strategy 2: Try with fresh locator
+    // Strategy 4: Try with fresh locator
     By freshLocator = buildLocatorForQuestion(question);
     try {
       log.debug("Trying fresh locator: {}", freshLocator);
@@ -101,7 +119,7 @@ public class FormFillingHelperImpl implements FormFillingHelper {
       log.debug("Fresh locator failed for question: {}", question.getTitle());
     }
 
-    // Strategy 3: Try enhanced text-based search with section context
+    // Strategy 5: Try enhanced text-based search with section context
     try {
       log.debug("Trying enhanced text-based search for question: {}", question.getTitle());
       String questionTitle = question.getTitle();
@@ -133,7 +151,7 @@ public class FormFillingHelperImpl implements FormFillingHelper {
       log.debug("Enhanced text-based search failed for question: {}", question.getTitle());
     }
 
-    // Strategy 4: Try to find by position (if available)
+    // Strategy 6: Try to find by position (if available)
     if (additionalData != null) {
       String position = additionalData.get("position");
       if (position != null) {
@@ -148,25 +166,6 @@ public class FormFillingHelperImpl implements FormFillingHelper {
           return element;
         } catch (Exception e) {
           log.debug("Position-based search failed for question: {}", question.getTitle());
-        }
-      }
-    }
-
-    // Strategy 5: Try to find by liIndex (if available)
-    if (additionalData != null) {
-      String liIndex = additionalData.get("liIndex");
-      if (liIndex != null) {
-        try {
-          int index = Integer.parseInt(liIndex);
-          By liIndexLocator = By.xpath("(//div[@role='listitem'])[" + (index + 1) + "]");
-          log.debug("Trying liIndex-based locator: {}", liIndexLocator);
-          element = new WebDriverWait(driver, Duration.ofSeconds(5))
-              .until(ExpectedConditions.presenceOfElementLocated(liIndexLocator));
-          log.info("Found question element using liIndex-based search for: {}",
-              question.getTitle());
-          return element;
-        } catch (Exception e) {
-          log.debug("liIndex-based search failed for question: {}", question.getTitle());
         }
       }
     }
@@ -308,22 +307,51 @@ public class FormFillingHelperImpl implements FormFillingHelper {
     try {
       WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(10));
       String optionText = option.getText() == null ? "" : option.getText();
-      log.info("Looking for radio options with text: '{}'", optionText);
+      String optionValue = option.getValue() == null ? "" : option.getValue();
+      log.info("Looking for radio options with text: '{}' and value: '{}'", optionText,
+          optionValue);
 
       List<WebElement> radioOptions =
           questionElement.findElements(By.cssSelector("[role='radio']"));
 
       log.info("Found {} radio options", radioOptions.size());
 
-      // Strategy 1: Try by data-value attribute
+      // Strategy 1: Try by data-value attribute (for "other" option, this should be
+      // "__other_option__")
       for (WebElement radio : radioOptions) {
         try {
           String dataValue = radio.getAttribute("data-value");
           log.debug("Radio option data-value: '{}'", dataValue);
+
+          // Check if this is the "other" option by value
+          if (dataValue != null && dataValue.trim().equals(optionValue.trim())) {
+            wait.until(ExpectedConditions.elementToBeClickable(radio));
+            radio.click();
+            log.info("Selected radio option by data-value: {}", optionValue);
+            // If this is the 'Other' option, fill its text input
+            try {
+              if ("__other_option__".equalsIgnoreCase(optionValue)) {
+                fillOtherIfPresent(driver, questionElement, option, humanLike);
+              }
+            } catch (Exception ignore) {
+            }
+            return true;
+          }
+
+          // Fallback: check by text if value doesn't match
           if (dataValue != null && dataValue.trim().equals(optionText.trim())) {
             wait.until(ExpectedConditions.elementToBeClickable(radio));
             radio.click();
-            log.info("Selected radio option by data-value: {}", optionText);
+            log.info("Selected radio option by data-value (text fallback): {}", optionText);
+            // If this is the 'Other' option, fill its text input
+            try {
+              String aria = radio.getAttribute("aria-label");
+              if ("__other_option__".equalsIgnoreCase(dataValue) || (aria != null
+                  && (aria.equalsIgnoreCase("Mục khác:") || aria.toLowerCase().contains("khác")))) {
+                fillOtherIfPresent(driver, questionElement, option, humanLike);
+              }
+            } catch (Exception ignore) {
+            }
             return true;
           }
         } catch (Exception e) {
@@ -340,6 +368,15 @@ public class FormFillingHelperImpl implements FormFillingHelper {
             wait.until(ExpectedConditions.elementToBeClickable(radio));
             radio.click();
             log.info("Selected radio option by aria-label: {}", optionText);
+            try {
+              String dataValue = radio.getAttribute("data-value");
+              if ("__other_option__".equalsIgnoreCase(dataValue)
+                  || (ariaLabel != null && (ariaLabel.equalsIgnoreCase("Mục khác:")
+                      || ariaLabel.toLowerCase().contains("khác")))) {
+                fillOtherIfPresent(driver, questionElement, option, humanLike);
+              }
+            } catch (Exception ignore) {
+            }
             return true;
           }
         } catch (Exception e) {
@@ -356,6 +393,17 @@ public class FormFillingHelperImpl implements FormFillingHelper {
             wait.until(ExpectedConditions.elementToBeClickable(radio));
             radio.click();
             log.info("Selected radio option by text content: {}", optionText);
+            try {
+              String dataValue = radio.getAttribute("data-value");
+              String aria = radio.getAttribute("aria-label");
+              if ("__other_option__".equalsIgnoreCase(dataValue)
+                  || (text != null && text.equalsIgnoreCase("Mục khác:"))
+                  || (aria != null && (aria.equalsIgnoreCase("Mục khác:")
+                      || aria.toLowerCase().contains("khác")))) {
+                fillOtherIfPresent(driver, questionElement, option, humanLike);
+              }
+            } catch (Exception ignore) {
+            }
             return true;
           }
         } catch (Exception e) {
@@ -376,6 +424,15 @@ public class FormFillingHelperImpl implements FormFillingHelper {
             wait.until(ExpectedConditions.elementToBeClickable(radio));
             radio.click();
             log.info("Selected radio option by partial match: {}", optionText);
+            try {
+              if ((dataValue != null && "__other_option__".equalsIgnoreCase(dataValue))
+                  || (ariaLabel != null && (ariaLabel.equalsIgnoreCase("Mục khác:")
+                      || ariaLabel.toLowerCase().contains("khác")))
+                  || (text != null && text.equalsIgnoreCase("Mục khác:"))) {
+                fillOtherIfPresent(driver, questionElement, option, humanLike);
+              }
+            } catch (Exception ignore) {
+            }
             return true;
           }
         } catch (Exception e) {
@@ -414,8 +471,53 @@ public class FormFillingHelperImpl implements FormFillingHelper {
       List<WebElement> checkboxOptions =
           questionElement.findElements(By.cssSelector("[role='checkbox']"));
 
-      String raw = option.getText() == null ? "" : option.getText();
-      String[] tokens = raw.split("[,|]");
+      String optionText = option.getText() == null ? "" : option.getText();
+      String optionValue = option.getValue() == null ? "" : option.getValue();
+      log.info("Looking for checkbox options with text: '{}' and value: '{}'", optionText,
+          optionValue);
+
+      // First, check if this is a single "other" option selection
+      if ("__other_option__".equalsIgnoreCase(optionValue)) {
+        for (WebElement checkbox : checkboxOptions) {
+          try {
+            String dataAnswerValue = checkbox.getAttribute("data-answer-value");
+            if ("__other_option__".equalsIgnoreCase(dataAnswerValue)) {
+              wait.until(ExpectedConditions.elementToBeClickable(checkbox));
+              checkbox.click();
+              log.info("Selected checkbox __other_option__");
+              fillOtherIfPresent(driver, questionElement, option, humanLike);
+              return true;
+            }
+          } catch (Exception ignore) {
+          }
+        }
+      }
+
+      // Check if this is an "other" option with custom text (format: "7-text123" or
+      // "__other_option__-text123")
+      String otherText = extractOtherTextFromOption(optionText);
+      if (otherText != null) {
+        // This is an "other" option, select it and fill the text
+        boolean otherSelected = selectOtherCheckboxOption(wait, checkboxOptions);
+        if (otherSelected) {
+          fillOtherTextDirectly(driver, questionElement, otherText, humanLike);
+          return true;
+        }
+      }
+
+      // First, try to match the entire option text as a single option
+      // This handles cases where option text contains commas or other separators
+      boolean fullMatchFound =
+          tryMatchFullOptionText(wait, checkboxOptions, optionText, optionValue);
+      if (fullMatchFound) {
+        log.info("Found full match for checkbox option: '{}'", optionText);
+        fillOtherIfPresent(driver, questionElement, option, humanLike);
+        return true;
+      }
+
+      // If full match not found, try splitting for multiple selections using '|'
+      String raw = optionText;
+      String[] tokens = raw.split("\\|");
       boolean any = false;
       for (String tk : tokens) {
         String token = tk.trim();
@@ -453,6 +555,10 @@ public class FormFillingHelperImpl implements FormFillingHelper {
               checkbox.click();
               any = true;
               matched = true;
+              if ("__other_option__".equalsIgnoreCase(checkbox.getAttribute("data-answer-value"))
+                  || checkbox.getAttribute("data-other-checkbox") != null) {
+                fillOtherIfPresent(driver, questionElement, option, humanLike);
+              }
               break;
             }
           } catch (Exception ignore) {
@@ -477,19 +583,116 @@ public class FormFillingHelperImpl implements FormFillingHelper {
               checkbox.click();
               any = true;
               matched = true;
+              // If this selection corresponds to 'Other', fill its text
+              try {
+                if ("__other_option__".equalsIgnoreCase(checkbox.getAttribute("data-answer-value"))
+                    || checkbox.getAttribute("data-other-checkbox") != null
+                    || text.equalsIgnoreCase("Mục khác:")) {
+                  fillOtherIfPresent(driver, questionElement, option, humanLike);
+                }
+              } catch (Exception ignore) {
+              }
               break;
             }
           } catch (Exception ignore) {
           }
         }
       }
-      if (!any)
-        log.warn("Could not find checkbox option(s): {}", raw);
+      // Fallback: if input indicates Other but no match occurred above, select the Other checkbox
+      // explicitly and fill text
+      try {
+        if (optionText.toLowerCase().contains("khác")
+            || optionText.toLowerCase().contains("other")) {
+          for (WebElement checkbox : checkboxOptions) {
+            try {
+              String dataAnswerValue = checkbox.getAttribute("data-answer-value");
+              if ("__other_option__".equalsIgnoreCase(dataAnswerValue)
+                  || checkbox.getAttribute("data-other-checkbox") != null) {
+                wait.until(ExpectedConditions.elementToBeClickable(checkbox));
+                checkbox.click();
+                fillOtherIfPresent(driver, questionElement, option, humanLike);
+                return true;
+              }
+            } catch (Exception ignore) {
+            }
+          }
+        }
+      } catch (Exception ignore) {
+      }
+
       return any;
     } catch (Exception e) {
       log.error("Error filling checkbox question: {}", e.getMessage());
       return false;
     }
+  }
+
+  /**
+   * Try to match the full option text as a single option This handles cases where option text
+   * contains commas or other separators
+   */
+  private boolean tryMatchFullOptionText(WebDriverWait wait, List<WebElement> checkboxOptions,
+      String optionText, String optionValue) {
+    if (optionText == null || optionText.trim().isEmpty()) {
+      return false;
+    }
+
+    String fullText = optionText.trim();
+    log.debug("Trying to match full option text: '{}'", fullText);
+
+    // Try data-answer-value first
+    for (WebElement checkbox : checkboxOptions) {
+      try {
+        String dataAnswerValue = checkbox.getAttribute("data-answer-value");
+        if (dataAnswerValue != null
+            && (dataAnswerValue.equals(fullText) || dataAnswerValue.equalsIgnoreCase(fullText))) {
+          wait.until(ExpectedConditions.elementToBeClickable(checkbox));
+          checkbox.click();
+          log.info("Matched full option text via data-answer-value: '{}'", fullText);
+          return true;
+        }
+      } catch (Exception ignore) {
+      }
+    }
+
+    // Try aria-label
+    for (WebElement checkbox : checkboxOptions) {
+      try {
+        String aria = checkbox.getAttribute("aria-label");
+        if (aria != null && (aria.equals(fullText) || aria.equalsIgnoreCase(fullText))) {
+          wait.until(ExpectedConditions.elementToBeClickable(checkbox));
+          checkbox.click();
+          log.info("Matched full option text via aria-label: '{}'", fullText);
+          return true;
+        }
+      } catch (Exception ignore) {
+      }
+    }
+
+    // Try visible text
+    for (WebElement checkbox : checkboxOptions) {
+      try {
+        String text = checkbox.getText() == null ? "" : checkbox.getText().trim();
+        if (text.isEmpty()) {
+          try {
+            WebElement span =
+                checkbox.findElement(By.xpath(".//following-sibling::div//span[@dir='auto']"));
+            text = span.getText().trim();
+          } catch (Exception ignore) {
+          }
+        }
+        if (!text.isEmpty() && (text.equals(fullText) || text.equalsIgnoreCase(fullText))) {
+          wait.until(ExpectedConditions.elementToBeClickable(checkbox));
+          checkbox.click();
+          log.info("Matched full option text via visible text: '{}'", fullText);
+          return true;
+        }
+      } catch (Exception ignore) {
+      }
+    }
+
+    log.debug("No full match found for option text: '{}'", fullText);
+    return false;
   }
 
   private boolean fillTextQuestion(WebDriver driver, WebElement questionElement,
@@ -570,13 +773,20 @@ public class FormFillingHelperImpl implements FormFillingHelper {
       if (input == null)
         return;
 
-      String sample = option != null && option.getText() != null ? option.getText() : null;
-      if (sample != null && sample.contains("-")) {
-        sample = sample.substring(sample.lastIndexOf('-') + 1).trim();
+      // For section-aware form filling, we don't fill text here
+      // The SectionAwareFormFillerImpl will handle it separately with proper valueString access
+      // Only fill when a concrete user-provided sample is present in option text (format:
+      // "...-value")
+      String sample = null;
+      if (option != null && option.getText() != null && option.getText().contains("-")) {
+        String raw = option.getText();
+        sample = raw.substring(raw.lastIndexOf('-') + 1).trim();
       }
-      if (sample == null || sample.isEmpty() || sample.equalsIgnoreCase("__other_option__")) {
-        String uuid = java.util.UUID.randomUUID().toString().replace("-", "");
-        sample = "autogen_" + (uuid.length() >= 8 ? uuid.substring(0, 8) : uuid);
+      // If no explicit sample provided, do not fill here. Higher-level service will inject
+      // valueString.
+      if (sample == null || sample.isEmpty()) {
+        log.debug("No explicit sample provided in option text, skipping fillOtherIfPresent");
+        return;
       }
 
       try {
@@ -600,6 +810,175 @@ public class FormFillingHelperImpl implements FormFillingHelper {
     } catch (Exception e) {
       log.debug("fillOtherIfPresent error: {}", e.getMessage());
     }
+  }
+
+  /**
+   * Extract other text from option text (format: "7-text123" or "__other_option__-text123")
+   */
+  private String extractOtherTextFromOption(String optionText) {
+    if (optionText == null || optionText.trim().isEmpty()) {
+      return null;
+    }
+
+    String text = optionText.trim();
+
+    // Check if it contains dash separator
+    int dashIdx = text.lastIndexOf('-');
+    if (dashIdx > 0) {
+      String beforeDash = text.substring(0, dashIdx).trim();
+      String afterDash = text.substring(dashIdx + 1).trim();
+
+      // If before dash is a number or "__other_option__", and after dash is not empty
+      if (!afterDash.isEmpty()
+          && (beforeDash.matches("\\d+") || "__other_option__".equalsIgnoreCase(beforeDash))) {
+        log.debug("Extracted other text from option '{}': '{}'", optionText, afterDash);
+        return afterDash;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Select the "other" checkbox option
+   */
+  private boolean selectOtherCheckboxOption(WebDriverWait wait, List<WebElement> checkboxOptions) {
+    for (WebElement checkbox : checkboxOptions) {
+      try {
+        String dataValue = checkbox.getAttribute("data-answer-value");
+        String ariaLabel = checkbox.getAttribute("aria-label");
+        String checkboxText = checkbox.getText().trim();
+
+        // Check if this is the "other" option
+        if ("__other_option__".equalsIgnoreCase(dataValue)
+            || checkbox.getAttribute("data-other-checkbox") != null
+            || (ariaLabel != null && ariaLabel.toLowerCase().contains("khác"))
+            || checkboxText.equalsIgnoreCase("Mục khác:")) {
+
+          wait.until(ExpectedConditions.elementToBeClickable(checkbox));
+          checkbox.click();
+          log.info("Selected 'other' checkbox option");
+          return true;
+        }
+      } catch (Exception e) {
+        log.debug("Error checking checkbox for other option: {}", e.getMessage());
+      }
+    }
+
+    log.warn("Could not find 'other' checkbox option");
+    return false;
+  }
+
+  /**
+   * Fill other text directly with provided text
+   */
+  private void fillOtherTextDirectly(WebDriver driver, WebElement questionElement, String text,
+      boolean humanLike) {
+    try {
+      WebElement input = findOtherTextInput(questionElement);
+      if (input == null) {
+        log.warn("Could not find 'other' text input");
+        return;
+      }
+
+      // If already filled, don't overwrite
+      try {
+        String existing = input.getAttribute("value");
+        if (existing != null && !existing.trim().isEmpty()) {
+          log.debug("Other text input already filled, skipping");
+          return;
+        }
+      } catch (Exception ignored) {
+      }
+
+      WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(10));
+      wait.until(ExpectedConditions.elementToBeClickable(input));
+
+      input.click();
+      try {
+        input.clear();
+      } catch (Exception ignored) {
+      }
+
+      if (humanLike) {
+        for (char c : text.toCharArray()) {
+          input.sendKeys(String.valueOf(c));
+          try {
+            Thread.sleep(40 + new java.util.Random().nextInt(60));
+          } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            break;
+          }
+        }
+      } else {
+        input.sendKeys(text);
+      }
+      log.info("Filled 'Other' text input directly with value: {}", text);
+    } catch (Exception e) {
+      log.debug("Failed to fill 'Other' input directly: {}", e.getMessage());
+    }
+  }
+
+  /**
+   * Find the 'Other' input for the currently selected 'Other' option in this question.
+   */
+  private WebElement findOtherTextInput(WebElement questionElement) {
+    try {
+      // Primary: exact aria-label
+      List<WebElement> exact = questionElement
+          .findElements(By.cssSelector("input[type='text'][aria-label='Câu trả lời khác']"));
+      for (WebElement e : exact) {
+        if (e.isDisplayed() && e.isEnabled()) {
+          return e;
+        }
+      }
+
+      // Secondary: any input with aria-label containing 'khác' (case-insensitive)
+      List<WebElement> anyAria =
+          questionElement.findElements(By.cssSelector("input[type='text'][aria-label]"));
+      for (WebElement e : anyAria) {
+        try {
+          String aria = e.getAttribute("aria-label");
+          if (aria != null && aria.toLowerCase().contains("khác") && e.isDisplayed()
+              && e.isEnabled()) {
+            return e;
+          }
+        } catch (Exception ignored) {
+        }
+      }
+
+      // Tertiary: from label text 'Mục khác:' → following input
+      try {
+        WebElement span = questionElement
+            .findElement(By.xpath(".//span[@dir='auto' and normalize-space(.)='Mục khác:']"));
+        WebElement container = span.findElement(By.xpath("ancestor::label/following-sibling::div"));
+        WebElement input = container.findElement(By.xpath(".//input[@type='text']"));
+        if (input.isDisplayed() && input.isEnabled()) {
+          return input;
+        }
+      } catch (Exception ignored) {
+      }
+
+      // Quaternary: any text input near "other" related text
+      List<WebElement> textInputs =
+          questionElement.findElements(By.cssSelector("input[type='text']"));
+      for (WebElement input : textInputs) {
+        if (input.isDisplayed() && input.isEnabled()) {
+          // Check if this input is near "other" related text
+          try {
+            String parentText =
+                input.findElement(By.xpath("ancestor::div")).getText().toLowerCase();
+            if (parentText.contains("khác") || parentText.contains("other")) {
+              return input;
+            }
+          } catch (Exception ignore) {
+          }
+        }
+      }
+
+    } catch (Exception ignored) {
+    }
+    return null;
   }
 
   // Removed local combobox/grid fillers; use dedicated handlers for consistency

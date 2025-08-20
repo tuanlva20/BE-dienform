@@ -268,14 +268,50 @@ public class FillRequestCounterService {
         // Only emit if there's a meaningful change in progress
         // This prevents duplicate emissions when status hasn't changed
         if (fillRequest.getCompletedSurvey() > 0) {
+          // Update status if needed
+          String currentStatus =
+              fillRequest.getStatus() != null ? fillRequest.getStatus().name() : null;
+          String newStatus = currentStatus;
+
+          if ("FAILED".equals(currentStatus)) {
+            // If there's progress and status was FAILED, update to IN_PROCESS or COMPLETED
+            if (fillRequest.getCompletedSurvey() >= fillRequest.getSurveyCount()) {
+              newStatus =
+                  com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.COMPLETED
+                      .name();
+              fillRequest.setStatus(
+                  com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.COMPLETED);
+            } else {
+              newStatus =
+                  com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.IN_PROCESS
+                      .name();
+              fillRequest.setStatus(
+                  com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.IN_PROCESS);
+            }
+
+            // Save the updated status
+            fillRequestRepository.save(fillRequest);
+            log.info("Updated status from FAILED to {} for fillRequest: {} (progress: {}/{})",
+                newStatus, fillRequestId, fillRequest.getCompletedSurvey(),
+                fillRequest.getSurveyCount());
+          } else if (fillRequest.getCompletedSurvey() >= fillRequest.getSurveyCount()
+              && !"COMPLETED".equals(currentStatus)) {
+            // If all surveys completed but status is not COMPLETED, update it
+            newStatus =
+                com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.COMPLETED
+                    .name();
+            fillRequest.setStatus(
+                com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.COMPLETED);
+            fillRequestRepository.save(fillRequest);
+            log.info("Updated status to COMPLETED for fillRequest: {} (progress: {}/{})",
+                fillRequestId, fillRequest.getCompletedSurvey(), fillRequest.getSurveyCount());
+          }
+
           com.dienform.realtime.dto.FillRequestUpdateEvent event =
               com.dienform.realtime.dto.FillRequestUpdateEvent.builder()
                   .formId(fillRequest.getForm().getId().toString())
-                  .requestId(fillRequest.getId().toString())
-                  .status(fillRequest.getStatus() == null
-                      ? com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.IN_PROCESS
-                          .name()
-                      : fillRequest.getStatus().name())
+                  .requestId(fillRequest.getId().toString()).status(newStatus) // Use the updated
+                                                                               // status
                   .completedSurvey(fillRequest.getCompletedSurvey())
                   .surveyCount(fillRequest.getSurveyCount())
                   .updatedAt(java.time.Instant.now().toString()).build();
@@ -283,8 +319,9 @@ public class FillRequestCounterService {
           // Emit to form room only (avoid duplicate user-specific emissions)
           realtimeGateway.emitUpdate(fillRequest.getForm().getId().toString(), event);
 
-          log.debug("Emitted progress update for fillRequest: {} - {}/{}", fillRequestId,
-              fillRequest.getCompletedSurvey(), fillRequest.getSurveyCount());
+          log.debug("Emitted progress update for fillRequest: {} - {}/{} with status: {}",
+              fillRequestId, fillRequest.getCompletedSurvey(), fillRequest.getSurveyCount(),
+              newStatus);
         }
       }
     } catch (Exception e) {

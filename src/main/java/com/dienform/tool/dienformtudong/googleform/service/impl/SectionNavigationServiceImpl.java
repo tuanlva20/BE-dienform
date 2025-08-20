@@ -30,7 +30,7 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
   private static final By NEXT_BUTTON = By.xpath(
       "//div[@role='button' and (.//span[normalize-space()='Tiếp'] or .//span[normalize-space()='Next'])]");
   private static final By SUBMIT_BUTTON = By.xpath(
-      "//div[@role='button' and (.//span[normalize-space()='Gửi'] or .//span[normalize-space()='Submit'])]");
+      "//div[@role='button' and (.//span[contains(text(), 'Gửi')] or .//span[contains(text(), 'Submit')] or @aria-label='Submit')]");
 
   private final RequiredQuestionAutofillService requiredQuestionAutofillService;
   private final FormFillingHelper formFillingHelper;
@@ -40,6 +40,9 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
 
   @Value("${google.form.headless:true}")
   private boolean headless;
+
+  @Value("${google.form.auto-submit:true}")
+  private boolean autoSubmitEnabled;
 
   @Override
   public List<String> captureSectionHtmls(String formUrl) {
@@ -102,6 +105,17 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
       return null;
     } finally {
       if (driver != null) {
+        // Add additional delay before shutdown to ensure form submission is fully processed
+        try {
+          log.info(
+              "Waiting 3 seconds before shutdown to ensure form submission is fully processed...");
+          Thread.sleep(3000);
+          log.info("Shutdown delay completed");
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          log.warn("Interrupted during shutdown delay");
+        }
+
         try {
           driver.quit();
         } catch (Exception ignore) {
@@ -183,6 +197,17 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
       return null;
     } finally {
       if (driver != null) {
+        // Add additional delay before shutdown to ensure form submission is fully processed
+        try {
+          log.info(
+              "Waiting 3 seconds before shutdown to ensure form submission is fully processed...");
+          Thread.sleep(3000);
+          log.info("Shutdown delay completed");
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          log.warn("Interrupted during shutdown delay");
+        }
+
         try {
           driver.quit();
         } catch (Exception ignore) {
@@ -208,9 +233,13 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
         // Fill current section using single-section logic
         int filled = fillCurrentSection(driver, selections, humanLike, sectionCounter);
 
-        // If submit button visible → submit and exit
+        // If submit button visible → conditionally submit based on configuration
         if (isVisible(driver, SUBMIT_BUTTON)) {
-          clickSubmit(driver, wait, humanLike);
+          if (autoSubmitEnabled) {
+            clickSubmit(driver, wait, humanLike);
+          } else {
+            log.info("Submit button visible but auto-submit disabled; not submitting");
+          }
           return true;
         }
 
@@ -245,6 +274,17 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
       return false;
     } finally {
       if (driver != null) {
+        // Add additional delay before shutdown to ensure form submission is fully processed
+        try {
+          log.info(
+              "Waiting 3 seconds before shutdown to ensure form submission is fully processed...");
+          Thread.sleep(3000);
+          log.info("Shutdown delay completed");
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          log.warn("Interrupted during shutdown delay");
+        }
+
         try {
           driver.quit();
         } catch (Exception ignore) {
@@ -484,10 +524,49 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
         }
       }
       submit.click();
+      log.info("Clicked Submit button");
+
+      // Wait for submission confirmation with multiple approaches
+      boolean submitConfirmed = false;
       try {
-        WebDriverWait submitWait = new WebDriverWait(driver, Duration.ofSeconds(10));
+        // Wait for URL change to formResponse (primary indicator)
+        WebDriverWait submitWait = new WebDriverWait(driver, Duration.ofSeconds(20));
         submitWait.until(ExpectedConditions.urlContains("formResponse"));
-      } catch (Exception ignore) {
+        log.info("Form submitted successfully - URL contains 'formResponse'");
+        submitConfirmed = true;
+      } catch (Exception e) {
+        log.warn("Could not detect form submission via URL change: {}", e.getMessage());
+
+        // Fallback: Wait for submit button to disappear
+        try {
+          WebDriverWait fallbackWait = new WebDriverWait(driver, Duration.ofSeconds(15));
+          fallbackWait.until(ExpectedConditions.invisibilityOfElementLocated(SUBMIT_BUTTON));
+          log.info("Form submitted successfully - Submit button disappeared");
+          submitConfirmed = true;
+        } catch (Exception fallbackEx) {
+          log.warn("Could not detect submit button disappearance: {}", fallbackEx.getMessage());
+        }
+      }
+
+      // Additional wait to ensure submission is fully processed
+      if (submitConfirmed) {
+        try {
+          log.info("Waiting additional 2 seconds to ensure submission is fully processed...");
+          Thread.sleep(2000);
+          log.info("Additional wait completed");
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          log.warn("Interrupted during additional wait");
+        }
+      } else {
+        log.warn("Submit confirmation not detected, but continuing anyway");
+      }
+
+      log.info("Submit process completed - confirmed: {}", submitConfirmed);
+
+      // Additional verification: check if we can detect successful submission
+      if (submitConfirmed) {
+        verifySubmissionSuccess(driver);
       }
     } catch (Exception e) {
       log.warn("clickSubmit failed: {}", e.getMessage());
@@ -551,6 +630,46 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
       return false;
     } catch (Exception e) {
       return false;
+    }
+  }
+
+  /**
+   * Verify that form submission was successful by checking multiple indicators
+   */
+  private void verifySubmissionSuccess(WebDriver driver) {
+    try {
+      // Check if URL contains formResponse
+      String currentUrl = driver.getCurrentUrl();
+      if (currentUrl.contains("formResponse")) {
+        log.info("Submission verification: URL contains 'formResponse' - {}", currentUrl);
+      }
+
+      // Check for success message or confirmation
+      try {
+        List<WebElement> successElements = driver.findElements(By.xpath(
+            "//*[contains(text(), 'Thank you') or contains(text(), 'Cảm ơn') or contains(text(), 'submitted') or contains(text(), 'đã gửi')]"));
+        if (!successElements.isEmpty()) {
+          log.info("Submission verification: Found success message - {}", successElements.get(0)
+              .getText().substring(0, Math.min(100, successElements.get(0).getText().length())));
+        }
+      } catch (Exception e) {
+        log.debug("Could not find success message: {}", e.getMessage());
+      }
+
+      // Check if submit button is no longer visible
+      try {
+        List<WebElement> submitButtons = driver.findElements(SUBMIT_BUTTON);
+        if (submitButtons.isEmpty()) {
+          log.info("Submission verification: Submit button no longer visible");
+        } else {
+          log.warn("Submission verification: Submit button still visible");
+        }
+      } catch (Exception e) {
+        log.debug("Could not check submit button visibility: {}", e.getMessage());
+      }
+
+    } catch (Exception e) {
+      log.warn("Error during submission verification: {}", e.getMessage());
     }
   }
 }

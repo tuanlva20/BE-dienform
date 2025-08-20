@@ -634,6 +634,13 @@ public class DataFillCampaignService {
                 dataFillValidator.convertPositionToValue(main, getQuestionOptionsSafely(question));
             return (other != null && !other.isEmpty()) ? converted + "-" + other : converted;
           }
+
+          // Check if this is an "other" option with custom text (format: "7-text123")
+          if (hasOtherOption && other != null && !other.isEmpty()) {
+            // This is likely an "other" option with custom text
+            return "__other_option__" + "-" + other;
+          }
+
           // Already explicit value(s); keep optional -other suffix
           return raw;
         }
@@ -668,7 +675,7 @@ public class DataFillCampaignService {
             log.warn("Missing row label for checkbox_grid in column {}", columnName);
             return null;
           }
-          String[] parts = value.split("[,|]");
+          String[] parts = value.split("\\|");
           List<QuestionOption> columns =
               getQuestionOptionsSafely(question).stream().filter(o -> !o.isRow())
                   .sorted((a, b) -> Integer.compare(a.getPosition() == null ? 0 : a.getPosition(),

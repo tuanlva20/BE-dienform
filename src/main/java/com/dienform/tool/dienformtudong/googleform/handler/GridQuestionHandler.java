@@ -553,7 +553,7 @@ public class GridQuestionHandler {
       return tokens;
     } else {
       String text = answerValue == null ? "" : answerValue.toString();
-      String[] parts = text.split("[,|]");
+      String[] parts = text.split("\\|");
       List<String> tokens = new ArrayList<>();
       for (String p : parts) {
         String t = p.trim();
