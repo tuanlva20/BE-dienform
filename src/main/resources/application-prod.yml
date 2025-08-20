@@ -39,7 +39,7 @@ google:
   form:
     # Performance settings optimized for production
     timeout-seconds: 60
-    thread-pool-size: 4
+    thread-pool-size: 3
     max-retries: 3
     retry-delay-ms: 2000
 
