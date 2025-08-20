@@ -41,8 +41,8 @@ google:
     retry-delay-ms: 1000
 
     # Feature flags
-    auto-submit: true # Set to false for local debugging
-    headless: true # Set to false for local debugging
+    auto-submit: false # Set to false for local debugging
+    headless: false # Set to false for local debugging
     async-enabled: true
     cache-enabled: true
 

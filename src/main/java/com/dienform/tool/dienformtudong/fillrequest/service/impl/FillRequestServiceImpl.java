@@ -6,8 +6,10 @@ import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
@@ -602,14 +604,23 @@ public class FillRequestServiceImpl implements FillRequestService {
 
     FillRequest savedRequest = fillRequestRepository.save(fillRequest);
 
-    // Step 6: Create schedule distribution
+    // Step 6: Create AnswerDistribution for "other" options with valueString
+    List<AnswerDistribution> otherDistributions =
+        createOtherAnswerDistributions(savedRequest, questions, dataFillRequestDTO, sheetData);
+    if (!otherDistributions.isEmpty()) {
+      distributionRepository.saveAll(otherDistributions);
+      log.info("Created {} AnswerDistribution records for 'other' options with valueString",
+          otherDistributions.size());
+    }
+
+    // Step 7: Create schedule distribution
     // Ensure the number of scheduled tasks matches the persisted surveyCount
     int effectiveTaskCount = savedRequest.getSurveyCount();
     List<ScheduleDistributionService.ScheduledTask> schedule =
         scheduleDistributionService.distributeSchedule(effectiveTaskCount, startDate, endDate,
             Boolean.TRUE.equals(dataFillRequestDTO.getIsHumanLike()));
 
-    // Step 7: Store data mapping for campaign execution
+    // Step 8: Store data mapping for campaign execution
     List<FillRequestMapping> mappings = new ArrayList<>();
     for (var mapping : dataFillRequestDTO.getMappings()) {
       String rawQuestionId = mapping.getQuestionId();
@@ -628,7 +639,7 @@ public class FillRequestServiceImpl implements FillRequestService {
     log.info("Created data fill request with ID: {} and {} scheduled tasks with {} mappings",
         savedRequest.getId(), schedule.size(), mappings.size());
 
-    // Step 8: Optionally start the campaign immediately if startDate is now or in the past
+    // Step 9: Optionally start the campaign immediately if startDate is now or in the past
     if (startDate != null && startDate.isBefore(DateTimeUtil.nowVietnam().plusMinutes(5))) {
       log.info("Starting data fill campaign immediately for request: {}", savedRequest.getId());
 
@@ -666,6 +677,111 @@ public class FillRequestServiceImpl implements FillRequestService {
       response.put("error", true);
       return response;
     }
+  }
+
+  /**
+   * Create AnswerDistribution records for "other" options with valueString from sheet data
+   */
+  private List<AnswerDistribution> createOtherAnswerDistributions(FillRequest fillRequest,
+      List<Question> questions, DataFillRequestDTO dataFillRequestDTO,
+      List<Map<String, Object>> sheetData) {
+
+    List<AnswerDistribution> distributions = new ArrayList<>();
+    Map<UUID, Question> questionMap =
+        questions.stream().collect(Collectors.toMap(Question::getId, q -> q));
+
+    // Process each mapping to find "other" options
+    for (var mapping : dataFillRequestDTO.getMappings()) {
+      String rawQuestionId = mapping.getQuestionId();
+      String baseQuestionId = rawQuestionId;
+      if (rawQuestionId != null && rawQuestionId.contains(":")) {
+        baseQuestionId = rawQuestionId.split(":", 2)[0];
+      }
+
+      Question question = questionMap.get(UUID.fromString(baseQuestionId));
+      if (question == null) {
+        continue;
+      }
+
+      // Check if this question has "__other_option__"
+      boolean hasOtherOption =
+          question.getOptions() != null && question.getOptions().stream().anyMatch(
+              opt -> opt.getValue() != null && "__other_option__".equalsIgnoreCase(opt.getValue()));
+
+      if (!hasOtherOption) {
+        continue;
+      }
+
+      // Find the "__other_option__" option
+      QuestionOption otherOption = question.getOptions().stream()
+          .filter(
+              opt -> opt.getValue() != null && "__other_option__".equalsIgnoreCase(opt.getValue()))
+          .findFirst().orElse(null);
+
+      if (otherOption == null) {
+        continue;
+      }
+
+      // Extract column name
+      String columnName = extractColumnName(mapping.getColumnName());
+
+      // Collect all unique "other" text values from sheet data
+      Set<String> uniqueOtherTexts = new HashSet<>();
+
+      for (Map<String, Object> rowData : sheetData) {
+        Object value = rowData.get(columnName);
+        if (value == null) {
+          continue;
+        }
+
+        String valueStr = value.toString().trim();
+        int dashIdx = valueStr.lastIndexOf('-');
+
+        // Check if this is in "otherIndex-text" format
+        if (dashIdx > 0) {
+          String main = valueStr.substring(0, dashIdx).trim();
+          String otherText = valueStr.substring(dashIdx + 1).trim();
+
+          // Check if main part is a number (position) and otherText is not empty
+          if (main.matches("\\d+") && !otherText.isEmpty()) {
+            // Check if this position corresponds to the "other" option
+            try {
+              int position = Integer.parseInt(main);
+              if (otherOption.getPosition() != null && otherOption.getPosition() == position) {
+                uniqueOtherTexts.add(otherText);
+              }
+            } catch (NumberFormatException e) {
+              // Ignore if position is not a valid number
+            }
+          }
+        }
+      }
+
+      // Create AnswerDistribution for each unique "other" text
+      for (String otherText : uniqueOtherTexts) {
+        AnswerDistribution distribution = AnswerDistribution.builder().fillRequest(fillRequest)
+            .question(question).option(otherOption).percentage(100) // 100% since it's from sheet
+                                                                    // data
+            .count(1) // At least 1
+            .valueString(otherText).positionIndex(0).build();
+
+        distributions.add(distribution);
+        log.debug("Created AnswerDistribution for question {} with 'other' text: {}",
+            question.getId(), otherText);
+      }
+    }
+
+    return distributions;
+  }
+
+  /**
+   * Extract column name from formatted string "A - Column Name"
+   */
+  private String extractColumnName(String formattedColumnName) {
+    if (formattedColumnName.contains(" - ")) {
+      return formattedColumnName.substring(formattedColumnName.indexOf(" - ") + 3);
+    }
+    return formattedColumnName;
   }
 
   /**

@@ -620,6 +620,33 @@ public class DataFillCampaignService {
             }
           }
 
+          // Check if this is an "other" option with custom text (format: "7-text123")
+          if (hasOtherOption && other != null && !other.isEmpty()) {
+            // This is likely an "other" option with custom text
+            // Check if main part is a number (position) that corresponds to the "other" option
+            if (main.matches("\\d+")) {
+              try {
+                int position = Integer.parseInt(main);
+                // Find the "__other_option__" option and check if its position matches
+                QuestionOption otherOption = getQuestionOptionsSafely(question).stream()
+                    .filter(opt -> opt.getValue() != null
+                        && "__other_option__".equalsIgnoreCase(opt.getValue()))
+                    .findFirst().orElse(null);
+
+                if (otherOption != null && otherOption.getPosition() != null
+                    && otherOption.getPosition() == position) {
+                  // This is indeed an "other" option with custom text
+                  log.debug(
+                      "Converting 'other' option with position {} and text '{}' for question {}",
+                      position, other, question.getId());
+                  return "__other_option__" + "-" + other;
+                }
+              } catch (NumberFormatException e) {
+                // Ignore if position is not a valid number
+              }
+            }
+          }
+
           // If question has __other_option__ and this is not a numeric position, treat as custom
           // text for other option
           if (hasOtherOption && !main.matches("\\d+")) {
@@ -634,6 +661,7 @@ public class DataFillCampaignService {
                 dataFillValidator.convertPositionToValue(main, getQuestionOptionsSafely(question));
             return (other != null && !other.isEmpty()) ? converted + "-" + other : converted;
           }
+
           // Already explicit value(s); keep optional -other suffix
           return raw;
         }
@@ -668,7 +696,7 @@ public class DataFillCampaignService {
             log.warn("Missing row label for checkbox_grid in column {}", columnName);
             return null;
           }
-          String[] parts = value.split("[,|]");
+          String[] parts = value.split("\\|");
           List<QuestionOption> columns =
               getQuestionOptionsSafely(question).stream().filter(o -> !o.isRow())
                   .sorted((a, b) -> Integer.compare(a.getPosition() == null ? 0 : a.getPosition(),

@@ -5,6 +5,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.Semaphore;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
@@ -50,6 +53,12 @@ public class GeminiServiceClient implements AIServiceClient {
 
   @Value("${ai.suggestion.gemini.timeout:30000}")
   private Integer timeout;
+
+  @Value("${ai.suggestion.gemini.batch-size:10}")
+  private Integer batchSize;
+
+  @Value("${ai.suggestion.gemini.parallelism:3}")
+  private Integer parallelism;
 
   @Override
   public boolean isServiceAvailable() {
@@ -100,44 +109,85 @@ public class GeminiServiceClient implements AIServiceClient {
   @Override
   public AnswerAttributesResponse generateAnswerAttributes(AnswerAttributesRequest request,
       Map<String, Object> formData) {
-    log.info("Generating answer attributes for form: {}, samples: {}", request.getFormId(),
-        request.getSampleCount());
+    log.info(
+        "Generating answer attributes (batched) for form: {}, samples: {}, batchSize={}, parallelism={}",
+        request.getFormId(), request.getSampleCount(), batchSize, parallelism);
 
     try {
-      // Build the prompt for answer attributes
-      String prompt = buildAnswerAttributesPrompt(request, formData);
-      log.debug("Generated answer attributes prompt length: {} characters", prompt.length());
+      @SuppressWarnings("unchecked")
+      List<Map<String, Object>> questions =
+          (List<Map<String, Object>>) formData.getOrDefault("questions", List.of());
 
-      // Create request payload
-      Map<String, Object> requestPayload = createRequestPayload(prompt);
-
-      // Set headers (no Authorization header needed, use API key in URL)
-      HttpHeaders headers = new HttpHeaders();
-      headers.setContentType(MediaType.APPLICATION_JSON);
-
-      HttpEntity<Map<String, Object>> httpEntity = new HttpEntity<>(requestPayload, headers);
-
-      // Make API call with API key as query parameter
-      String url = baseUrl + "/" + model + ":generateContent?key=" + apiKey;
-      log.debug("Making request to Gemini API for answer attributes: {}", url);
-
-      ResponseEntity<String> response =
-          restTemplate.exchange(url, HttpMethod.POST, httpEntity, String.class);
-
-      if (response.getStatusCode() == HttpStatus.OK) {
-        return parseAnswerAttributesResponse(response.getBody(), request, formData);
-      } else {
-        throw new AISuggestionException(
-            "API request failed with status: " + response.getStatusCode());
+      if (questions.isEmpty()) {
+        return AnswerAttributesResponse.builder().formId(request.getFormId())
+            .formTitle((String) formData.getOrDefault("name", null))
+            .sampleCount(request.getSampleCount()).questionAnswerAttributes(new ArrayList<>())
+            .generatedAt(java.time.LocalDateTime.now().toString())
+            .requestId(UUID.randomUUID().toString()).build();
       }
 
+      List<List<Map<String, Object>>> batches = chunkQuestions(questions, Math.max(1, batchSize));
+      Semaphore semaphore = new Semaphore(Math.max(1, parallelism));
+
+      List<CompletableFuture<AnswerAttributesResponse>> futures = new ArrayList<>();
+      for (int idx = 0; idx < batches.size(); idx++) {
+        final int batchIndex = idx + 1;
+        final List<Map<String, Object>> batch = batches.get(idx);
+
+        futures.add(CompletableFuture.supplyAsync(() -> {
+          try {
+            semaphore.acquire();
+            long start = System.currentTimeMillis();
+            Map<String, Object> partialFormData = buildPartialFormData(formData, batch);
+            log.info("Processing batch {}/{} with {} questions", batchIndex, batches.size(),
+                batch.size());
+            AnswerAttributesResponse partial = invokeGeminiOnce(request, partialFormData);
+            log.info("Completed batch {}/{} in {}ms", batchIndex, batches.size(),
+                System.currentTimeMillis() - start);
+            return partial;
+          } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new AISuggestionException("Batch " + batchIndex + " interrupted");
+          } catch (AISuggestionException | JsonProcessingException ex) {
+            throw new AISuggestionException("Batch " + batchIndex + " failed: " + ex.getMessage(),
+                ex);
+          } finally {
+            semaphore.release();
+          }
+        }));
+      }
+
+      CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+
+      List<AnswerAttributesResponse.QuestionAnswerAttribute> all = new ArrayList<>();
+      String formTitle = (String) formData.getOrDefault("name", null);
+
+      for (CompletableFuture<AnswerAttributesResponse> f : futures) {
+        AnswerAttributesResponse partial = f.join();
+        if (formTitle == null && partial.getFormTitle() != null) {
+          formTitle = partial.getFormTitle();
+        }
+        mergeQuestionAttributes(all, partial.getQuestionAnswerAttributes());
+      }
+
+      return AnswerAttributesResponse.builder().formId(request.getFormId()).formTitle(formTitle)
+          .sampleCount(request.getSampleCount()).questionAnswerAttributes(all)
+          .generatedAt(java.time.LocalDateTime.now().toString())
+          .requestId(UUID.randomUUID().toString()).build();
+
+    } catch (CompletionException ce) {
+      Throwable cause = ce.getCause() != null ? ce.getCause() : ce;
+      if (cause instanceof TokenLimitExceededException) {
+        throw (TokenLimitExceededException) cause;
+      }
+      log.error("Error generating answer attributes (batched) for form {}: {}", request.getFormId(),
+          cause.getMessage(), cause);
+      throw new AISuggestionException("Failed to generate answer attributes: " + cause.getMessage(),
+          cause);
     } catch (TokenLimitExceededException e) {
       throw e;
     } catch (AISuggestionException e) {
       throw e;
-    } catch (JsonProcessingException e) {
-      log.error("Error processing JSON response: {}", e.getMessage(), e);
-      throw new AISuggestionException("Failed to process AI response: " + e.getMessage());
     } catch (Exception e) {
       log.error("Error generating answer attributes: {}", e.getMessage(), e);
       throw new AISuggestionException("Failed to generate answer attributes: " + e.getMessage());
@@ -212,6 +262,8 @@ public class GeminiServiceClient implements AIServiceClient {
     }
 
     prompt.append("HƯỚNG DẪN:\n");
+    prompt.append(
+        "Chỉ xử lý các câu hỏi có trong mảng 'questions' của CẤU TRÚC FORM ở trên. Không tạo thêm câu hỏi không có trong dữ liệu.\n");
     prompt.append("1. Phân tích từng câu hỏi trong form\n");
     prompt.append("2. Tạo ra tỉ lệ phân bố cho các đáp án (tổng = 100%)\n");
     prompt.append("3. Với câu hỏi text:\n"
@@ -311,6 +363,79 @@ public class GeminiServiceClient implements AIServiceClient {
     prompt.append("Hãy tạo ra answer attributes hoàn chỉnh cho tất cả câu hỏi trong form.");
 
     return prompt.toString();
+  }
+
+  private AnswerAttributesResponse invokeGeminiOnce(AnswerAttributesRequest request,
+      Map<String, Object> partialFormData) throws JsonProcessingException {
+
+    // Build the prompt for answer attributes
+    String prompt = buildAnswerAttributesPrompt(request, partialFormData);
+    log.debug("Generated answer attributes prompt length: {} characters", prompt.length());
+
+    // Create request payload
+    Map<String, Object> requestPayload = createRequestPayload(prompt);
+
+    // Set headers (no Authorization header needed, use API key in URL)
+    HttpHeaders headers = new HttpHeaders();
+    headers.setContentType(MediaType.APPLICATION_JSON);
+
+    HttpEntity<Map<String, Object>> httpEntity = new HttpEntity<>(requestPayload, headers);
+
+    // Make API call with API key as query parameter
+    String url = baseUrl + "/" + model + ":generateContent?key=" + apiKey;
+    log.debug("Making request to Gemini API for answer attributes: {}", url);
+
+    ResponseEntity<String> response =
+        restTemplate.exchange(url, HttpMethod.POST, httpEntity, String.class);
+
+    if (response.getStatusCode() == HttpStatus.OK) {
+      return parseAnswerAttributesResponse(response.getBody(), request, partialFormData);
+    } else {
+      throw new AISuggestionException(
+          "API request failed with status: " + response.getStatusCode());
+    }
+  }
+
+  private List<List<Map<String, Object>>> chunkQuestions(List<Map<String, Object>> questions,
+      int size) {
+    List<List<Map<String, Object>>> chunks = new ArrayList<>();
+    if (questions == null || questions.isEmpty()) {
+      return chunks;
+    }
+    int chunkSize = Math.max(1, size);
+    for (int i = 0; i < questions.size(); i += chunkSize) {
+      chunks.add(questions.subList(i, Math.min(i + chunkSize, questions.size())));
+    }
+    return chunks;
+  }
+
+  private Map<String, Object> buildPartialFormData(Map<String, Object> formData,
+      List<Map<String, Object>> questionBatch) {
+    Map<String, Object> partial = new HashMap<>(formData);
+    partial.put("questions", new ArrayList<>(questionBatch));
+    return partial;
+  }
+
+  private void mergeQuestionAttributes(List<AnswerAttributesResponse.QuestionAnswerAttribute> total,
+      List<AnswerAttributesResponse.QuestionAnswerAttribute> part) {
+    if (part == null || part.isEmpty()) {
+      return;
+    }
+    java.util.Set<String> seen = new java.util.HashSet<>();
+    for (AnswerAttributesResponse.QuestionAnswerAttribute qa : total) {
+      if (qa.getQuestionId() != null) {
+        seen.add(qa.getQuestionId());
+      }
+    }
+    for (AnswerAttributesResponse.QuestionAnswerAttribute qa : part) {
+      String qid = qa.getQuestionId();
+      if (qid == null || !seen.contains(qid)) {
+        total.add(qa);
+        if (qid != null) {
+          seen.add(qid);
+        }
+      }
+    }
   }
 
   private AnswerAttributesResponse parseAnswerAttributesResponse(String responseBody,

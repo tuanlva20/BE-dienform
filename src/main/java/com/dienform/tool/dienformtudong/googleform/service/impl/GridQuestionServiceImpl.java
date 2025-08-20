@@ -51,7 +51,7 @@ public class GridQuestionServiceImpl implements GridQuestionService {
         if (multiRowMatcher.matches()) {
           String row = multiRowMatcher.group(1).trim();
           String optionsPart = multiRowMatcher.group(2).trim();
-          if (optionsPart.contains(",") || optionsPart.contains("|")) {
+          if (optionsPart.contains("|")) {
             List<String> options = parseMultipleOptions(optionsPart);
             rowAnswers.put(row, options);
           } else {
@@ -72,7 +72,7 @@ public class GridQuestionServiceImpl implements GridQuestionService {
       String optionsPart = gridMatcher.group(2).trim();
 
       // Check if options part contains multiple options
-      if (optionsPart.contains(",") || optionsPart.contains("|")) {
+      if (optionsPart.contains("|")) {
         List<String> options = parseMultipleOptions(optionsPart);
         Map<String, Object> rowAnswers = new HashMap<>();
         rowAnswers.put(row, options);
@@ -89,7 +89,7 @@ public class GridQuestionServiceImpl implements GridQuestionService {
     }
 
     // No row specified, check if it contains multiple options
-    if (normalizedText.contains(",") || normalizedText.contains("|")) {
+    if (normalizedText.contains("|")) {
       List<String> options = parseMultipleOptions(normalizedText);
       Map<String, Object> rowAnswers = new HashMap<>();
       rowAnswers.put("all", options); // Use "all" to indicate all rows
@@ -246,11 +246,11 @@ public class GridQuestionServiceImpl implements GridQuestionService {
   }
 
   /**
-   * Parse multiple options separated by commas
+   * Parse multiple options separated by '|'
    */
   private List<String> parseMultipleOptions(String optionsText) {
     List<String> options = new ArrayList<>();
-    String[] parts = optionsText.split("[,|]");
+    String[] parts = optionsText.split("\\|");
     for (String part : parts) {
       String trimmed = part.trim();
       if (!trimmed.isEmpty()) {
