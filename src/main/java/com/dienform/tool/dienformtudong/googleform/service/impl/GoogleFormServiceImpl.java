@@ -695,7 +695,15 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                 }
 
                 QuestionOption option = new QuestionOption();
-                option.setText(main);
+                // Always set value to the resolved main token so data-value matching works
+                option.setValue(main);
+                // Preserve raw text for '__other_option__-text' so helper can extract and fill
+                if ("__other_option__".equalsIgnoreCase(main) && other != null
+                        && !other.isEmpty()) {
+                    option.setText(raw);
+                } else {
+                    option.setText(main);
+                }
                 option.setQuestion(question);
 
                 selections.put(question, option);

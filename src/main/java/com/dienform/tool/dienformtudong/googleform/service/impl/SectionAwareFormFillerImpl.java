@@ -106,6 +106,36 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
           }
         }
       }
+      // Merge per-submission selections to capture explicit other text like "__other_option__-text"
+      try {
+        if (selections != null && !selections.isEmpty()) {
+          for (Map.Entry<Question, QuestionOption> e : selections.entrySet()) {
+            try {
+              Question q = e.getKey();
+              QuestionOption opt = e.getValue();
+              if (q == null || opt == null)
+                continue;
+              String t = opt.getText();
+              if (t == null)
+                continue;
+              int di = t.lastIndexOf('-');
+              if (di > 0) {
+                String before = t.substring(0, di).trim();
+                String after = t.substring(di + 1).trim();
+                if (!after.isEmpty()
+                    && ("__other_option__".equalsIgnoreCase(before) || before.matches("\\d+"))) {
+                  localOtherText.put(q.getId(), after);
+                }
+              }
+            } catch (Exception ignore) {
+            }
+          }
+        }
+      } catch (Exception mergeIgnore) {
+        log.debug("Failed merging per-submission selections for other text: {}",
+            mergeIgnore.getMessage());
+      }
+
       dataFillOtherTextByQuestion.set(localOtherText);
       log.info("Set up 'Other' text mapping for {} questions: {}", localOtherText.size(),
           localOtherText);
@@ -526,7 +556,26 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
                   }
                 }
                 if (needsOtherFill) {
-                  fillOtherTextForQuestion(driver, questionElement, question.getId(), humanLike);
+                  // Prefer explicit sample from option text if present (e.g.,
+                  // "__other_option__-text")
+                  String optText = option.getText();
+                  String explicit = null;
+                  if (optText != null) {
+                    int di = optText.lastIndexOf('-');
+                    if (di > 0) {
+                      String before = optText.substring(0, di).trim();
+                      String after = optText.substring(di + 1).trim();
+                      if (!after.isEmpty() && ("__other_option__".equalsIgnoreCase(before)
+                          || before.matches("\\d+"))) {
+                        explicit = after;
+                      }
+                    }
+                  }
+                  if (explicit != null) {
+                    fillOtherTextDirectly(driver, questionElement, explicit, humanLike);
+                  } else {
+                    fillOtherTextForQuestion(driver, questionElement, question.getId(), humanLike);
+                  }
                 }
               }
             } catch (Exception ignore) {
@@ -1420,6 +1469,55 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
 
     log.debug("getOtherTextForPosition returning: {}", sampleText);
     return sampleText;
+  }
+
+  /**
+   * Fill 'Other' text input directly with provided sample text
+   */
+  private void fillOtherTextDirectly(WebDriver driver, WebElement questionElement, String text,
+      boolean humanLike) {
+    try {
+      WebElement input = findOtherTextInput(questionElement);
+      if (input == null) {
+        log.warn("Could not find 'other' text input for direct fill");
+        return;
+      }
+
+      // If already filled, don't overwrite
+      try {
+        String existing = input.getAttribute("value");
+        if (existing != null && !existing.trim().isEmpty()) {
+          return;
+        }
+      } catch (Exception ignored) {
+      }
+
+      WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(10));
+      wait.until(ExpectedConditions.elementToBeClickable(input));
+
+      input.click();
+      try {
+        input.clear();
+      } catch (Exception ignored) {
+      }
+
+      if (humanLike) {
+        for (char c : text.toCharArray()) {
+          input.sendKeys(String.valueOf(c));
+          try {
+            Thread.sleep(40 + new java.util.Random().nextInt(60));
+          } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            break;
+          }
+        }
+      } else {
+        input.sendKeys(text);
+      }
+      log.info("Filled 'Other' text input directly with value: {}", text);
+    } catch (Exception e) {
+      log.debug("Failed to fill 'Other' input directly: {}", e.getMessage());
+    }
   }
 
   /**
