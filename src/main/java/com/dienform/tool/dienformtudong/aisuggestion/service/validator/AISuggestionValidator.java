@@ -26,6 +26,12 @@ public class AISuggestionValidator {
   @Value("${ai.suggestion.validation.min-sample-count:1}")
   private Integer minSampleCount;
 
+  @Value("${ai.suggestion.validation.max-instruction-length:500}")
+  private Integer maxInstructionLength;
+
+  @Value("${ai.suggestion.validation.max-sample-count-for-large-forms:1000}")
+  private Integer maxSampleCountForLargeForms;
+
   /**
    * Validate AI suggestion request
    *
@@ -149,8 +155,8 @@ public class AISuggestionValidator {
     }
 
     if (request.getAdditionalInstructions() != null
-        && request.getAdditionalInstructions().length() > 500) {
-      errors.add("Additional instructions cannot exceed 500 characters");
+        && request.getAdditionalInstructions().length() > maxInstructionLength) {
+      errors.add("Additional instructions cannot exceed " + maxInstructionLength + " characters");
     }
   }
 
@@ -223,8 +229,9 @@ public class AISuggestionValidator {
 
     if (request.getSampleCount() != null && questionCount > 0) {
       // For large forms with many questions, suggest reasonable sample limits
-      if (questionCount > 20 && request.getSampleCount() > 500) {
-        errors.add("For forms with more than 20 questions, sample count should not exceed 500");
+      if (questionCount > 1000 && request.getSampleCount() > maxSampleCountForLargeForms) {
+        errors.add("For forms with more than 100 questions, sample count should not exceed "
+            + maxSampleCountForLargeForms);
       }
     }
 
@@ -270,8 +277,9 @@ public class AISuggestionValidator {
 
     if (request.getSampleCount() != null && questionCount > 0) {
       // For large forms with many questions, suggest reasonable sample limits
-      if (questionCount > 20 && request.getSampleCount() > 500) {
-        errors.add("For forms with more than 20 questions, sample count should not exceed 500");
+      if (questionCount > 1000 && request.getSampleCount() > maxSampleCountForLargeForms) {
+        errors.add("For forms with more than 100 questions, sample count should not exceed "
+            + maxSampleCountForLargeForms);
       }
     }
 

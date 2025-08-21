@@ -11,7 +11,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import com.dienform.config.CampaignSchedulerConfig;
+import com.dienform.config.CampaignSchedulerConfig.CampaignSchedulerProperties;
 import com.dienform.tool.dienformtudong.datamapping.dto.request.ColumnMapping;
 import com.dienform.tool.dienformtudong.datamapping.dto.request.DataFillRequestDTO;
 import com.dienform.tool.dienformtudong.fillrequest.entity.FillRequest;
@@ -45,7 +45,7 @@ public class SurveySchedulerService {
   private final FillRequestMappingRepository fillRequestMappingRepository;
   private final FormRepository formRepository;
   private final QuestionRepository questionRepository;
-  private final CampaignSchedulerConfig schedulerConfig;
+  private final CampaignSchedulerProperties schedulerConfig;
   private final GoogleFormServiceImpl googleFormServiceImpl;
 
   @Autowired
@@ -64,7 +64,7 @@ public class SurveySchedulerService {
    * Scheduled task that checks for PENDING campaigns and starts them when scheduled Rate is
    * configurable via application-local.yml (campaign.scheduler.fixed-rate)
    */
-  @Scheduled(fixedRateString = "#{@campaignSchedulerConfig.fixedRate}")
+  @Scheduled(fixedRateString = "#{@campaignSchedulerProperties.fixedRate}")
   @Transactional
   public void checkPendingCampaigns() {
     if (!schedulerConfig.isEnabled()) {
@@ -78,7 +78,7 @@ public class SurveySchedulerService {
     LocalDateTime checkTime = now.plusMinutes(1); // Include campaigns starting in next minute
 
     List<FillRequest> pendingCampaigns = fillRequestRepository
-        .findByStatusAndStartDateLessThanEqual(FillRequestStatusEnum.PENDING.name(), checkTime);
+        .findByStatusAndStartDateLessThanEqual(FillRequestStatusEnum.PENDING, checkTime);
 
     if (pendingCampaigns.isEmpty()) {
       log.debug("No PENDING campaigns ready to start");
@@ -129,7 +129,7 @@ public class SurveySchedulerService {
     // Find campaigns that have been running for more than 30 minutes
     LocalDateTime thirtyMinutesAgo = LocalDateTime.now().minusMinutes(30);
     List<FillRequest> stuckCampaigns = fillRequestRepository.findByStatusAndStartDateLessThan(
-        FillRequestStatusEnum.IN_PROCESS.name(), thirtyMinutesAgo);
+        FillRequestStatusEnum.IN_PROCESS, thirtyMinutesAgo);
 
     if (stuckCampaigns.isEmpty()) {
       log.debug("No stuck RUNNING campaigns found");

@@ -119,8 +119,9 @@ public class GoogleSheetsValidator {
     // Step 1: Basic URL format validation
     ValidationResult basicValidation = validateUrlFormat(sheetUrl);
     if (!basicValidation.isValid()) {
-      return createInaccessibleResponse(basicValidation.getMessage(),
-          "Please provide a valid Google Sheets URL");
+      return createInaccessibleResponse(
+          "Link không hợp lệ: chỉ chấp nhận Google Sheets (docs.google.com/spreadsheets). Nếu là file .xlsx, hãy dùng API /api/data-mapping/upload",
+          "Dùng link Google Sheets hoặc chuyển sang endpoint upload Excel");
     }
 
     String spreadsheetId = basicValidation.getSpreadsheetId();
@@ -156,7 +157,8 @@ public class GoogleSheetsValidator {
     }
 
     // Step 4: Not accessible
-    return createInaccessibleResponse("Sheet is not accessible with current permissions",
+    return createInaccessibleResponse(
+        "Link không hợp lệ: chỉ chấp nhận Google Sheets (docs.google.com/spreadsheets). Hãy đảm bảo link đã được public!",
         "Check sheet permissions or contact sheet owner");
   }
 
