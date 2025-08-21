@@ -97,26 +97,28 @@ public class FormServiceImpl implements FormService {
     Form form = formMapper.toEntity(formRequest);
     currentUserUtil.getCurrentUserIfPresent().ifPresent(form::setCreatedBy);
 
-    // If form name is null or empty, extract title from Google Form and append user-specific form
-    // count
+    // Extract both title and questions from Google Form in a single browser session
+    GoogleFormService.FormExtractionResult formData =
+        googleFormService.extractFormData(formRequest.getEditLink());
+
+    // If form name is null or empty, use extracted title and append count based on existing forms
+    // with same title
     if (form.getName() == null || form.getName().trim().isEmpty()) {
-      String title = googleFormService.extractTitleFromFormLink(form.getEditLink());
-
-      // Count forms created by current user; fallback to global count if not authenticated
-      long formCountForUser = currentUserUtil.getCurrentUserIdIfPresent()
-          .map(formRepository::countByCreatedBy_Id).orElse(0L);
-
-      long nextOrdinal = formCountForUser + 1;
-
-      if (title != null && !title.trim().isEmpty()) {
-        form.setName(title + " #" + nextOrdinal);
-        log.info("Using extracted title with user-specific count as form name: {}", form.getName());
-      } else {
-        form.setName("Form #" + nextOrdinal);
-        log.warn(
-            "Could not extract title from Google Form, using default name with user-specific count: {}",
-            form.getName());
+      String baseTitle = formData.getTitle();
+      if (baseTitle == null || baseTitle.trim().isEmpty()) {
+        baseTitle = "Form";
       }
+
+      final String finalBaseTitle = baseTitle;
+      long existingCount = currentUserUtil.getCurrentUserIdIfPresent()
+          .map(userId -> formRepository.countByCreatedBy_IdAndNameStartingWithIgnoreCase(userId,
+              finalBaseTitle))
+          .orElseGet(() -> formRepository.countByNameStartingWithIgnoreCase(finalBaseTitle));
+
+      long nextOrdinal = existingCount + 1;
+      form.setName(baseTitle + " #" + nextOrdinal);
+      log.info("Using title-based count for form name: {} (existing: {}, next: {})", form.getName(),
+          existingCount, nextOrdinal);
     }
 
     form.setStatus(FormStatusEnum.CREATED);
@@ -127,9 +129,8 @@ public class FormServiceImpl implements FormService {
         .completedSurvey(0).failedSurvey(0).errorQuestion(0).build();
     statisticRepository.save(statistic);
 
-    // Extract and save questions from Google Form
-    List<ExtractedQuestion> extractedQuestions =
-        googleFormService.readGoogleForm(formRequest.getEditLink());
+    // Save questions from extracted data
+    List<ExtractedQuestion> extractedQuestions = formData.getQuestions();
     extractedQuestions.forEach(q -> {
       Question question = Question.builder().form(savedForm).title(q.getTitle())
           .description(q.getDescription()).type(q.getType()).required(q.isRequired())
@@ -253,6 +254,14 @@ public class FormServiceImpl implements FormService {
     SortUtil.sortFillRequestsByCreatedAt(form);
 
     return form;
+  }
+
+  @Override
+  public java.util.List<FormResponse> getAllFormsByUserId(UUID userId) {
+    log.info("Getting all forms for user: {}", userId);
+
+    List<Form> forms = formRepository.findByCreatedBy_IdOrderByCreatedAtDesc(userId);
+    return forms.stream().map(formMapper::toResponse).collect(java.util.stream.Collectors.toList());
   }
 
 }

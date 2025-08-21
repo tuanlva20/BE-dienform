@@ -346,6 +346,7 @@ public class GeminiServiceClient implements AIServiceClient {
     prompt.append("LƯU Ý QUAN TRỌNG:\n");
     prompt.append("- Với grid questions (multiple_choice_grid, checkbox_grid):\n");
     prompt.append("  * Sử dụng cấu trúc gridRowDistributions thay vì optionDistributions\n");
+    prompt.append("  * Không tạo tỉ lệ cho các option_value:'row_[index]' chỉ tạo tỉ lệ cho option của row\n");
     prompt.append("  * Mỗi row có phân bổ riêng cho các column options\n");
     prompt.append("  * Tổng percentage của các column options trong mỗi row phải = 100%\n");
     prompt.append("  * Ví dụ: Row 'Ngày đầu sự kiện' có 4 columns với tổng % = 100%\n");

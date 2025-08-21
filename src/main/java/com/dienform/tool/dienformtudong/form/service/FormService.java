@@ -21,4 +21,12 @@ public interface FormService {
     void deleteForm(UUID formId);
 
     Form findByIdWithFetch(UUID id);
+
+    /**
+     * Get all forms for a specific user without pagination (for combobox)
+     * 
+     * @param userId The user ID to filter forms by
+     * @return List of form responses
+     */
+    java.util.List<FormResponse> getAllFormsByUserId(UUID userId);
 }

@@ -8,6 +8,7 @@ import com.dienform.tool.dienformtudong.form.repository.FormRepository;
 import com.dienform.tool.dienformtudong.googleform.service.FormFillingOrchestrator;
 import com.dienform.tool.dienformtudong.googleform.service.FormStructureAnalyzer;
 import com.dienform.tool.dienformtudong.googleform.service.SectionAwareFormFiller;
+import com.dienform.tool.dienformtudong.googleform.service.SectionNavigationService;
 import com.dienform.tool.dienformtudong.question.entity.Question;
 import com.dienform.tool.dienformtudong.question.entity.QuestionOption;
 import lombok.RequiredArgsConstructor;
@@ -23,6 +24,7 @@ public class FormFillingOrchestratorImpl implements FormFillingOrchestrator {
 
   private final FormStructureAnalyzer formStructureAnalyzer;
   private final SectionAwareFormFiller sectionAwareFormFiller;
+  private final SectionNavigationService sectionNavigationService;
   private final FormRepository formRepository;
 
   @Override
@@ -46,21 +48,61 @@ public class FormFillingOrchestratorImpl implements FormFillingOrchestrator {
         return existingFillMethod.fill(fillRequestId, formId, formUrl, selections, humanLike);
       }
 
-      // Form has sections, use section-aware logic
-      log.info("Form {} has sections, using section-aware fill logic", formId);
-      return sectionAwareFormFiller.fillFormWithSections(fillRequestId, formId, formUrl, selections,
-          humanLike);
+      // Form has sections, try section-aware logic first
+      log.info("Form {} has sections, trying section-aware fill logic", formId);
+      try {
+        boolean success = sectionAwareFormFiller.fillFormWithSections(fillRequestId, formId,
+            formUrl, selections, humanLike);
+        if (success) {
+          log.info("Section-aware form filling completed successfully for request: {}",
+              fillRequestId);
+          return true;
+        } else {
+          log.warn("Section-aware form filling failed for request: {}, trying fallback",
+              fillRequestId);
+        }
+      } catch (Exception sectionAwareError) {
+        log.warn("Section-aware form filling threw exception for request {}: {}", fillRequestId,
+            sectionAwareError.getMessage());
+      }
+
+      // Fallback to SectionNavigationService for multi-section forms
+      log.info("Trying SectionNavigationService fallback for request: {}", fillRequestId);
+      try {
+        boolean success = sectionNavigationService.fillSections(formUrl, selections, humanLike);
+        if (success) {
+          log.info("SectionNavigationService fallback completed successfully for request: {}",
+              fillRequestId);
+          return true;
+        } else {
+          log.warn("SectionNavigationService fallback failed for request: {}", fillRequestId);
+        }
+      } catch (Exception navigationError) {
+        log.warn("SectionNavigationService fallback threw exception for request {}: {}",
+            fillRequestId, navigationError.getMessage());
+      }
+
+      // Final fallback to existing logic
+      log.info("Falling back to existing fill logic for request: {}", fillRequestId);
+      try {
+        return existingFillMethod.fill(fillRequestId, formId, formUrl, selections, humanLike);
+      } catch (Exception fallbackError) {
+        log.error("All form filling methods failed for request {}: {}", fillRequestId,
+            fallbackError.getMessage());
+        return false;
+      }
 
     } catch (Exception e) {
       log.error("Error in form filling orchestration for request {}: {}", fillRequestId,
           e.getMessage(), e);
 
-      // Fallback to existing logic if section-aware logic fails
-      log.info("Falling back to existing fill logic for request: {}", fillRequestId);
+      // Final fallback to existing logic if orchestration fails
+      log.info("Orchestration failed, trying final fallback to existing fill logic for request: {}",
+          fillRequestId);
       try {
         return existingFillMethod.fill(fillRequestId, formId, formUrl, selections, humanLike);
       } catch (Exception fallbackError) {
-        log.error("Fallback fill logic also failed for request {}: {}", fillRequestId,
+        log.error("Final fallback fill logic also failed for request {}: {}", fillRequestId,
             fallbackError.getMessage());
         return false;
       }

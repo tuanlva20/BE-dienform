@@ -12,6 +12,7 @@ import com.dienform.tool.dienformtudong.fillrequest.entity.FillRequest;
 @Mapper(componentModel = MappingConstants.ComponentModel.SPRING)
 public interface FillRequestMapper {
 
+  @Mapping(source = "humanLike", target = "humanLike")
   @Mapping(target = "answerDistributions", source = "answerDistributions",
       qualifiedByName = "mapAnswerDistributions")
   FillRequestResponse toReponse(FillRequest fillRequest);

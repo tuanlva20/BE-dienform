@@ -21,7 +21,19 @@ public interface FormRepository extends JpaRepository<Form, UUID> {
 
     long countByCreatedBy_Id(UUID createdById);
 
+    long countByCreatedBy_IdAndNameStartingWithIgnoreCase(UUID createdById, String namePrefix);
+
+    long countByNameStartingWithIgnoreCase(String namePrefix);
+
     @EntityGraph(attributePaths = {"formStatistic", "questions.options"})
     @Query("SELECT f FROM Form f WHERE f.id = :id")
     Optional<Form> findByIdWithFetch(UUID id);
+
+    /**
+     * Find all forms by created by ID, ordered by created date descending
+     * 
+     * @param createdById The user ID who created the forms
+     * @return List of forms ordered by creation date descending
+     */
+    java.util.List<Form> findByCreatedBy_IdOrderByCreatedAtDesc(UUID createdById);
 }

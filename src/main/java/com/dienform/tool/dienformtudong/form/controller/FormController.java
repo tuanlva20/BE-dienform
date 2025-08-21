@@ -55,6 +55,15 @@ public class FormController {
         return ResponseEntity.ok(form);
     }
 
+    @GetMapping("/user/all")
+    public ResponseModel<?> getAllFormsByCurrentUser() {
+        UUID userId = currentUserUtil.getCurrentUserIdIfPresent()
+                .orElseThrow(() -> new RuntimeException("User not authenticated"));
+
+        java.util.List<FormResponse> forms = formService.getAllFormsByUserId(userId);
+        return ResponseModel.success(forms, HttpStatus.OK);
+    }
+
     @PostMapping
     public ResponseEntity<FormResponse> createForm(@Valid @RequestBody FormRequest formRequest) {
         FormResponse createdForm = formService.createForm(formRequest);

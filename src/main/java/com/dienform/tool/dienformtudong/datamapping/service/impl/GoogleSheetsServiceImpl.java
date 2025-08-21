@@ -219,8 +219,9 @@ public class GoogleSheetsServiceImpl implements GoogleSheetsService {
       throw new RuntimeException("Google API key is required for private sheets");
     }
 
+    // Use a much larger range to ensure we get all columns (up to 1000 columns)
     String url =
-        String.format("https://sheets.googleapis.com/v4/spreadsheets/%s/values/A1:Z1?key=%s",
+        String.format("https://sheets.googleapis.com/v4/spreadsheets/%s/values/A1:ALL1?key=%s",
             spreadsheetId, googleApiKey);
 
     try {
@@ -237,6 +238,7 @@ public class GoogleSheetsServiceImpl implements GoogleSheetsService {
             columns.add(cellValue);
           }
         }
+        log.info("Retrieved {} columns from Google Sheets API", columns.size());
         return columns;
       }
 
@@ -255,8 +257,10 @@ public class GoogleSheetsServiceImpl implements GoogleSheetsService {
       throw new RuntimeException("Google API key is required for private sheets");
     }
 
-    String url = String.format("https://sheets.googleapis.com/v4/spreadsheets/%s/values/A:Z?key=%s",
-        spreadsheetId, googleApiKey);
+    // Use a much larger range to ensure we get all columns and rows
+    String url =
+        String.format("https://sheets.googleapis.com/v4/spreadsheets/%s/values/A:ALL?key=%s",
+            spreadsheetId, googleApiKey);
 
     try {
       String response = restTemplate.getForObject(url, String.class);
@@ -273,6 +277,9 @@ public class GoogleSheetsServiceImpl implements GoogleSheetsService {
       for (JsonNode cell : headerRow) {
         headers.add(cell.asText());
       }
+
+      log.info("Retrieved {} columns and {} rows from Google Sheets API", headers.size(),
+          values.size() - 1);
 
       // Convert remaining rows to Map
       List<Map<String, Object>> data = new ArrayList<>();

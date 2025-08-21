@@ -4,6 +4,7 @@ import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -44,7 +45,8 @@ public class FillRequestResponse {
     private int surveyCount;
     private BigDecimal pricePerSurvey;
     private BigDecimal totalPrice;
-    private boolean isHumanLike;
+    @JsonProperty("isHumanLike")
+    private boolean humanLike;
     private LocalDateTime createdAt;
     private LocalDateTime startDate;
     private LocalDateTime endDate;

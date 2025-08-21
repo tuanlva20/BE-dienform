@@ -16,6 +16,19 @@ public interface RequiredQuestionAutofillService {
    * @return true if likely satisfied, false otherwise
    */
   boolean satisfyRequiredQuestions(WebDriver driver);
+
+  /**
+   * Check if the Next button is ready to be clicked (enabled and visible)
+   *
+   * @param driver active Selenium WebDriver at current section
+   * @return true if Next button is ready, false otherwise
+   */
+  boolean isNextButtonReady(WebDriver driver);
+
+  /**
+   * Clear autofill tracking (call this when starting a new form)
+   */
+  void clearAutofillTracking();
 }
 
 
