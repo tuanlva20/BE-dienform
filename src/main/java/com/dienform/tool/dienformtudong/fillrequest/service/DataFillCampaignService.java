@@ -197,7 +197,7 @@ public class DataFillCampaignService {
                     && successfulTasks.get() == totalTasks) {
                   finalStatus = FillRequestStatusEnum.COMPLETED;
                 } else if (successfulTasks.get() == 0 || successfulTasks.get() < totalTasks) {
-                  finalStatus = FillRequestStatusEnum.FAILED;
+                  finalStatus = FillRequestStatusEnum.IN_PROCESS;
                 } else {
                   // Not all persisted yet, keep IN_PROCESS; caller may check later
                   finalStatus = FillRequestStatusEnum.IN_PROCESS;
@@ -254,7 +254,7 @@ public class DataFillCampaignService {
 
     } catch (Exception e) {
       log.error("Failed to initialize campaign: {}", fillRequest.getId(), e);
-      updateFillRequestStatus(fillRequest, FillRequestStatusEnum.FAILED);
+      updateFillRequestStatus(fillRequest, FillRequestStatusEnum.PENDING);
       executionFuture.complete(null);
     }
 

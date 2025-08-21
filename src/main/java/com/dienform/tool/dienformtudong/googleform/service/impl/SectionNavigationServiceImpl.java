@@ -412,46 +412,150 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
       }
 
       int sectionCounter = 0;
-      while (true) {
+      int maxSections = 50; // Prevent infinite loops
+
+      while (sectionCounter < maxSections) {
+        log.info("Processing section {} (attempt {}/{})", sectionCounter, sectionCounter + 1,
+            maxSections);
+
         // Fill current section using single-section logic
         int filled = fillCurrentSection(driver, selections, humanLike, sectionCounter);
 
-        // If submit button visible → conditionally submit based on configuration
+        // CRITICAL FIX: Check for Submit button first
         if (isVisible(driver, SUBMIT_BUTTON)) {
+          log.info("Submit button visible at section {} - submitting form", sectionCounter);
           if (autoSubmitEnabled) {
             clickSubmit(driver, wait, humanLike);
+            log.info("Form submitted successfully");
           } else {
             log.info("Submit button visible but auto-submit disabled; not submitting");
           }
           return true;
         }
 
-        // If Next visible → click Next to go to next section
+        // Check if Next button is visible
         if (isVisible(driver, NEXT_BUTTON)) {
+          log.info("Next button visible at section {} - proceeding to next section",
+              sectionCounter);
+
+          // If no questions were filled, try to satisfy required questions to unlock Next
           if (filled == 0) {
-            // Try minimal autofill to unlock Next
+            log.info("No questions filled in section {}, attempting autofill to unlock Next",
+                sectionCounter);
             try {
+              boolean autofillSuccess =
+                  requiredQuestionAutofillService.satisfyRequiredQuestions(driver);
+              if (autofillSuccess) {
+                log.info("Autofill successful for section {}", sectionCounter);
+              } else {
+                log.warn("Autofill failed for section {}", sectionCounter);
+              }
+            } catch (Exception autofillEx) {
+              log.warn("Autofill exception for section {}: {}", sectionCounter,
+                  autofillEx.getMessage());
+            }
+          }
+
+          // Verify Next button is still ready before clicking
+          if (!requiredQuestionAutofillService.isNextButtonReady(driver)) {
+            log.warn(
+                "Next button not ready after autofill in section {}, attempting additional autofill",
+                sectionCounter);
+            try {
+              Thread.sleep(1000);
               requiredQuestionAutofillService.satisfyRequiredQuestions(driver);
             } catch (Exception ignore) {
             }
+
+            // Final check
+            if (!requiredQuestionAutofillService.isNextButtonReady(driver)) {
+              log.error("Next button still not ready after additional autofill in section {}",
+                  sectionCounter);
+              return false;
+            }
           }
-          clickNext(driver, wait, humanLike);
+
+          // Click Next with retry logic
+          boolean nextClicked = false;
+          int retryCount = 0;
+          int maxRetries = 3;
+
+          while (!nextClicked && retryCount < maxRetries) {
+            try {
+              clickNext(driver, wait, humanLike);
+              nextClicked = true;
+              log.info("Successfully clicked Next button in section {}", sectionCounter);
+            } catch (Exception e) {
+              retryCount++;
+              log.warn("Failed to click Next button in section {} (attempt {}/{}): {}",
+                  sectionCounter, retryCount, maxRetries, e.getMessage());
+
+              if (retryCount < maxRetries) {
+                try {
+                  Thread.sleep(1000 * retryCount); // Exponential backoff
+                } catch (InterruptedException ie) {
+                  Thread.currentThread().interrupt();
+                }
+              }
+            }
+          }
+
+          if (!nextClicked) {
+            log.error("Failed to click Next button in section {} after {} attempts", sectionCounter,
+                maxRetries);
+            return false;
+          }
+
           sectionCounter++;
+
+          // Wait for section change
           try {
             Thread.sleep(800);
           } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
           }
+
           try {
             wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("form")));
+            log.info("Form element found after section navigation");
           } catch (Exception ignore) {
+            log.warn("Could not detect form element change, continuing anyway");
           }
+
           continue;
         }
 
-        // Neither Next nor Submit → assume last page without submit (stop)
-        return filled > 0;
+        // Neither Next nor Submit visible - this might be an error state
+        log.warn("Neither Next nor Submit button visible at section {}", sectionCounter);
+
+        // Try to find Submit button with different selectors as fallback
+        try {
+          Thread.sleep(1000);
+          if (isVisible(driver, SUBMIT_BUTTON)) {
+            log.info("Submit button found after additional wait");
+            if (autoSubmitEnabled) {
+              clickSubmit(driver, wait, humanLike);
+            }
+            return true;
+          }
+        } catch (Exception e) {
+          log.warn("Error during additional Submit button check: {}", e.getMessage());
+        }
+
+        // If we've filled some questions, consider it a partial success
+        if (filled > 0) {
+          log.info("Partial success: filled {} questions but no navigation buttons found", filled);
+          return true;
+        }
+
+        log.error("No navigation buttons found and no questions filled at section {}",
+            sectionCounter);
+        return false;
       }
+
+      log.error("Reached maximum section limit ({}) without finding Submit button", maxSections);
+      return false;
+
     } catch (Exception e) {
       log.error("fillSections failed: {}", e.getMessage(), e);
       return false;

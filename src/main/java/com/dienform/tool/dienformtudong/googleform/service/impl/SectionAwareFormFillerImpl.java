@@ -250,94 +250,75 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
         }
       }
 
-      // 3. Fill each section
+      // 3. Fill each section with improved navigation logic
       for (SectionInfo section : formStructure.getSections()) {
         try {
-          log.info("Processing section {}: {}", section.getSectionIndex(),
-              section.getSectionTitle());
+          log.info("Processing section {}: '{}' with {} questions", section.getSectionIndex(),
+              section.getSectionTitle(), section.getQuestions().size());
 
-          // Fill questions in current (or expected) section
+          // Fill questions in current section
+          int totalQuestionsInSection = section.getQuestions().size();
           int filledQuestions = fillQuestionsInSection(driver, section, selections, optionById,
               optionByKey, humanLike);
-          int totalQuestionsInSection = section.getQuestions().size();
-          log.info("Filled {}/{} questions in section {} (first attempt)", filledQuestions,
-              totalQuestionsInSection, section.getSectionIndex());
 
-          // If nothing filled, it may mean we are still on a previous section (e.g., intro page).
-          // Try to minimally satisfy current page and navigate to the target section, then retry.
-          if (filledQuestions == 0) {
-            boolean canProceed = false;
-            try {
-              log.info(
-                  "No filled questions for section {} on first attempt. Checking if autofill is needed...",
-                  section.getSectionIndex());
+          log.info("Filled {}/{} questions in section {}", filledQuestions, totalQuestionsInSection,
+              section.getSectionIndex());
 
-              // Check if Next button is already ready before trying autofill
-              if (requiredQuestionAutofillService.isNextButtonReady(driver)) {
-                log.info(
-                    "Next button is already ready for section {}, no autofill needed in fallback",
-                    section.getSectionIndex());
-                canProceed = true;
-              } else {
-                log.info("Next button not ready, attempting autofill in fallback for section {}",
-                    section.getSectionIndex());
-                canProceed = requiredQuestionAutofillService.satisfyRequiredQuestions(driver);
-              }
-            } catch (Exception autofillEx) {
-              log.warn("Autofill required questions failed for section {}: {}",
-                  section.getSectionIndex(), autofillEx.getMessage());
-            }
-
-            if (canProceed) {
-              clickNextButton(driver, wait, humanLike);
-              try {
-                Thread.sleep(800);
-              } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-              }
-
-              // Retry filling now that we likely reached the target section
-              filledQuestions = fillQuestionsInSection(driver, section, selections, optionById,
-                  optionByKey, humanLike);
-              log.info("Filled {}/{} questions in section {} (second attempt after navigation)",
-                  filledQuestions, totalQuestionsInSection, section.getSectionIndex());
-            } else {
-              log.warn(
-                  "Unable to navigate to section {} because autofill could not satisfy current page",
-                  section.getSectionIndex());
-            }
-          }
-
-          // Verify all questions in this section are filled before proceeding
-          if (filledQuestions < totalQuestionsInSection) {
-            log.warn(
-                "Not all questions filled in section {}: {}/{} questions filled. Attempting to fill remaining questions...",
+          // Retry logic for incomplete sections
+          int maxRetries = 2;
+          int retryCount = 0;
+          while (filledQuestions < totalQuestionsInSection && retryCount < maxRetries) {
+            retryCount++;
+            log.info("Retry {} for section {}: filled {}/{} questions", retryCount,
                 section.getSectionIndex(), filledQuestions, totalQuestionsInSection);
 
-            // Try to fill remaining questions with retry logic
-            int retryCount = 0;
-            int maxRetries = 3;
-            while (filledQuestions < totalQuestionsInSection && retryCount < maxRetries) {
-              retryCount++;
-              log.info("Retry attempt {} to fill remaining questions in section {}", retryCount,
-                  section.getSectionIndex());
-
-              // Wait a bit before retry
+            // Try to minimally satisfy current page and navigate to the target section, then retry.
+            if (filledQuestions == 0) {
+              boolean canProceed = false;
               try {
-                Thread.sleep(1000);
-              } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+                log.info(
+                    "No filled questions for section {} on first attempt. Checking if autofill is needed...",
+                    section.getSectionIndex());
+
+                // Check if Next button is already ready before trying autofill
+                if (requiredQuestionAutofillService.isNextButtonReady(driver)) {
+                  log.info(
+                      "Next button is already ready for section {}, no autofill needed in fallback",
+                      section.getSectionIndex());
+                  canProceed = true;
+                } else {
+                  log.info("Next button not ready, attempting autofill in fallback for section {}",
+                      section.getSectionIndex());
+                  canProceed = requiredQuestionAutofillService.satisfyRequiredQuestions(driver);
+                }
+              } catch (Exception autofillEx) {
+                log.warn("Autofill required questions failed for section {}: {}",
+                    section.getSectionIndex(), autofillEx.getMessage());
               }
 
-              int additionalFilled = fillQuestionsInSection(driver, section, selections, optionById,
-                  optionByKey, humanLike);
-              filledQuestions += additionalFilled;
-              log.info("Additional {} questions filled in retry {}, total: {}/{}", additionalFilled,
-                  retryCount, filledQuestions, totalQuestionsInSection);
+              if (canProceed) {
+                clickNextButton(driver, wait, humanLike);
+                try {
+                  Thread.sleep(800);
+                } catch (InterruptedException e) {
+                  Thread.currentThread().interrupt();
+                }
+
+                // Retry filling now that we likely reached the target section
+                filledQuestions = fillQuestionsInSection(driver, section, selections, optionById,
+                    optionByKey, humanLike);
+                log.info("Filled {}/{} questions in section {} (second attempt after navigation)",
+                    filledQuestions, totalQuestionsInSection, section.getSectionIndex());
+              } else {
+                log.warn(
+                    "Unable to navigate to section {} because autofill could not satisfy current page",
+                    section.getSectionIndex());
+              }
             }
 
+            // Verify all questions in this section are filled before proceeding
             if (filledQuestions < totalQuestionsInSection) {
-              log.error(
+              log.warn(
                   "Failed to fill all questions in section {} after {} retries. Only {}/{} questions filled.",
                   section.getSectionIndex(), maxRetries, filledQuestions, totalQuestionsInSection);
               // Continue anyway but log the issue
@@ -353,28 +334,37 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
             }
           }
 
-          // Check if this is the last section
-          if (section.isLastSection()) {
-            // Click Submit button
-            if (autoSubmitEnabled) {
-              log.info("Reached last section, clicking Submit button");
-              clickSubmitButton(driver, wait, humanLike);
-            } else {
-              log.info("Reached last section, auto-submit disabled");
+          // CRITICAL FIX: Improved navigation logic to ensure we reach Submit button
+          // Check if Submit button is visible first
+          if (isSubmitButtonVisible(driver)) {
+            log.info(
+                "Submit button visible - reached final section, but continuing to process remaining sections");
+            // Don't break here, continue processing remaining sections
+            // The final section handling will be done after the loop
+          }
+
+          // Check if Next button is visible
+          if (isNextButtonVisible(driver)) {
+            // Ensure we can proceed by satisfying required questions if needed
+            boolean canProceed = false;
+            try {
+              // Check if Next button is already ready before trying autofill
+              if (requiredQuestionAutofillService.isNextButtonReady(driver)) {
+                log.info("Next button is ready for section {}, proceeding to next section",
+                    section.getSectionIndex());
+                canProceed = true;
+              } else {
+                log.info("Next button not ready, attempting autofill for section {}",
+                    section.getSectionIndex());
+                canProceed = requiredQuestionAutofillService.satisfyRequiredQuestions(driver);
+              }
+            } catch (Exception autofillEx) {
+              log.warn("Autofill failed for section {}: {}", section.getSectionIndex(),
+                  autofillEx.getMessage());
             }
-            break;
-          } else {
-            // Only proceed if we've filled all expected mapped answers for this section
-            int expectedAnswered = 0;
-            for (QuestionInfo qi : section.getQuestions()) {
-              QuestionOption mapped =
-                  findOptionForQuestion(qi.getQuestionEntity(), optionById, optionByKey);
-              if (mapped != null)
-                expectedAnswered++;
-            }
-            if (filledQuestions >= expectedAnswered) {
-              log.info("Proceeding to next section: filled {} out of {} expected mapped answers",
-                  filledQuestions, expectedAnswered);
+
+            if (canProceed) {
+              log.info("Proceeding to next section after section {}", section.getSectionIndex());
               clickNextButton(driver, wait, humanLike);
               try {
                 Thread.sleep(800);
@@ -382,37 +372,44 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
                 Thread.currentThread().interrupt();
               }
             } else {
-              // As a fallback, try to satisfy required questions minimally to unlock Next
-              boolean canProceed = false;
+              log.warn("Cannot proceed from section {} - Next button not ready after autofill",
+                  section.getSectionIndex());
+              // Try one more time with a longer wait
               try {
-                // Check if Next button is already ready before trying autofill
+                Thread.sleep(2000);
                 if (requiredQuestionAutofillService.isNextButtonReady(driver)) {
-                  log.info(
-                      "Next button is already ready for section {}, no autofill needed in fallback",
-                      section.getSectionIndex());
-                  canProceed = true;
+                  log.info("Next button ready after additional wait, proceeding");
+                  clickNextButton(driver, wait, humanLike);
+                  try {
+                    Thread.sleep(800);
+                  } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                  }
                 } else {
-                  log.info("Next button not ready, attempting autofill in fallback for section {}",
+                  log.error("Still cannot proceed from section {} after additional wait",
                       section.getSectionIndex());
-                  canProceed = requiredQuestionAutofillService.satisfyRequiredQuestions(driver);
+                  return false;
                 }
-              } catch (Exception ignore) {
+              } catch (Exception e) {
+                log.error("Error during additional wait for section {}: {}",
+                    section.getSectionIndex(), e.getMessage());
+                return false;
               }
-              if (canProceed) {
-                log.info("Proceeding after satisfying required questions (mapped filled: {}/{})",
-                    filledQuestions, expectedAnswered);
-                clickNextButton(driver, wait, humanLike);
-                try {
-                  Thread.sleep(800);
-                } catch (InterruptedException e) {
-                  Thread.currentThread().interrupt();
-                }
-              } else {
-                log.warn(
-                    "Staying on section {}: only {}/{} mapped answers filled; not clicking Next",
-                    section.getSectionIndex(), filledQuestions, expectedAnswered);
-                // Do not click Next to avoid jumping ahead when section incomplete
-              }
+            }
+          } else {
+            // Neither Next nor Submit visible - this might be an error state
+            log.warn("Neither Next nor Submit button visible after section {}",
+                section.getSectionIndex());
+            // Check if we're actually on the last section
+            if (section.isLastSection()) {
+              log.info(
+                  "This is the last section according to metadata, but no Submit button found");
+              // Don't fail here, let the final section handling take care of it
+              log.info(
+                  "Continuing to next section, final section handling will check for Submit button");
+            } else {
+              log.warn("No navigation buttons visible but not on last section - continuing anyway");
+              // Continue processing instead of failing
             }
           }
         } catch (Exception sectionError) {
@@ -421,6 +418,81 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
           // Continue with next section instead of stopping
           continue;
         }
+      }
+
+      // CRITICAL FIX: Handle the final "Thank you" section that may not have questions
+      // This section contains the Submit button but might not be in formStructure
+      log.info(
+          "Completed processing all sections with questions, checking for final Submit section...");
+
+      try {
+        // Wait a bit for the final section to load
+        Thread.sleep(1000);
+
+        // Check if we're on the final section with Submit button
+        if (isSubmitButtonVisible(driver)) {
+          log.info("Found Submit button on final section - this is the 'Thank you' section");
+          if (autoSubmitEnabled) {
+            log.info("Auto-submit enabled, clicking Submit button on final section");
+            clickSubmitButton(driver, wait, humanLike);
+          } else {
+            log.info("Auto-submit disabled, but Submit button is visible on final section");
+          }
+        } else {
+          // Try to navigate to the final section if Next button is still available
+          log.info(
+              "Submit button not visible, checking if Next button is available to reach final section");
+
+          int maxNavigationAttempts = 3;
+          for (int attempt = 1; attempt <= maxNavigationAttempts; attempt++) {
+            log.info("Navigation attempt {}/{} to reach final section", attempt,
+                maxNavigationAttempts);
+
+            if (isNextButtonVisible(driver)) {
+              log.info("Next button visible, clicking to reach final section");
+              try {
+                clickNextButton(driver, wait, humanLike);
+                Thread.sleep(1000);
+
+                // Check if Submit button is now visible
+                if (isSubmitButtonVisible(driver)) {
+                  log.info("Successfully reached final section with Submit button");
+                  if (autoSubmitEnabled) {
+                    clickSubmitButton(driver, wait, humanLike);
+                  }
+                  break;
+                } else {
+                  log.info("Next button clicked but Submit button not yet visible, continuing...");
+                }
+              } catch (Exception navEx) {
+                log.warn("Error clicking Next button on attempt {}: {}", attempt,
+                    navEx.getMessage());
+              }
+            } else {
+              log.info("No Next button visible on attempt {}, may already be on final section",
+                  attempt);
+
+              // Double-check if Submit button is visible
+              if (isSubmitButtonVisible(driver)) {
+                log.info("Submit button found on final section");
+                if (autoSubmitEnabled) {
+                  clickSubmitButton(driver, wait, humanLike);
+                }
+                break;
+              }
+
+              // Wait a bit more and try again
+              try {
+                Thread.sleep(2000);
+              } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+              }
+            }
+          }
+        }
+      } catch (Exception finalSectionEx) {
+        log.warn("Error handling final section: {}", finalSectionEx.getMessage());
+        // Don't fail the entire process, just log the issue
       }
 
       log.info("Successfully completed multi-section form fill for request: {}", fillRequestId);
@@ -957,200 +1029,346 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
   }
 
   /**
-   * Click Next button to move to next section
+   * Click Next button to move to next section with improved retry logic
    */
   private void clickNextButton(WebDriver driver, WebDriverWait wait, boolean humanLike) {
-    try {
-      log.info("Looking for Next button...");
+    int maxRetries = 3;
+    int retryCount = 0;
 
-      // If Submit button is already visible, do not try Next
+    while (retryCount < maxRetries) {
       try {
-        List<WebElement> submitCandidates = driver.findElements(SUBMIT_BUTTON);
-        for (WebElement el : submitCandidates) {
-          if (el.isDisplayed()) {
-            log.info("Submit button is visible; skipping Next");
-            return;
+        log.info("Looking for Next button (attempt {}/{})...", retryCount + 1, maxRetries);
+
+        // If Submit button is already visible, do not try Next
+        try {
+          List<WebElement> submitCandidates = driver.findElements(SUBMIT_BUTTON);
+          for (WebElement el : submitCandidates) {
+            if (el.isDisplayed()) {
+              log.info("Submit button is visible; skipping Next");
+              return;
+            }
+          }
+        } catch (Exception ignore) {
+        }
+
+        // Try multiple selectors for Next button
+        WebElement nextButton = null;
+        // Strategy 1: Primary selectors
+        By[] primarySelectors =
+            {NEXT_BUTTON, By.xpath("//div[@role='button' and contains(., 'Tiếp')]"),
+                By.xpath("//div[@role='button' and contains(., 'Next')]"),
+                By.xpath("//span[contains(text(), 'Tiếp')]/ancestor::div[@role='button']"),
+                By.xpath("//span[contains(text(), 'Next')]/ancestor::div[@role='button']")};
+
+        for (By selector : primarySelectors) {
+          try {
+            log.debug("Trying Next button selector: {}", selector);
+            nextButton = wait.until(ExpectedConditions.elementToBeClickable(selector));
+            log.info("Found Next button using selector: {}", selector);
+            break;
+          } catch (Exception e) {
+            log.debug("Selector {} failed: {}", selector, e.getMessage());
           }
         }
-      } catch (Exception ignore) {
-      }
 
-      // Try multiple selectors for Next button
-      WebElement nextButton = null;
-      // Strategy 1: Primary selectors
-      By[] primarySelectors =
-          {NEXT_BUTTON, By.xpath("//div[@role='button' and contains(., 'Tiếp')]"),
-              By.xpath("//div[@role='button' and contains(., 'Next')]"),
-              By.xpath("//span[contains(text(), 'Tiếp')]/ancestor::div[@role='button']"),
-              By.xpath("//span[contains(text(), 'Next')]/ancestor::div[@role='button']")};
+        // Strategy 2: Try to find any button that might be Next
+        if (nextButton == null) {
+          log.info("Primary selectors failed, trying to find any navigation button...");
+          try {
+            List<WebElement> allButtons = driver.findElements(By.cssSelector("[role='button']"));
+            log.info("Found {} buttons on page", allButtons.size());
 
-      for (By selector : primarySelectors) {
-        try {
-          log.debug("Trying Next button selector: {}", selector);
-          nextButton = wait.until(ExpectedConditions.elementToBeClickable(selector));
-          log.info("Found Next button using selector: {}", selector);
-          break;
-        } catch (Exception e) {
-          log.debug("Selector {} failed: {}", selector, e.getMessage());
+            for (WebElement button : allButtons) {
+              try {
+                String buttonText = button.getText().toLowerCase();
+                String ariaLabel = button.getAttribute("aria-label");
+                if (ariaLabel != null) {
+                  ariaLabel = ariaLabel.toLowerCase();
+                }
+
+                log.debug("Button text: '{}', aria-label: '{}'", buttonText, ariaLabel);
+
+                if ((buttonText.contains("tiếp") || buttonText.contains("next"))
+                    || (ariaLabel != null
+                        && (ariaLabel.contains("tiếp") || ariaLabel.contains("next")))) {
+                  nextButton = button;
+                  log.info("Found Next button by text/aria-label: {}", buttonText);
+                  break;
+                }
+              } catch (Exception e) {
+                log.debug("Error checking button: {}", e.getMessage());
+              }
+            }
+          } catch (Exception e) {
+            log.debug("Error finding all buttons: {}", e.getMessage());
+          }
         }
-      }
 
-      // Strategy 2: Try to find any button that might be Next
-      if (nextButton == null) {
-        log.info("Primary selectors failed, trying to find any navigation button...");
-        try {
-          List<WebElement> allButtons = driver.findElements(By.cssSelector("[role='button']"));
-          log.info("Found {} buttons on page", allButtons.size());
-
-          for (WebElement button : allButtons) {
+        if (nextButton == null) {
+          log.error("Could not find Next button with any selector (attempt {}/{})", retryCount + 1,
+              maxRetries);
+          retryCount++;
+          if (retryCount < maxRetries) {
             try {
-              String buttonText = button.getText().toLowerCase();
-              String ariaLabel = button.getAttribute("aria-label");
-              if (ariaLabel != null) {
-                ariaLabel = ariaLabel.toLowerCase();
-              }
+              Thread.sleep(1000 * retryCount); // Exponential backoff
+            } catch (InterruptedException e) {
+              Thread.currentThread().interrupt();
+            }
+            continue;
+          } else {
+            throw new RuntimeException(
+                "Could not find Next button after " + maxRetries + " attempts");
+          }
+        }
 
-              log.debug("Button text: '{}', aria-label: '{}'", buttonText, ariaLabel);
-
-              if ((buttonText.contains("tiếp") || buttonText.contains("next")) || (ariaLabel != null
-                  && (ariaLabel.contains("tiếp") || ariaLabel.contains("next")))) {
-                nextButton = button;
-                log.info("Found Next button by text/aria-label: {}", buttonText);
-                break;
+        // Verify button is enabled before clicking
+        try {
+          String ariaDisabled = nextButton.getAttribute("aria-disabled");
+          if ("true".equals(ariaDisabled)) {
+            log.warn("Next button is disabled (attempt {}/{}), waiting for it to become enabled",
+                retryCount + 1, maxRetries);
+            retryCount++;
+            if (retryCount < maxRetries) {
+              try {
+                Thread.sleep(1000 * retryCount);
+              } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
               }
-            } catch (Exception e) {
-              log.debug("Error checking button: {}", e.getMessage());
+              continue;
+            } else {
+              throw new RuntimeException(
+                  "Next button remained disabled after " + maxRetries + " attempts");
             }
           }
         } catch (Exception e) {
-          log.debug("Error finding all buttons: {}", e.getMessage());
+          log.debug("Could not check aria-disabled attribute: {}", e.getMessage());
         }
-      }
 
-      if (nextButton == null) {
-        log.error("Could not find Next button with any selector");
-        return; // Don't throw exception, just return
-      }
+        if (humanLike) {
+          try {
+            Thread.sleep(250 + new Random().nextInt(251));
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Interrupted while waiting", e);
+          }
+        }
 
-      if (humanLike) {
+        nextButton.click();
+        log.info("Clicked Next button (attempt {}/{})", retryCount + 1, maxRetries);
+
+        // Wait for section change - try multiple approaches
         try {
-          Thread.sleep(250 + new Random().nextInt(251));
-        } catch (InterruptedException e) {
-          Thread.currentThread().interrupt();
-          throw new RuntimeException("Interrupted while waiting", e);
+          wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("form")));
+          log.info("Form element found after clicking Next");
+        } catch (Exception e) {
+          log.warn("Could not detect form element change, continuing anyway");
+        }
+
+        log.info("Successfully clicked Next button and moved to next section");
+        return; // Success, exit retry loop
+
+      } catch (Exception e) {
+        retryCount++;
+        log.warn("Error clicking Next button (attempt {}/{}): {}", retryCount, maxRetries,
+            e.getMessage());
+
+        if (retryCount < maxRetries) {
+          try {
+            Thread.sleep(1000 * retryCount); // Exponential backoff
+          } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+          }
+        } else {
+          log.error("Failed to click Next button after {} attempts", maxRetries);
+          throw e;
         }
       }
-
-      nextButton.click();
-      log.info("Clicked Next button");
-
-      // Wait for section change - try multiple approaches
-      try {
-        wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("form")));
-        log.info("Form element found after clicking Next");
-      } catch (Exception e) {
-        log.warn("Could not detect form element change, continuing anyway");
-      }
-
-      log.info("Successfully clicked Next button and moved to next section");
-    } catch (Exception e) {
-      log.error("Error clicking Next button: {}", e.getMessage());
-      throw e;
     }
   }
 
   /**
-   * Click Submit button to submit the form
+   * Click Submit button to submit the form with improved retry logic
    */
   private void clickSubmitButton(WebDriver driver, WebDriverWait wait, boolean humanLike) {
-    try {
-      log.info("Looking for Submit button...");
+    int maxRetries = 3;
+    int retryCount = 0;
 
-      // Try multiple selectors for Submit button
-      WebElement submitButton = null;
+    while (retryCount < maxRetries) {
       try {
-        By[] alternativeSelectors = {By.xpath("//div[@role='button' and @aria-label='Submit']"),
-            By.xpath("//div[@role='button' and @aria-label='Gửi']"),
-            By.xpath("//div[@role='button' and .//span[contains(text(), 'Gửi')]]"),
-            By.xpath("//div[@role='button' and .//span[contains(text(), 'Submit')]]")};
+        log.info("Looking for Submit button (attempt {}/{})...", retryCount + 1, maxRetries);
 
-        for (By selector : alternativeSelectors) {
+        // Try multiple selectors for Submit button
+        WebElement submitButton = null;
+        try {
+          By[] alternativeSelectors =
+              {SUBMIT_BUTTON, By.xpath("//div[@role='button' and @aria-label='Submit']"),
+                  By.xpath("//div[@role='button' and @aria-label='Gửi']"),
+                  By.xpath("//div[@role='button' and .//span[contains(text(), 'Gửi')]]"),
+                  By.xpath("//div[@role='button' and .//span[contains(text(), 'Submit')]]"),
+                  By.xpath("//div[@role='button' and contains(., 'Submit')]"),
+                  By.xpath("//div[@role='button' and contains(., 'Gửi')]")};
+
+          for (By selector : alternativeSelectors) {
+            try {
+              log.debug("Trying Submit button selector: {}", selector);
+              submitButton = wait.until(ExpectedConditions.elementToBeClickable(selector));
+              log.info("Found Submit button using selector: {}", selector);
+              break;
+            } catch (Exception selectorEx) {
+              log.debug("Selector {} failed: {}", selector, selectorEx.getMessage());
+            }
+          }
+        } catch (Exception e) {
+          log.error("Error finding Submit button: {}", e.getMessage());
+        }
+
+        // Strategy 2: Try to find any button that might be Submit
+        if (submitButton == null) {
+          log.info("Primary selectors failed, trying to find any submit button...");
           try {
-            log.debug("Trying Submit button selector: {}", selector);
-            submitButton = wait.until(ExpectedConditions.elementToBeClickable(selector));
-            log.info("Found Submit button using alternative selector: {}", selector);
-            break;
-          } catch (Exception selectorEx) {
-            log.debug("Selector {} failed: {}", selector, selectorEx.getMessage());
+            List<WebElement> allButtons = driver.findElements(By.cssSelector("[role='button']"));
+            log.info("Found {} buttons on page", allButtons.size());
+
+            for (WebElement button : allButtons) {
+              try {
+                String buttonText = button.getText().toLowerCase();
+                String ariaLabel = button.getAttribute("aria-label");
+                if (ariaLabel != null) {
+                  ariaLabel = ariaLabel.toLowerCase();
+                }
+
+                log.debug("Button text: '{}', aria-label: '{}'", buttonText, ariaLabel);
+
+                if ((buttonText.contains("submit") || buttonText.contains("gửi"))
+                    || (ariaLabel != null
+                        && (ariaLabel.contains("submit") || ariaLabel.contains("gửi")))) {
+                  submitButton = button;
+                  log.info("Found Submit button by text/aria-label: {}", buttonText);
+                  break;
+                }
+              } catch (Exception e) {
+                log.debug("Error checking button: {}", e.getMessage());
+              }
+            }
+          } catch (Exception e) {
+            log.debug("Error finding all buttons: {}", e.getMessage());
           }
         }
-      } catch (Exception e) {
-        log.error("Error finding Submit button: {}", e.getMessage());
-      }
 
-      if (submitButton == null) {
-        log.error("Could not find Submit button with any selector");
-        return; // Don't throw exception, just return
-      }
-
-      if (humanLike) {
-        try {
-          Thread.sleep(250 + new Random().nextInt(251));
-        } catch (InterruptedException e) {
-          Thread.currentThread().interrupt();
-          throw new RuntimeException("Interrupted while waiting", e);
+        if (submitButton == null) {
+          log.error("Could not find Submit button with any selector (attempt {}/{})",
+              retryCount + 1, maxRetries);
+          retryCount++;
+          if (retryCount < maxRetries) {
+            try {
+              Thread.sleep(1000 * retryCount); // Exponential backoff
+            } catch (InterruptedException e) {
+              Thread.currentThread().interrupt();
+            }
+            continue;
+          } else {
+            throw new RuntimeException(
+                "Could not find Submit button after " + maxRetries + " attempts");
+          }
         }
-      }
 
-      submitButton.click();
-      log.info("Clicked Submit button");
-
-      // Wait for submission confirmation with multiple approaches and longer timeout
-      boolean submitConfirmed = false;
-      try {
-        // Wait for URL change to formResponse (primary indicator)
-        WebDriverWait submitWait = new WebDriverWait(driver, Duration.ofSeconds(20));
-        submitWait.until(ExpectedConditions.urlContains("formResponse"));
-        log.info("Form submitted successfully - URL contains 'formResponse'");
-        submitConfirmed = true;
-      } catch (Exception e) {
-        log.warn("Could not detect form submission via URL change: {}", e.getMessage());
-
-        // Fallback: Wait for submit button to disappear or become disabled
+        // Verify button is enabled before clicking
         try {
-          WebDriverWait fallbackWait = new WebDriverWait(driver, Duration.ofSeconds(15));
-          fallbackWait.until(ExpectedConditions.invisibilityOfElementLocated(
-              By.xpath("//div[@role='button' and @aria-label='Submit']")));
-          log.info("Form submitted successfully - Submit button disappeared");
+          String ariaDisabled = submitButton.getAttribute("aria-disabled");
+          if ("true".equals(ariaDisabled)) {
+            log.warn("Submit button is disabled (attempt {}/{}), waiting for it to become enabled",
+                retryCount + 1, maxRetries);
+            retryCount++;
+            if (retryCount < maxRetries) {
+              try {
+                Thread.sleep(1000 * retryCount);
+              } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+              }
+              continue;
+            } else {
+              throw new RuntimeException(
+                  "Submit button remained disabled after " + maxRetries + " attempts");
+            }
+          }
+        } catch (Exception e) {
+          log.debug("Could not check aria-disabled attribute: {}", e.getMessage());
+        }
+
+        if (humanLike) {
+          try {
+            Thread.sleep(250 + new Random().nextInt(251));
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Interrupted while waiting", e);
+          }
+        }
+
+        submitButton.click();
+        log.info("Clicked Submit button (attempt {}/{})", retryCount + 1, maxRetries);
+
+        // Wait for submission confirmation with multiple approaches and longer timeout
+        boolean submitConfirmed = false;
+        try {
+          // Wait for URL change to formResponse (primary indicator)
+          WebDriverWait submitWait = new WebDriverWait(driver, Duration.ofSeconds(20));
+          submitWait.until(ExpectedConditions.urlContains("formResponse"));
+          log.info("Form submitted successfully - URL contains 'formResponse'");
           submitConfirmed = true;
-        } catch (Exception fallbackEx) {
-          log.warn("Could not detect submit button disappearance: {}", fallbackEx.getMessage());
+        } catch (Exception e) {
+          log.warn("Could not detect form submission via URL change: {}", e.getMessage());
+
+          // Fallback: Wait for submit button to disappear or become disabled
+          try {
+            WebDriverWait fallbackWait = new WebDriverWait(driver, Duration.ofSeconds(15));
+            fallbackWait.until(ExpectedConditions.invisibilityOfElementLocated(
+                By.xpath("//div[@role='button' and @aria-label='Submit']")));
+            log.info("Form submitted successfully - Submit button disappeared");
+            submitConfirmed = true;
+          } catch (Exception fallbackEx) {
+            log.warn("Could not detect submit button disappearance: {}", fallbackEx.getMessage());
+          }
+        }
+
+        // Additional wait to ensure submission is fully processed
+        if (submitConfirmed) {
+          try {
+            log.info("Waiting additional 2 seconds to ensure submission is fully processed...");
+            Thread.sleep(2000);
+            log.info("Additional wait completed");
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("Interrupted during additional wait");
+          }
+        } else {
+          log.warn("Submit confirmation not detected, but continuing anyway");
+        }
+
+        log.info("Submit process completed - confirmed: {}", submitConfirmed);
+
+        // Additional verification: check if we can detect successful submission
+        if (submitConfirmed) {
+          verifySubmissionSuccess(driver);
+        }
+
+        return; // Success, exit retry loop
+
+      } catch (Exception e) {
+        retryCount++;
+        log.warn("Error clicking Submit button (attempt {}/{}): {}", retryCount, maxRetries,
+            e.getMessage());
+
+        if (retryCount < maxRetries) {
+          try {
+            Thread.sleep(1000 * retryCount); // Exponential backoff
+          } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+          }
+        } else {
+          log.error("Failed to click Submit button after {} attempts", maxRetries);
+          throw e;
         }
       }
-
-      // Additional wait to ensure submission is fully processed
-      if (submitConfirmed) {
-        try {
-          log.info("Waiting additional 2 seconds to ensure submission is fully processed...");
-          Thread.sleep(2000);
-          log.info("Additional wait completed");
-        } catch (InterruptedException e) {
-          Thread.currentThread().interrupt();
-          log.warn("Interrupted during additional wait");
-        }
-      } else {
-        log.warn("Submit confirmation not detected, but continuing anyway");
-      }
-
-      log.info("Submit process completed - confirmed: {}", submitConfirmed);
-
-      // Additional verification: check if we can detect successful submission
-      if (submitConfirmed) {
-        verifySubmissionSuccess(driver);
-      }
-    } catch (Exception e) {
-      log.error("Error clicking Submit button: {}", e.getMessage());
-      throw e;
     }
   }
 
@@ -1551,6 +1769,46 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
     String uuid = java.util.UUID.randomUUID().toString().replace("-", "");
     String prefix = uuid.length() >= 8 ? uuid.substring(0, 8) : uuid;
     return "autogen_" + prefix;
+  }
+
+  /**
+   * Check if Submit button is visible on the current page.
+   */
+  private boolean isSubmitButtonVisible(WebDriver driver) {
+    try {
+      List<WebElement> submitButtons = driver.findElements(SUBMIT_BUTTON);
+      for (WebElement button : submitButtons) {
+        if (button.isDisplayed()) {
+          log.debug("Submit button found and visible");
+          return true;
+        }
+      }
+      log.debug("Submit button not visible");
+      return false;
+    } catch (Exception e) {
+      log.debug("Error checking Submit button visibility: {}", e.getMessage());
+      return false;
+    }
+  }
+
+  /**
+   * Check if Next button is visible on the current page.
+   */
+  private boolean isNextButtonVisible(WebDriver driver) {
+    try {
+      List<WebElement> nextButtons = driver.findElements(NEXT_BUTTON);
+      for (WebElement button : nextButtons) {
+        if (button.isDisplayed()) {
+          log.debug("Next button found and visible");
+          return true;
+        }
+      }
+      log.debug("Next button not visible");
+      return false;
+    } catch (Exception e) {
+      log.debug("Error checking Next button visibility: {}", e.getMessage());
+      return false;
+    }
   }
 
 }
