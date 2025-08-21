@@ -128,8 +128,8 @@ public class SurveySchedulerService {
 
     // Find campaigns that have been running for more than 30 minutes
     LocalDateTime thirtyMinutesAgo = LocalDateTime.now().minusMinutes(30);
-    List<FillRequest> stuckCampaigns = fillRequestRepository.findByStatusAndStartDateLessThan(
-        FillRequestStatusEnum.IN_PROCESS, thirtyMinutesAgo);
+    List<FillRequest> stuckCampaigns = fillRequestRepository
+        .findByStatusAndStartDateLessThan(FillRequestStatusEnum.IN_PROCESS, thirtyMinutesAgo);
 
     if (stuckCampaigns.isEmpty()) {
       log.debug("No stuck RUNNING campaigns found");

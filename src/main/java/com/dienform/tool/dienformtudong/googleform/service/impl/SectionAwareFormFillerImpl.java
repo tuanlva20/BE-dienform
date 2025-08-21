@@ -226,6 +226,9 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
       driver = openBrowser(formUrl, humanLike);
       WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(15));
 
+      // Clear autofill tracking for new form
+      requiredQuestionAutofillService.clearAutofillTracking();
+
       // Build robust lookup maps so we don't depend on entity identity equality
       Map<java.util.UUID, QuestionOption> optionById = buildOptionByQuestionId(selections);
       Map<String, QuestionOption> optionByKey = buildOptionByCompositeKey(selections);
@@ -266,9 +269,20 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
             boolean canProceed = false;
             try {
               log.info(
-                  "No filled questions for section {} on first attempt. Trying minimal autofill to navigate...",
+                  "No filled questions for section {} on first attempt. Checking if autofill is needed...",
                   section.getSectionIndex());
-              canProceed = requiredQuestionAutofillService.satisfyRequiredQuestions(driver);
+
+              // Check if Next button is already ready before trying autofill
+              if (requiredQuestionAutofillService.isNextButtonReady(driver)) {
+                log.info(
+                    "Next button is already ready for section {}, no autofill needed in fallback",
+                    section.getSectionIndex());
+                canProceed = true;
+              } else {
+                log.info("Next button not ready, attempting autofill in fallback for section {}",
+                    section.getSectionIndex());
+                canProceed = requiredQuestionAutofillService.satisfyRequiredQuestions(driver);
+              }
             } catch (Exception autofillEx) {
               log.warn("Autofill required questions failed for section {}: {}",
                   section.getSectionIndex(), autofillEx.getMessage());
@@ -371,7 +385,17 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
               // As a fallback, try to satisfy required questions minimally to unlock Next
               boolean canProceed = false;
               try {
-                canProceed = requiredQuestionAutofillService.satisfyRequiredQuestions(driver);
+                // Check if Next button is already ready before trying autofill
+                if (requiredQuestionAutofillService.isNextButtonReady(driver)) {
+                  log.info(
+                      "Next button is already ready for section {}, no autofill needed in fallback",
+                      section.getSectionIndex());
+                  canProceed = true;
+                } else {
+                  log.info("Next button not ready, attempting autofill in fallback for section {}",
+                      section.getSectionIndex());
+                  canProceed = requiredQuestionAutofillService.satisfyRequiredQuestions(driver);
+                }
               } catch (Exception ignore) {
               }
               if (canProceed) {

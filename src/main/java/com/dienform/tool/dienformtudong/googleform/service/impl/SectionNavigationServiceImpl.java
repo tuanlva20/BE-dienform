@@ -51,6 +51,9 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
       driver = openBrowser(formUrl, false);
       WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(timeoutSeconds));
 
+      // Clear autofill tracking for new form
+      requiredQuestionAutofillService.clearAutofillTracking();
+
       // First page HTML
       wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("form")));
 
@@ -81,14 +84,71 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
 
         // Satisfy required questions minimally before clicking Next
         try {
-          requiredQuestionAutofillService.satisfyRequiredQuestions(driver);
+          log.info("Attempting to satisfy required questions in section {}", i);
+          boolean autofillSuccess =
+              requiredQuestionAutofillService.satisfyRequiredQuestions(driver);
+
+          // Check if Next button is ready after autofill
+          boolean nextButtonReady = requiredQuestionAutofillService.isNextButtonReady(driver);
+
+          // Only retry if autofill failed AND Next button is not ready
+          if (!autofillSuccess && !nextButtonReady) {
+            log.warn("Autofill failed and Next button not ready for section {}, attempting retry",
+                i);
+            // Wait a bit and retry
+            try {
+              Thread.sleep(1000);
+            } catch (InterruptedException ie) {
+              Thread.currentThread().interrupt();
+            }
+            autofillSuccess = requiredQuestionAutofillService.satisfyRequiredQuestions(driver);
+            nextButtonReady = requiredQuestionAutofillService.isNextButtonReady(driver);
+          } else if (autofillSuccess && nextButtonReady) {
+            log.info("Autofill succeeded and Next button is ready for section {}", i);
+          } else if (autofillSuccess && !nextButtonReady) {
+            log.info(
+                "Autofill succeeded but Next button not ready for section {} (may need more filling)",
+                i);
+          } else {
+            log.info(
+                "Autofill failed but Next button is ready for section {} (questions may have been already filled)",
+                i);
+          }
+
+          if (autofillSuccess || nextButtonReady) {
+            log.info("Successfully satisfied required questions in section {}", i);
+          } else {
+            log.warn("Failed to satisfy required questions in section {} after retry", i);
+          }
         } catch (Exception e) {
-          log.debug("Autofill required questions failed (section {}): {}", i, e.getMessage());
+          log.warn("Autofill required questions failed (section {}): {}", i, e.getMessage());
         }
 
-        // Click Next
-        WebElement next = driver.findElement(NEXT_BUTTON);
-        next.click();
+        // Verify Next button is still available before clicking
+        if (!requiredQuestionAutofillService.isNextButtonReady(driver)) {
+          log.warn("Next button not ready after autofill in section {}, stopping navigation", i);
+          break;
+        }
+
+        // Click Next with retry logic
+        try {
+          WebElement next = driver.findElement(NEXT_BUTTON);
+          next.click();
+          log.info("Successfully clicked Next button in section {}", i);
+        } catch (Exception e) {
+          log.warn("Failed to click Next button in section {}: {}", i, e.getMessage());
+          // Try one more time after a brief wait
+          try {
+            Thread.sleep(1000);
+            WebElement next = driver.findElement(NEXT_BUTTON);
+            next.click();
+            log.info("Successfully clicked Next button in section {} (retry)", i);
+          } catch (Exception retryEx) {
+            log.error("Failed to click Next button in section {} after retry: {}", i,
+                retryEx.getMessage());
+            break;
+          }
+        }
 
         // Wait for section change: either a new heading or presence of form root again
         try {
@@ -131,6 +191,9 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
       driver = openBrowser(formUrl, false);
       WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(timeoutSeconds));
 
+      // Clear autofill tracking for new form
+      requiredQuestionAutofillService.clearAutofillTracking();
+
       // Wait for form to load
       wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("form")));
 
@@ -143,12 +206,55 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
       // Skip the first section by clicking Next once
       if (hasNextOnFirstPage) {
         try {
-          requiredQuestionAutofillService.satisfyRequiredQuestions(driver);
-        } catch (Exception ignore) {
+          log.info(
+              "Attempting to satisfy required questions in first section for metadata capture");
+          boolean autofillSuccess =
+              requiredQuestionAutofillService.satisfyRequiredQuestions(driver);
+
+          // Check if Next button is ready after autofill
+          boolean nextButtonReady = requiredQuestionAutofillService.isNextButtonReady(driver);
+
+          // Only retry if autofill failed AND Next button is not ready
+          if (!autofillSuccess && !nextButtonReady) {
+            log.warn(
+                "Autofill failed and Next button not ready for first section, attempting retry");
+            // Wait a bit and retry
+            try {
+              Thread.sleep(1000);
+            } catch (InterruptedException ie) {
+              Thread.currentThread().interrupt();
+            }
+            autofillSuccess = requiredQuestionAutofillService.satisfyRequiredQuestions(driver);
+            nextButtonReady = requiredQuestionAutofillService.isNextButtonReady(driver);
+          } else if (autofillSuccess && nextButtonReady) {
+            log.info("Autofill succeeded and Next button is ready for first section");
+          } else if (autofillSuccess && !nextButtonReady) {
+            log.info(
+                "Autofill succeeded but Next button not ready for first section (may need more filling)");
+          } else {
+            log.info(
+                "Autofill failed but Next button is ready for first section (questions may have been already filled)");
+          }
+
+          if (autofillSuccess || nextButtonReady) {
+            log.info("Successfully satisfied required questions in first section");
+          } else {
+            log.warn("Failed to satisfy required questions in first section after retry");
+          }
+        } catch (Exception e) {
+          log.warn("Autofill required questions failed for first section: {}", e.getMessage());
         }
+
         try {
+          // Verify Next button is still available before clicking
+          if (!requiredQuestionAutofillService.isNextButtonReady(driver)) {
+            log.warn("Next button not ready after autofill in first section");
+            return null;
+          }
+
           WebElement next = driver.findElement(NEXT_BUTTON);
           next.click();
+          log.info("Successfully clicked Next button in first section");
           try {
             Thread.sleep(300);
           } catch (InterruptedException ie) {
@@ -156,7 +262,7 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
           }
           wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("form")));
         } catch (Exception e) {
-          log.debug("Failed to move past first section: {}", e.getMessage());
+          log.warn("Failed to move past first section: {}", e.getMessage());
           return null;
         }
       }
@@ -170,24 +276,97 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
         metadataList.add(new SectionMetadata(sectionIndex, title, description));
 
         if (isVisible(driver, SUBMIT_BUTTON)) {
+          log.info("Submit button visible at section {}, stopping metadata capture", sectionIndex);
           break;
         }
         if (!isVisible(driver, NEXT_BUTTON)) {
+          log.info("No Next button at section {}, stopping metadata capture", sectionIndex);
           break;
         }
 
         try {
-          requiredQuestionAutofillService.satisfyRequiredQuestions(driver);
-        } catch (Exception ignore) {
+          log.info("Attempting to satisfy required questions in section {} for metadata capture",
+              sectionIndex);
+          boolean autofillSuccess =
+              requiredQuestionAutofillService.satisfyRequiredQuestions(driver);
+
+          // Check if Next button is ready after autofill
+          boolean nextButtonReady = requiredQuestionAutofillService.isNextButtonReady(driver);
+
+          // Only retry if autofill failed AND Next button is not ready
+          if (!autofillSuccess && !nextButtonReady) {
+            log.warn("Autofill failed and Next button not ready for section {}, attempting retry",
+                sectionIndex);
+            // Wait a bit and retry
+            try {
+              Thread.sleep(1000);
+            } catch (InterruptedException ie) {
+              Thread.currentThread().interrupt();
+            }
+            autofillSuccess = requiredQuestionAutofillService.satisfyRequiredQuestions(driver);
+            nextButtonReady = requiredQuestionAutofillService.isNextButtonReady(driver);
+          } else if (autofillSuccess && nextButtonReady) {
+            log.info("Autofill succeeded and Next button is ready for section {}", sectionIndex);
+          } else if (autofillSuccess && !nextButtonReady) {
+            log.info(
+                "Autofill succeeded but Next button not ready for section {} (may need more filling)",
+                sectionIndex);
+          } else {
+            log.info(
+                "Autofill failed but Next button is ready for section {} (questions may have been already filled)",
+                sectionIndex);
+          }
+
+          if (autofillSuccess || nextButtonReady) {
+            log.info("Successfully satisfied required questions in section {}", sectionIndex);
+          } else {
+            log.warn("Failed to satisfy required questions in section {} after retry",
+                sectionIndex);
+          }
+        } catch (Exception e) {
+          log.warn("Autofill required questions failed for section {}: {}", sectionIndex,
+              e.getMessage());
         }
-        WebElement next = driver.findElement(NEXT_BUTTON);
-        next.click();
+
+        // Verify Next button is still available before clicking
+        if (!requiredQuestionAutofillService.isNextButtonReady(driver)) {
+          log.warn("Next button not ready after autofill in section {}, stopping metadata capture",
+              sectionIndex);
+          break;
+        }
+
         try {
-          Thread.sleep(300);
-        } catch (InterruptedException ie) {
-          Thread.currentThread().interrupt();
+          WebElement next = driver.findElement(NEXT_BUTTON);
+          next.click();
+          log.info("Successfully clicked Next button in section {} for metadata capture",
+              sectionIndex);
+          try {
+            Thread.sleep(300);
+          } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+          }
+          wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("form")));
+        } catch (Exception e) {
+          log.warn("Failed to click Next button in section {}: {}", sectionIndex, e.getMessage());
+          // Try one more time after a brief wait
+          try {
+            Thread.sleep(1000);
+            WebElement next = driver.findElement(NEXT_BUTTON);
+            next.click();
+            log.info("Successfully clicked Next button in section {} (retry)", sectionIndex);
+            try {
+              Thread.sleep(300);
+            } catch (InterruptedException ie) {
+              Thread.currentThread().interrupt();
+            }
+            wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("form")));
+          } catch (Exception retryEx) {
+            log.error("Failed to click Next button in section {} after retry: {}", sectionIndex,
+                retryEx.getMessage());
+            break;
+          }
         }
-        wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("form")));
+
         sectionIndex++;
       }
 
@@ -223,6 +402,10 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
     try {
       driver = openBrowser(formUrl, humanLike);
       WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(15));
+
+      // Clear autofill tracking for new form
+      requiredQuestionAutofillService.clearAutofillTracking();
+
       try {
         wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("form")));
       } catch (Exception ignore) {
