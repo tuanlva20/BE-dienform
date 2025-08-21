@@ -115,8 +115,8 @@ public class FillRequestServiceImpl implements FillRequestService {
             .completedSurvey(0).pricePerSurvey(fillRequestDTO.getPricePerSurvey())
             .totalPrice(fillRequestDTO.getPricePerSurvey()
                 .multiply(BigDecimal.valueOf(fillRequestDTO.getSurveyCount())))
-            .humanLike(fillRequestDTO.getIsHumanLike()).startDate(startDate).endDate(endDate)
-            .status(FillRequestStatusEnum.PENDING).build();
+            .humanLike(Boolean.TRUE.equals(fillRequestDTO.getIsHumanLike())).startDate(startDate)
+            .endDate(endDate).status(FillRequestStatusEnum.PENDING).build();
 
     FillRequest savedRequest = fillRequestRepository.save(fillRequest);
     log.info("Fill request saved with ID: {}", savedRequest.getId());
@@ -616,9 +616,8 @@ public class FillRequestServiceImpl implements FillRequestService {
     // Step 7: Create schedule distribution
     // Ensure the number of scheduled tasks matches the persisted surveyCount
     int effectiveTaskCount = savedRequest.getSurveyCount();
-    List<ScheduleDistributionService.ScheduledTask> schedule =
-        scheduleDistributionService.distributeSchedule(effectiveTaskCount, startDate, endDate,
-            Boolean.TRUE.equals(dataFillRequestDTO.getIsHumanLike()));
+    List<ScheduleDistributionService.ScheduledTask> schedule = scheduleDistributionService
+        .distributeSchedule(effectiveTaskCount, startDate, endDate, savedRequest.isHumanLike());
 
     // Step 8: Store data mapping for campaign execution
     List<FillRequestMapping> mappings = new ArrayList<>();
@@ -944,7 +943,7 @@ public class FillRequestServiceImpl implements FillRequestService {
         .id(fillRequest.getId()).surveyCount(fillRequest.getSurveyCount())
         .completedSurvey(fillRequest.getCompletedSurvey())
         .pricePerSurvey(fillRequest.getPricePerSurvey()).totalPrice(fillRequest.getTotalPrice())
-        .isHumanLike(fillRequest.isHumanLike()).createdAt(fillRequest.getCreatedAt())
+        .humanLike(fillRequest.isHumanLike()).createdAt(fillRequest.getCreatedAt())
         .startDate(fillRequest.getStartDate()).endDate(fillRequest.getEndDate())
         .status(fillRequest.getStatus() != null ? fillRequest.getStatus().name() : null);
 

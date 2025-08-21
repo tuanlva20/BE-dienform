@@ -88,6 +88,12 @@ public class AISuggestionServiceImpl implements AISuggestionService {
       log.info("Completed percentage normalization for all questions in form: {}",
           request.getFormId());
 
+      // Normalize option IDs to current DB state (map by value/text)
+      log.info("Normalizing option IDs to match current DB state for form: {}",
+          request.getFormId());
+      normalizeOptionIdsToDb(response, formData);
+      log.info("Completed option ID normalization for form: {}", request.getFormId());
+
       log.info("Successfully generated answer attributes for form: {}", request.getFormId());
 
       return response;
@@ -157,6 +163,147 @@ public class AISuggestionServiceImpl implements AISuggestionService {
     } catch (Exception e) {
       log.error("Error retrieving form data for ID {}: {}", formId, e.getMessage(), e);
       throw new AISuggestionException("Failed to retrieve form data for ID: " + formId, e);
+    }
+  }
+
+  /**
+   * Normalize AI-suggested optionIds to actual DB option IDs using the latest form data. This
+   * prevents stale/invalid UUIDs in AI response from leaking to the client.
+   */
+  @SuppressWarnings("unchecked")
+  private void normalizeOptionIdsToDb(AnswerAttributesResponse response,
+      Map<String, Object> formData) {
+    if (response == null || response.getQuestionAnswerAttributes() == null || formData == null) {
+      return;
+    }
+
+    // Build lookup: questionId -> { validIds, value->id, text->id }
+    Map<String, Map<String, String>> questionIdToValueMap = new HashMap<>();
+    Map<String, Map<String, String>> questionIdToTextMap = new HashMap<>();
+    Map<String, java.util.Set<String>> questionIdToIdSet = new HashMap<>();
+
+    try {
+      List<Map<String, Object>> questions = (List<Map<String, Object>>) formData.get("questions");
+      if (questions != null) {
+        for (Map<String, Object> q : questions) {
+          String qid = String.valueOf(q.get("id"));
+          List<Map<String, Object>> options = (List<Map<String, Object>>) q.get("options");
+          Map<String, String> valueMap = new HashMap<>();
+          Map<String, String> textMap = new HashMap<>();
+          java.util.Set<String> idSet = new java.util.HashSet<>();
+
+          if (options != null) {
+            for (Map<String, Object> opt : options) {
+              String oid = opt.get("id") != null ? String.valueOf(opt.get("id")) : null;
+              String val = opt.get("value") != null ? String.valueOf(opt.get("value")) : null;
+              String txt = opt.get("text") != null ? String.valueOf(opt.get("text")) : null;
+              if (oid != null) {
+                idSet.add(oid);
+              }
+              if (val != null && !val.isBlank()) {
+                valueMap.put(val, oid);
+                valueMap.put(val.toLowerCase(), oid);
+              }
+              if (txt != null && !txt.isBlank()) {
+                String norm = txt.trim().toLowerCase();
+                textMap.put(norm, oid);
+              }
+            }
+          }
+
+          questionIdToValueMap.put(qid, valueMap);
+          questionIdToTextMap.put(qid, textMap);
+          questionIdToIdSet.put(qid, idSet);
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Failed building option lookup maps: {}", e.getMessage());
+      return;
+    }
+
+    // Remap IDs in response
+    for (AnswerAttributesResponse.QuestionAnswerAttribute qa : response
+        .getQuestionAnswerAttributes()) {
+      String qid = qa.getQuestionId();
+      if (qid == null) {
+        continue;
+      }
+      Map<String, String> valueMap = questionIdToValueMap.getOrDefault(qid, Map.of());
+      Map<String, String> textMap = questionIdToTextMap.getOrDefault(qid, Map.of());
+      java.util.Set<String> validIds = questionIdToIdSet.getOrDefault(qid, java.util.Set.of());
+
+      // Regular options
+      if (qa.getOptionDistributions() != null) {
+        for (AnswerAttributesResponse.OptionDistribution dist : qa.getOptionDistributions()) {
+          if (dist == null)
+            continue;
+          String oid = dist.getOptionId();
+          String otext = dist.getOptionText();
+          String ovalue = dist.getOptionValue();
+
+          // If already a valid ID for this question, keep
+          if (oid != null && validIds.contains(oid)) {
+            continue;
+          }
+
+          // Prefer mapping by value, then by text
+          String mapped = null;
+          if (ovalue != null && !ovalue.isBlank()) {
+            mapped = valueMap.getOrDefault(ovalue, valueMap.get(ovalue.toLowerCase()));
+          }
+          if (mapped == null && otext != null && !otext.isBlank()) {
+            mapped = textMap.get(otext.trim().toLowerCase());
+          }
+
+          if (mapped != null) {
+            dist.setOptionId(mapped);
+          } else {
+            // As a last resort, clear invalid id to avoid misleading clients
+            if (oid != null && !validIds.contains(oid)) {
+              log.debug("Clearing unknown optionId '{}' for question '{}' (title: {})", oid, qid,
+                  qa.getQuestionTitle());
+              dist.setOptionId(null);
+            }
+          }
+        }
+      }
+
+      // Grid options
+      if (qa.getGridRowDistributions() != null) {
+        for (AnswerAttributesResponse.GridRowDistribution row : qa.getGridRowDistributions()) {
+          if (row == null || row.getColumnDistributions() == null)
+            continue;
+          for (AnswerAttributesResponse.OptionDistribution col : row.getColumnDistributions()) {
+            if (col == null)
+              continue;
+            String oid = col.getOptionId();
+            String otext = col.getOptionText();
+            String ovalue = col.getOptionValue();
+
+            if (oid != null && validIds.contains(oid)) {
+              continue;
+            }
+
+            String mapped = null;
+            if (ovalue != null && !ovalue.isBlank()) {
+              mapped = valueMap.getOrDefault(ovalue, valueMap.get(ovalue.toLowerCase()));
+            }
+            if (mapped == null && otext != null && !otext.isBlank()) {
+              mapped = textMap.get(otext.trim().toLowerCase());
+            }
+
+            if (mapped != null) {
+              col.setOptionId(mapped);
+            } else {
+              if (oid != null && !validIds.contains(oid)) {
+                log.debug("Clearing unknown grid optionId '{}' for question '{}' (row: {})", oid,
+                    qid, row.getRowLabel());
+                col.setOptionId(null);
+              }
+            }
+          }
+        }
+      }
     }
   }
 

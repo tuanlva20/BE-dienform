@@ -1,6 +1,5 @@
 package com.dienform.scheduler.service;
 
-import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -98,57 +97,58 @@ public class SurveySchedulerService {
    * execute scheduled survey fills
    */
   // @Scheduled(cron = "0 0 * * * *") // Run every hour at the start of the hour
-  @Transactional(readOnly = true)
-  public void executeScheduledSurveys() {
-    log.info("Starting scheduled survey execution check at {}", LocalDateTime.now());
+  // @Transactional(readOnly = true)
+  // public void executeScheduledSurveys() {
+  // log.info("Starting scheduled survey execution check at {}", LocalDateTime.now());
 
-    // Find active schedules that are currently valid (between start and end date)
-    LocalDate today = LocalDate.now();
-    List<FillSchedule> activeSchedules = new ArrayList<>();
-    // List<FillSchedule> activeSchedules =
-    // scheduleRepository.findByActiveIsTrueAndStartDateLessThanEqualAndEndDateGreaterThanEqual(today,
-    // today);
+  // // Find active schedules that are currently valid (between start and end date)
+  // LocalDate today = LocalDate.now();
+  // List<FillSchedule> activeSchedules = new ArrayList<>();
+  // // List<FillSchedule> activeSchedules =
+  // //
+  // scheduleRepository.findByActiveIsTrueAndStartDateLessThanEqualAndEndDateGreaterThanEqual(today,
+  // // today);
 
-    log.info("Found {} active schedules to process", activeSchedules.size());
+  // log.info("Found {} active schedules to process", activeSchedules.size());
 
-    // Process each schedule asynchronously
-    for (FillSchedule schedule : activeSchedules) {
-      processSchedule(schedule);
-    }
-  }
+  // // Process each schedule asynchronously
+  // for (FillSchedule schedule : activeSchedules) {
+  // processSchedule(schedule);
+  // }
+  // }
 
-  @Scheduled(fixedRate = 300000) // Run every 5 minutes
-  @Transactional
-  public void checkStuckRunningCampaigns() {
-    if (!schedulerConfig.isEnabled()) {
-      return;
-    }
+  // // @Scheduled(fixedRate = 300000) // Run every 5 minutes
+  // @Transactional
+  // public void checkStuckRunningCampaigns() {
+  // if (!schedulerConfig.isEnabled()) {
+  // return;
+  // }
 
-    log.info("Checking for stuck RUNNING campaigns...");
+  // log.info("Checking for stuck RUNNING campaigns...");
 
-    // Find campaigns that have been running for more than 30 minutes
-    LocalDateTime thirtyMinutesAgo = LocalDateTime.now().minusMinutes(30);
-    List<FillRequest> stuckCampaigns = fillRequestRepository
-        .findByStatusAndStartDateLessThan(FillRequestStatusEnum.IN_PROCESS, thirtyMinutesAgo);
+  // // Find campaigns that have been running for more than 30 minutes
+  // LocalDateTime thirtyMinutesAgo = LocalDateTime.now().minusMinutes(30);
+  // List<FillRequest> stuckCampaigns = fillRequestRepository
+  // .findByStatusAndStartDateLessThan(FillRequestStatusEnum.IN_PROCESS, thirtyMinutesAgo);
 
-    if (stuckCampaigns.isEmpty()) {
-      log.debug("No stuck RUNNING campaigns found");
-      return;
-    }
+  // if (stuckCampaigns.isEmpty()) {
+  // log.debug("No stuck RUNNING campaigns found");
+  // return;
+  // }
 
-    log.warn("Found {} potentially stuck RUNNING campaigns", stuckCampaigns.size());
+  // log.warn("Found {} potentially stuck RUNNING campaigns", stuckCampaigns.size());
 
-    // Process each stuck campaign
-    for (FillRequest campaign : stuckCampaigns) {
-      try {
-        log.info("Marking stuck campaign as FAILED: {}", campaign.getId());
-        campaign.setStatus(FillRequestStatusEnum.FAILED);
-        fillRequestRepository.save(campaign);
-      } catch (Exception e) {
-        log.error("Error updating stuck campaign status: {}", campaign.getId(), e);
-      }
-    }
-  }
+  // Process each stuck campaign
+  // for (FillRequest campaign : stuckCampaigns) {
+  // try {
+  // log.info("Marking stuck campaign as FAILED: {}", campaign.getId());
+  // campaign.setStatus(FillRequestStatusEnum.FAILED);
+  // fillRequestRepository.save(campaign);
+  // } catch (Exception e) {
+  // log.error("Error updating stuck campaign status: {}", campaign.getId(), e);
+  // }
+  // }
+  // }
 
   /**
    * TTL scheduler to clear in-memory caches periodically to prevent growth Runs every 15 minutes
