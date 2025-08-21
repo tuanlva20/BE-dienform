@@ -101,25 +101,24 @@ public class FormServiceImpl implements FormService {
     GoogleFormService.FormExtractionResult formData =
         googleFormService.extractFormData(formRequest.getEditLink());
 
-    // If form name is null or empty, use extracted title and append user-specific form count
+    // If form name is null or empty, use extracted title and append count based on existing forms
+    // with same title
     if (form.getName() == null || form.getName().trim().isEmpty()) {
-      String title = formData.getTitle();
-
-      // Count forms created by current user; fallback to global count if not authenticated
-      long formCountForUser = currentUserUtil.getCurrentUserIdIfPresent()
-          .map(formRepository::countByCreatedBy_Id).orElse(0L);
-
-      long nextOrdinal = formCountForUser + 1;
-
-      if (title != null && !title.trim().isEmpty()) {
-        form.setName(title + " #" + nextOrdinal);
-        log.info("Using extracted title with user-specific count as form name: {}", form.getName());
-      } else {
-        form.setName("Form #" + nextOrdinal);
-        log.warn(
-            "Could not extract title from Google Form, using default name with user-specific count: {}",
-            form.getName());
+      String baseTitle = formData.getTitle();
+      if (baseTitle == null || baseTitle.trim().isEmpty()) {
+        baseTitle = "Form";
       }
+
+      final String finalBaseTitle = baseTitle;
+      long existingCount = currentUserUtil.getCurrentUserIdIfPresent()
+          .map(userId -> formRepository.countByCreatedBy_IdAndNameStartingWithIgnoreCase(userId,
+              finalBaseTitle))
+          .orElseGet(() -> formRepository.countByNameStartingWithIgnoreCase(finalBaseTitle));
+
+      long nextOrdinal = existingCount + 1;
+      form.setName(baseTitle + " #" + nextOrdinal);
+      log.info("Using title-based count for form name: {} (existing: {}, next: {})", form.getName(),
+          existingCount, nextOrdinal);
     }
 
     form.setStatus(FormStatusEnum.CREATED);
@@ -255,6 +254,14 @@ public class FormServiceImpl implements FormService {
     SortUtil.sortFillRequestsByCreatedAt(form);
 
     return form;
+  }
+
+  @Override
+  public java.util.List<FormResponse> getAllFormsByUserId(UUID userId) {
+    log.info("Getting all forms for user: {}", userId);
+
+    List<Form> forms = formRepository.findByCreatedBy_IdOrderByCreatedAtDesc(userId);
+    return forms.stream().map(formMapper::toResponse).collect(java.util.stream.Collectors.toList());
   }
 
 }
