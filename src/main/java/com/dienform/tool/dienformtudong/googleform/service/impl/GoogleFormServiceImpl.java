@@ -653,6 +653,87 @@ public class GoogleFormServiceImpl implements GoogleFormService {
         }
     }
 
+    @Override
+    public FormExtractionResult extractFormData(String formUrl) {
+        log.info("Extracting both title and questions from form in single session: {}", formUrl);
+
+        try {
+            // Use the new combined method to capture both HTMLs and metadata in one browser session
+            SectionNavigationService.SectionNavigationResult navigationResult =
+                    sectionNavigationService.captureSectionData(formUrl);
+
+            String title = null;
+            List<ExtractedQuestion> questions = new ArrayList<>();
+
+            if (navigationResult == null) {
+                // No Next button found on first page → treat as single-section (fallback)
+                return extractFormDataViaHttp(formUrl);
+            }
+
+            List<String> sectionHtmls = navigationResult.getSectionHtmls();
+            List<SectionNavigationService.SectionMetadata> sectionMetadata =
+                    navigationResult.getSectionMetadata();
+
+            // Extract title from first section HTML
+            if (!sectionHtmls.isEmpty()) {
+                String firstSectionHtml = sectionHtmls.get(0);
+                title = extractTitleFromHtml(firstSectionHtml);
+            }
+
+            // Parse each section HTML with existing parser logic and attach metadata if available
+            int position = 0;
+            // Create a map to align sectionHtmls index with sectionMetadata
+            // sectionHtmls: [section0, section1, section2, section3] (all sections)
+            // sectionMetadata: [section1, section2, section3] (skip first section)
+            java.util.Map<Integer, SectionNavigationService.SectionMetadata> metadataMap =
+                    new java.util.HashMap<>();
+            if (sectionMetadata != null) {
+                for (SectionNavigationService.SectionMetadata md : sectionMetadata) {
+                    metadataMap.put(md.getSectionIndex(), md);
+                }
+            }
+
+            for (int i = 0; i < sectionHtmls.size(); i++) {
+                String html = sectionHtmls.get(i);
+                try {
+                    List<ExtractedQuestion> qs = googleFormParser.extractQuestionsFromHtml(html);
+                    if (!ArrayUtils.isEmpty(qs)) {
+                        for (ExtractedQuestion q : qs) {
+                            q.setPosition(position++);
+                            // Attach section metadata: section0 gets no metadata, section1+ get
+                            // their metadata
+                            if (i > 0 && metadataMap.containsKey(i)) {
+                                SectionNavigationService.SectionMetadata md = metadataMap.get(i);
+                                if (q.getAdditionalData() == null) {
+                                    q.setAdditionalData(new java.util.HashMap<>());
+                                }
+                                q.getAdditionalData().put("section_index",
+                                        String.valueOf(md.getSectionIndex()));
+                                q.getAdditionalData().put("section_title", md.getSectionTitle());
+                                if (md.getSectionDescription() != null) {
+                                    q.getAdditionalData().put("section_description",
+                                            md.getSectionDescription());
+                                }
+                            }
+                            questions.add(q);
+                        }
+                    }
+                } catch (Exception ex) {
+                    log.warn("Failed to parse section HTML: {}", ex.getMessage());
+                }
+            }
+
+            log.info(
+                    "Extracted title '{}' and {} questions across {} sections via Selenium navigation",
+                    title, questions.size(), sectionHtmls.size());
+            return new FormExtractionResult(title, questions);
+        } catch (Exception e) {
+            log.warn("Selenium navigation failed, falling back to single-section parse: {}",
+                    e.getMessage());
+            return extractFormDataViaHttp(formUrl);
+        }
+    }
+
     /**
      * Submit form data using browser automation
      */
@@ -1096,6 +1177,73 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             } catch (Exception ignore) {
                 log.debug("Failed to handle fatal error: {}", ignore.getMessage());
             }
+        }
+    }
+
+    private FormExtractionResult extractFormDataViaHttp(String formUrl) {
+        try {
+            log.info("Fetching Google Form via HTTP (single-section fallback): {}", formUrl);
+
+            HttpClient client = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NORMAL)
+                    .connectTimeout(Duration.ofSeconds(20)).build();
+
+            HttpRequest request = HttpRequest.newBuilder().uri(URI.create(formUrl)).header(
+                    "User-Agent",
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+                    .GET().build();
+
+            HttpResponse<String> response =
+                    client.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() != 200) {
+                log.error("Failed to fetch Google Form. Status code: {}", response.statusCode());
+                return new FormExtractionResult(null, Collections.emptyList());
+            }
+
+            String htmlContent = response.body();
+            if (htmlContent == null || htmlContent.isEmpty()) {
+                log.error("Empty HTML content received from Google Form URL");
+                return new FormExtractionResult(null, Collections.emptyList());
+            }
+
+            // Extract title from HTML
+            String title = extractTitleFromHtml(htmlContent);
+
+            // Extract questions from HTML
+            List<ExtractedQuestion> extractedQuestions =
+                    googleFormParser.extractQuestionsFromHtml(htmlContent);
+            if (ArrayUtils.isEmpty(extractedQuestions)) {
+                log.warn("No questions extracted from form HTML");
+                return new FormExtractionResult(title, Collections.emptyList());
+            }
+
+            // Set positions for questions
+            for (int i = 0; i < extractedQuestions.size(); i++) {
+                extractedQuestions.get(i).setPosition(i);
+            }
+
+            log.info("Extracted title '{}' and {} questions via HTTP fallback", title,
+                    extractedQuestions.size());
+            return new FormExtractionResult(title, extractedQuestions);
+        } catch (Exception e) {
+            log.error("Error extracting form data via HTTP: {}", e.getMessage(), e);
+            return new FormExtractionResult(null, Collections.emptyList());
+        }
+    }
+
+    private String extractTitleFromHtml(String htmlContent) {
+        try {
+            org.jsoup.nodes.Document doc = org.jsoup.Jsoup.parse(htmlContent);
+            org.jsoup.nodes.Element heading = doc.selectFirst("[role=heading][aria-level=1]");
+
+            if (heading != null) {
+                return heading.text();
+            }
+
+            log.warn("No heading element found with role=heading and aria-level=1");
+            return null;
+        } catch (Exception e) {
+            log.error("Error extracting title from HTML: {}", e.getMessage());
+            return null;
         }
     }
 

@@ -11,6 +11,27 @@ import com.dienform.tool.dienformtudong.googleform.util.GoogleFormParser.Extract
  * Service for interacting with Google Forms
  */
 public interface GoogleFormService {
+    /**
+     * Result class for form data extraction
+     */
+    class FormExtractionResult {
+        private final String title;
+        private final List<ExtractedQuestion> questions;
+
+        public FormExtractionResult(String title, List<ExtractedQuestion> questions) {
+            this.title = title;
+            this.questions = questions;
+        }
+
+        public String getTitle() {
+            return title;
+        }
+
+        public List<ExtractedQuestion> getQuestions() {
+            return questions;
+        }
+    }
+
     FormSubmissionResponse submitForm(FormSubmissionRequest request);
 
     /**
@@ -63,4 +84,13 @@ public interface GoogleFormService {
      * @param fillRequestId The ID of the fill request to reset
      */
     void resetFillRequestStatus(UUID fillRequestId);
+
+    /**
+     * Extract both title and questions from Google Form in a single browser session This method
+     * optimizes performance by avoiding multiple browser sessions
+     * 
+     * @param formUrl The URL of the Google Form
+     * @return FormExtractionResult containing both title and questions
+     */
+    FormExtractionResult extractFormData(String formUrl);
 }

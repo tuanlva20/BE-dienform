@@ -97,10 +97,13 @@ public class FormServiceImpl implements FormService {
     Form form = formMapper.toEntity(formRequest);
     currentUserUtil.getCurrentUserIfPresent().ifPresent(form::setCreatedBy);
 
-    // If form name is null or empty, extract title from Google Form and append user-specific form
-    // count
+    // Extract both title and questions from Google Form in a single browser session
+    GoogleFormService.FormExtractionResult formData =
+        googleFormService.extractFormData(formRequest.getEditLink());
+
+    // If form name is null or empty, use extracted title and append user-specific form count
     if (form.getName() == null || form.getName().trim().isEmpty()) {
-      String title = googleFormService.extractTitleFromFormLink(form.getEditLink());
+      String title = formData.getTitle();
 
       // Count forms created by current user; fallback to global count if not authenticated
       long formCountForUser = currentUserUtil.getCurrentUserIdIfPresent()
@@ -127,9 +130,8 @@ public class FormServiceImpl implements FormService {
         .completedSurvey(0).failedSurvey(0).errorQuestion(0).build();
     statisticRepository.save(statistic);
 
-    // Extract and save questions from Google Form
-    List<ExtractedQuestion> extractedQuestions =
-        googleFormService.readGoogleForm(formRequest.getEditLink());
+    // Save questions from extracted data
+    List<ExtractedQuestion> extractedQuestions = formData.getQuestions();
     extractedQuestions.forEach(q -> {
       Question question = Question.builder().form(savedForm).title(q.getTitle())
           .description(q.getDescription()).type(q.getType()).required(q.isRequired())

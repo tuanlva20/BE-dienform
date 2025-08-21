@@ -352,7 +352,8 @@ public class DataEncodingServiceImpl implements DataEncodingService {
 
     // 2) Load form questions
     String formUrl = resolveFormUrl(request);
-    List<ExtractedQuestion> questions = formService.readGoogleForm(formUrl);
+    GoogleFormService.FormExtractionResult formData = formService.extractFormData(formUrl);
+    List<ExtractedQuestion> questions = formData.getQuestions();
     if (questions == null || questions.isEmpty()) {
       throw new IllegalArgumentException(
           "Không thể đọc cấu trúc Google Form từ đường dẫn cung cấp");

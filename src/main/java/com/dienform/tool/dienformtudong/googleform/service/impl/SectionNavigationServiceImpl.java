@@ -582,6 +582,156 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
 
   // ===== Helpers: mimic GoogleFormServiceImpl single-section filling =====
 
+  @Override
+  public SectionNavigationResult captureSectionData(String formUrl) {
+    WebDriver driver = null;
+    try {
+      driver = openBrowser(formUrl, false);
+      WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(timeoutSeconds));
+
+      // Clear autofill tracking for new form
+      requiredQuestionAutofillService.clearAutofillTracking();
+
+      // Wait for form to load
+      wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("form")));
+
+      boolean hasNextOnFirstPage = isVisible(driver, NEXT_BUTTON);
+      boolean hasSubmitOnFirstPage = isVisible(driver, SUBMIT_BUTTON);
+      if (!hasNextOnFirstPage && !hasSubmitOnFirstPage) {
+        // Probably a single-section form with no Next; let caller fallback to HTTP parser
+        return null;
+      }
+
+      List<String> htmls = new ArrayList<>();
+      List<SectionMetadata> metadataList = new ArrayList<>();
+      int maxSections = 50;
+
+      // Capture first section HTML
+      htmls.add(driver.getPageSource());
+
+      // If submit button visible on first page, return early
+      if (isVisible(driver, SUBMIT_BUTTON)) {
+        log.debug("Submit button visible on first page - single section form");
+        return new SectionNavigationResult(htmls, metadataList);
+      }
+
+      // Navigate through sections and capture both HTML and metadata
+      for (int i = 0; i < maxSections; i++) {
+        // Satisfy required questions minimally before clicking Next
+        try {
+          log.info("Attempting to satisfy required questions in section {}", i);
+          boolean autofillSuccess =
+              requiredQuestionAutofillService.satisfyRequiredQuestions(driver);
+
+          // Check if Next button is ready after autofill
+          boolean nextButtonReady = requiredQuestionAutofillService.isNextButtonReady(driver);
+
+          // Only retry if autofill failed AND Next button is not ready
+          if (!autofillSuccess && !nextButtonReady) {
+            log.warn("Autofill failed and Next button not ready for section {}, attempting retry",
+                i);
+            // Wait a bit and retry
+            try {
+              Thread.sleep(1000);
+            } catch (InterruptedException ie) {
+              Thread.currentThread().interrupt();
+            }
+            autofillSuccess = requiredQuestionAutofillService.satisfyRequiredQuestions(driver);
+            nextButtonReady = requiredQuestionAutofillService.isNextButtonReady(driver);
+          }
+
+          if (autofillSuccess || nextButtonReady) {
+            log.info("Successfully satisfied required questions in section {}", i);
+          } else {
+            log.warn("Failed to satisfy required questions in section {} after retry", i);
+          }
+        } catch (Exception e) {
+          log.warn("Autofill required questions failed (section {}): {}", i, e.getMessage());
+        }
+
+        // Verify Next button is still available before clicking
+        if (!requiredQuestionAutofillService.isNextButtonReady(driver)) {
+          log.warn("Next button not ready after autofill in section {}, stopping navigation", i);
+          break;
+        }
+
+        // Click Next with retry logic
+        try {
+          WebElement next = driver.findElement(NEXT_BUTTON);
+          next.click();
+          log.info("Successfully clicked Next button in section {}", i);
+        } catch (Exception e) {
+          log.warn("Failed to click Next button in section {}: {}", i, e.getMessage());
+          // Try one more time after a brief wait
+          try {
+            Thread.sleep(1000);
+            WebElement next = driver.findElement(NEXT_BUTTON);
+            next.click();
+            log.info("Successfully clicked Next button in section {} (retry)", i);
+          } catch (Exception retryEx) {
+            log.error("Failed to click Next button in section {} after retry: {}", i,
+                retryEx.getMessage());
+            break;
+          }
+        }
+
+        // Wait for section change
+        try {
+          Thread.sleep(300); // brief pause to allow DOM update
+        } catch (InterruptedException ie) {
+          Thread.currentThread().interrupt();
+        }
+        wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("form")));
+
+        // Capture current section HTML
+        htmls.add(driver.getPageSource());
+
+        // Extract metadata for this section (section index starts from 1 for non-first sections)
+        int sectionIndex = i + 1;
+        String title = extractSectionTitleFromFirstListItem(driver, sectionIndex);
+        String description = extractSectionDescriptionFromFirstListItem(driver);
+        metadataList.add(new SectionMetadata(sectionIndex, title, description));
+
+        // If submit button visible, stop here (do not click Submit)
+        if (isVisible(driver, SUBMIT_BUTTON)) {
+          log.debug("Submit button visible at section {} - stop navigation", i + 1);
+          break;
+        }
+
+        // If Next not visible, stop
+        if (!isVisible(driver, NEXT_BUTTON)) {
+          log.debug("No Next button at section {} - stop navigation", i + 1);
+          break;
+        }
+      }
+
+      log.info("Captured {} sections with {} metadata entries", htmls.size(), metadataList.size());
+      return new SectionNavigationResult(htmls, metadataList);
+
+    } catch (Exception e) {
+      log.warn("Section navigation failed: {}", e.getMessage());
+      return null;
+    } finally {
+      if (driver != null) {
+        // Add additional delay before shutdown to ensure form submission is fully processed
+        try {
+          log.info(
+              "Waiting 3 seconds before shutdown to ensure form submission is fully processed...");
+          Thread.sleep(3000);
+          log.info("Shutdown delay completed");
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          log.warn("Interrupted during shutdown delay");
+        }
+
+        try {
+          driver.quit();
+        } catch (Exception ignore) {
+        }
+      }
+    }
+  }
+
   private WebDriver openBrowser(String formUrl, boolean humanLike) {
     ChromeOptions options = new ChromeOptions();
     options.addArguments("--remote-allow-origins=*");

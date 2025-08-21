@@ -35,6 +35,28 @@ public interface SectionNavigationService {
   }
 
   /**
+   * Result class for combined section navigation
+   */
+  class SectionNavigationResult {
+    private final List<String> sectionHtmls;
+    private final List<SectionMetadata> sectionMetadata;
+
+    public SectionNavigationResult(List<String> sectionHtmls,
+        List<SectionMetadata> sectionMetadata) {
+      this.sectionHtmls = sectionHtmls;
+      this.sectionMetadata = sectionMetadata;
+    }
+
+    public List<String> getSectionHtmls() {
+      return sectionHtmls;
+    }
+
+    public List<SectionMetadata> getSectionMetadata() {
+      return sectionMetadata;
+    }
+  }
+
+  /**
    * Use Selenium to navigate through sections by clicking the Next ("Tiếp") button until the Submit
    * ("Gửi") button appears. For each section, capture the full page HTML.
    *
@@ -71,6 +93,16 @@ public interface SectionNavigationService {
   boolean fillSections(String formUrl,
       java.util.Map<com.dienform.tool.dienformtudong.question.entity.Question, com.dienform.tool.dienformtudong.question.entity.QuestionOption> selections,
       boolean humanLike);
+
+  /**
+   * Capture both section HTMLs and metadata in a single browser session. This method optimizes
+   * performance by avoiding multiple browser sessions.
+   *
+   * @param formUrl public form URL
+   * @return SectionNavigationResult containing both HTMLs and metadata, or null if no Next button
+   *         is found on first page
+   */
+  SectionNavigationResult captureSectionData(String formUrl);
 }
 
 
