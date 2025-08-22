@@ -20,6 +20,7 @@ import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.OneToMany;
 import jakarta.persistence.Table;
+import jakarta.validation.constraints.Size;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Getter;
@@ -40,10 +41,12 @@ public class Question extends AuditEntity implements Serializable {
   @GeneratedValue(strategy = GenerationType.AUTO)
   private UUID id;
 
-  @Column(name = "title")
+  @Column(name = "title", columnDefinition = "TEXT")
+  @Size(max = 65535, message = "Question title cannot exceed 65,535 characters")
   private String title;
 
-  @Column(name = "description")
+  @Column(name = "description", columnDefinition = "TEXT")
+  @Size(max = 65535, message = "Question description cannot exceed 65,535 characters")
   private String description;
 
   @Column(name = "type")
