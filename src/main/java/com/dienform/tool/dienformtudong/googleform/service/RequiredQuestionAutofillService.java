@@ -29,6 +29,22 @@ public interface RequiredQuestionAutofillService {
    * Clear autofill tracking (call this when starting a new form)
    */
   void clearAutofillTracking();
+
+  /**
+   * Check if we're stuck in the same section (to avoid infinite loops)
+   *
+   * @param driver active Selenium WebDriver at current section
+   * @return true if stuck in same section, false otherwise
+   */
+  boolean isStuckInSameSection(WebDriver driver);
+
+  /**
+   * Validate that all required questions are properly filled before proceeding
+   *
+   * @param driver active Selenium WebDriver at current section
+   * @return ValidationResult with status and error details
+   */
+  ValidationResult validateRequiredQuestions(WebDriver driver);
 }
 
 

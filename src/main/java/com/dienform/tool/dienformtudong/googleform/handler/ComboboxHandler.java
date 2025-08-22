@@ -382,7 +382,8 @@ public class ComboboxHandler {
   }
 
   /**
-   * Find option element using stable attributes (no dynamic classes or jsname)
+   * Find option element using stable attributes (no dynamic classes or jsname) Prioritizes options
+   * with tabindex="0" when available
    */
   private WebElement findOptionByStableAttributes(WebElement popupContainer, String optionText) {
     try {
@@ -392,19 +393,40 @@ public class ComboboxHandler {
       log.debug("Looking for option: '{}' (normalized: '{}') in {} options", optionText,
           normalizedOptionText, options.size());
 
+      // First pass: Look for exact match with tabindex="0" priority
+      WebElement preferredMatch = null;
+      WebElement exactMatch = null;
+      WebElement partialMatch = null;
+
       for (int i = 0; i < options.size(); i++) {
         WebElement option = options.get(i);
         try {
-          log.debug("Checking option {}: {}", i + 1, option.getText());
+          if (!option.isDisplayed()) {
+            continue;
+          }
+
+          String tabindex = option.getAttribute("tabindex");
+          boolean isPreferred = "0".equals(tabindex);
+
+          log.debug("Checking option {}: {} (tabindex: {})", i + 1, option.getText(), tabindex);
 
           // Strategy 1: Check data-value attribute (most stable - from HTML example)
           String dataValue = normalize(option.getAttribute("data-value"));
           if (!dataValue.isEmpty()) {
             log.debug("Option {} data-value: '{}'", i + 1, dataValue);
-            if (dataValue.equals(normalizedOptionText)
-                || dataValue.contains(normalizedOptionText)) {
-              log.debug("Found option by data-value: '{}'", dataValue);
-              return option;
+            if (dataValue.equals(normalizedOptionText)) {
+              if (isPreferred) {
+                log.debug("Found preferred exact match by data-value: '{}'", dataValue);
+                return option;
+              } else if (exactMatch == null) {
+                exactMatch = option;
+              }
+            } else if (dataValue.contains(normalizedOptionText)) {
+              if (isPreferred && preferredMatch == null) {
+                preferredMatch = option;
+              } else if (partialMatch == null) {
+                partialMatch = option;
+              }
             }
           }
 
@@ -412,10 +434,19 @@ public class ComboboxHandler {
           String ariaLabel = normalize(option.getAttribute("aria-label"));
           if (!ariaLabel.isEmpty()) {
             log.debug("Option {} aria-label: '{}'", i + 1, ariaLabel);
-            if (ariaLabel.equals(normalizedOptionText)
-                || ariaLabel.contains(normalizedOptionText)) {
-              log.debug("Found option by aria-label: '{}'", ariaLabel);
-              return option;
+            if (ariaLabel.equals(normalizedOptionText)) {
+              if (isPreferred) {
+                log.debug("Found preferred exact match by aria-label: '{}'", ariaLabel);
+                return option;
+              } else if (exactMatch == null) {
+                exactMatch = option;
+              }
+            } else if (ariaLabel.contains(normalizedOptionText)) {
+              if (isPreferred && preferredMatch == null) {
+                preferredMatch = option;
+              } else if (partialMatch == null) {
+                partialMatch = option;
+              }
             }
           }
 
@@ -425,10 +456,19 @@ public class ComboboxHandler {
             String spanText = normalize(span.getText());
             if (!spanText.isEmpty()) {
               log.debug("Option {} span[jsslot] text: '{}'", i + 1, spanText);
-              if (spanText.equals(normalizedOptionText)
-                  || spanText.contains(normalizedOptionText)) {
-                log.debug("Found option by span text: '{}'", spanText);
-                return option;
+              if (spanText.equals(normalizedOptionText)) {
+                if (isPreferred) {
+                  log.debug("Found preferred exact match by span text: '{}'", spanText);
+                  return option;
+                } else if (exactMatch == null) {
+                  exactMatch = option;
+                }
+              } else if (spanText.contains(normalizedOptionText)) {
+                if (isPreferred && preferredMatch == null) {
+                  preferredMatch = option;
+                } else if (partialMatch == null) {
+                  partialMatch = option;
+                }
               }
             }
           } catch (Exception e) {
@@ -439,10 +479,19 @@ public class ComboboxHandler {
           String optionTextContent = normalize(option.getText());
           if (!optionTextContent.isEmpty()) {
             log.debug("Option {} text content: '{}'", i + 1, optionTextContent);
-            if (optionTextContent.equals(normalizedOptionText)
-                || optionTextContent.contains(normalizedOptionText)) {
-              log.debug("Found option by text content: '{}'", optionTextContent);
-              return option;
+            if (optionTextContent.equals(normalizedOptionText)) {
+              if (isPreferred) {
+                log.debug("Found preferred exact match by text content: '{}'", optionTextContent);
+                return option;
+              } else if (exactMatch == null) {
+                exactMatch = option;
+              }
+            } else if (optionTextContent.contains(normalizedOptionText)) {
+              if (isPreferred && preferredMatch == null) {
+                preferredMatch = option;
+              } else if (partialMatch == null) {
+                partialMatch = option;
+              }
             }
           }
 
@@ -454,8 +503,12 @@ public class ComboboxHandler {
             if (!selectedText.isEmpty()) {
               log.debug("Option {} is selected with text: '{}'", i + 1, selectedText);
               if (selectedText.equals(normalizedOptionText)) {
-                log.debug("Found selected option by text: '{}'", selectedText);
-                return option;
+                if (isPreferred) {
+                  log.debug("Found preferred selected option by text: '{}'", selectedText);
+                  return option;
+                } else if (exactMatch == null) {
+                  exactMatch = option;
+                }
               }
             }
           }
@@ -464,6 +517,18 @@ public class ComboboxHandler {
           log.debug("Error checking option {}: {}", i + 1, e.getMessage());
           continue;
         }
+      }
+
+      // Return the best match found (preferred > exact > partial)
+      if (preferredMatch != null) {
+        log.debug("Returning preferred partial match");
+        return preferredMatch;
+      } else if (exactMatch != null) {
+        log.debug("Returning exact match");
+        return exactMatch;
+      } else if (partialMatch != null) {
+        log.debug("Returning partial match");
+        return partialMatch;
       }
 
       log.warn("Could not find option '{}' in any of the {} options", optionText, options.size());
