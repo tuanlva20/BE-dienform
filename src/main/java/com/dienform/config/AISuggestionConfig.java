@@ -21,8 +21,8 @@ public class AISuggestionConfig {
     public static class GeminiProperties {
       private String apiKey;
       private String baseUrl = "https://generativelanguage.googleapis.com/v1beta/models";
-      private String model = "gemini-2.0-flash-lite";
-      private Integer maxTokens = 900000;
+      private String model = "gemini-2.0-flash";
+      private Integer maxTokens = 800000;
       private Duration timeout = Duration.ofSeconds(30);
 
       // Getters and setters

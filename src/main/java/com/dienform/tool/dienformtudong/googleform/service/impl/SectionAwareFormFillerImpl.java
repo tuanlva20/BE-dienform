@@ -248,6 +248,29 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
         } catch (Exception e) {
           log.debug("No Next after intro or click failed: {}", e.getMessage());
         }
+      } else {
+        // Check if first section has no questions but has Next button
+        boolean hasQuestionsInFirstSection = hasQuestionsInCurrentSection(driver);
+        boolean hasNextButton = isNextButtonVisible(driver);
+
+        if (!hasQuestionsInFirstSection && hasNextButton) {
+          log.info("First section has no questions but has Next button, clicking Next to proceed");
+          try {
+            clickNextButton(driver, wait, humanLike);
+            try {
+              Thread.sleep(800);
+            } catch (InterruptedException ie) {
+              Thread.currentThread().interrupt();
+            }
+            log.info("Successfully clicked Next button to move past empty first section");
+          } catch (Exception e) {
+            log.warn("Failed to click Next button for empty first section: {}", e.getMessage());
+          }
+        } else if (!hasQuestionsInFirstSection && !hasNextButton) {
+          log.info("First section has no questions and no Next button - single section form");
+        } else {
+          log.info("First section has questions but none were filled - this may indicate an issue");
+        }
       }
 
       // 3. Fill each section with improved navigation logic
@@ -1808,6 +1831,40 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
     } catch (Exception e) {
       log.debug("Error checking Next button visibility: {}", e.getMessage());
       return false;
+    }
+  }
+
+  /**
+   * Check if the current section has any questions
+   */
+  private boolean hasQuestionsInCurrentSection(WebDriver driver) {
+    try {
+      // Check if the current page contains any question elements (div[role='listitem'])
+      List<WebElement> questionElements =
+          driver.findElements(By.cssSelector("div[role='listitem']"));
+
+      // Also check for other question indicators
+      List<WebElement> textInputs =
+          driver.findElements(By.cssSelector("input[type='text'], input[type='email'], textarea"));
+      List<WebElement> radioGroups = driver.findElements(By.cssSelector("[role='radiogroup']"));
+      List<WebElement> checkboxes = driver.findElements(By.cssSelector("[role='checkbox']"));
+      List<WebElement> listboxes = driver.findElements(By.cssSelector("[role='listbox']"));
+
+      boolean hasQuestionElements = !questionElements.isEmpty();
+      boolean hasInputElements = !textInputs.isEmpty() || !radioGroups.isEmpty()
+          || !checkboxes.isEmpty() || !listboxes.isEmpty();
+
+      boolean hasQuestions = hasQuestionElements || hasInputElements;
+
+      log.debug(
+          "Section question check: questionElements={}, textInputs={}, radioGroups={}, checkboxes={}, listboxes={}, hasQuestions={}",
+          questionElements.size(), textInputs.size(), radioGroups.size(), checkboxes.size(),
+          listboxes.size(), hasQuestions);
+
+      return hasQuestions;
+    } catch (Exception e) {
+      log.warn("Error checking for questions in current section: {}", e.getMessage());
+      return false; // Assume no questions if an error occurs
     }
   }
 

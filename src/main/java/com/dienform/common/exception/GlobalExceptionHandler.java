@@ -3,6 +3,7 @@ package com.dienform.common.exception;
 import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.Map;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.BindException;
@@ -111,6 +112,30 @@ public class GlobalExceptionHandler {
     details.put("timestamp", LocalDateTime.now());
     return new ResponseEntity<>(ResponseModel.error("Validation error: " + ex.getMessage(),
         HttpStatus.BAD_REQUEST, ErrorCode.CONSTRAINT_VIOLATION, details), HttpStatus.BAD_REQUEST);
+  }
+
+  @ExceptionHandler(DataIntegrityViolationException.class)
+  public ResponseEntity<ResponseModel<Void>> handleDataIntegrityViolationException(
+      DataIntegrityViolationException ex, WebRequest request) {
+    log.error("Data integrity violation: {}", ex.getMessage(), ex);
+
+    String userMessage = "Dữ liệu không hợp lệ";
+    if (ex.getMessage() != null) {
+      if (ex.getMessage().contains("Data truncation")) {
+        userMessage = "Dữ liệu quá dài cho một số trường. Vui lòng kiểm tra lại thông tin nhập.";
+      } else if (ex.getMessage().contains("Duplicate entry")) {
+        userMessage = "Dữ liệu đã tồn tại trong hệ thống.";
+      } else if (ex.getMessage().contains("foreign key constraint")) {
+        userMessage = "Dữ liệu không hợp lệ do vi phạm ràng buộc tham chiếu.";
+      }
+    }
+
+    Map<String, Object> details = new HashMap<>();
+    details.put("path", request.getDescription(false));
+    details.put("timestamp", LocalDateTime.now());
+    details.put("technicalError", ex.getMessage());
+    return new ResponseEntity<>(ResponseModel.error(userMessage, HttpStatus.BAD_REQUEST,
+        ErrorCode.DATA_INTEGRITY_VIOLATION, details), HttpStatus.BAD_REQUEST);
   }
 
   @ExceptionHandler(ConflictException.class)
