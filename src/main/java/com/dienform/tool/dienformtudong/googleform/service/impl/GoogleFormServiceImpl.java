@@ -21,7 +21,6 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadLocalRandom;
@@ -334,139 +333,82 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     }
 
     @Override
+    @Transactional
     public int fillForm(UUID fillRequestId) {
-        log.info("Starting automated form filling for request ID: {}", fillRequestId);
+        log.info("Starting form filling for fillRequestId: {}", fillRequestId);
 
-        // CRITICAL FIX: Add retry mechanism for finding fill request
-        final FillRequest fillRequest = findFillRequestWithRetry(fillRequestId);
+        // Get fill request with all data
+        FillRequest fillRequest =
+                fillRequestRepository.findByIdWithAllData(fillRequestId).orElseThrow(
+                        () -> new ResourceNotFoundException("Fill Request", "id", fillRequestId));
 
-        // Validate fill request status before starting
-        if (!(com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.PENDING
-                .equals(fillRequest.getStatus())
-                || com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.IN_PROCESS
-                        .equals(fillRequest.getStatus()))) {
-            log.warn("Fill request {} is not in valid state to start. Current status: {}",
-                    fillRequestId, fillRequest.getStatus());
-            return 0;
+        // Check if already completed
+        if (fillRequest.getCompletedSurvey() >= fillRequest.getSurveyCount()) {
+            log.info("Fill request {} is already completed ({}), updating status to COMPLETED",
+                    fillRequestId, fillRequest.getCompletedSurvey());
+            updateFillRequestStatus(fillRequest, Constants.FILL_REQUEST_STATUS_COMPLETED);
+            return fillRequest.getCompletedSurvey();
         }
 
-        // Avoid aggressive per-request cache clears; TTL scheduler will clean caches periodically
+        // Calculate remaining surveys to complete
+        int remainingSurveys = fillRequest.getSurveyCount() - fillRequest.getCompletedSurvey();
+        log.info("Fill request {} has {} completed, needs {} more surveys to complete",
+                fillRequestId, fillRequest.getCompletedSurvey(), remainingSurveys);
 
-        // Find the form
-        Form form = formRepository.findById(fillRequest.getForm().getId()).orElseThrow(
-                () -> new ResourceNotFoundException("Form", "id", fillRequest.getForm().getId()));
+        // Update status to RUNNING if not already
+        if (!Constants.FILL_REQUEST_STATUS_RUNNING.equals(fillRequest.getStatus().name())) {
+            updateFillRequestStatus(fillRequest, Constants.FILL_REQUEST_STATUS_RUNNING);
+        }
+
+        // Get form and questions
+        Form form = fillRequest.getForm();
+        if (form == null) {
+            log.error("Form not found for fillRequestId: {}", fillRequestId);
+            updateFillRequestStatus(fillRequest, Constants.FILL_REQUEST_STATUS_FAILED);
+            return 0;
+        }
 
         String link = form.getEditLink();
-        if (link == null || link.isEmpty()) {
-            log.error("Form edit link is empty for form ID: {}", form.getId());
+        if (link == null || link.trim().isEmpty()) {
+            log.error("Form link is null or empty for fillRequestId: {}", fillRequestId);
             updateFillRequestStatus(fillRequest, Constants.FILL_REQUEST_STATUS_FAILED);
             return 0;
         }
 
-        // Find answer distributions
-        List<AnswerDistribution> distributions = fillRequest.getAnswerDistributions();
-        if (ArrayUtils.isEmpty(distributions)) {
-            log.error("No answer distributions found for request ID: {}", fillRequestId);
+        // Get questions and answer distributions
+        List<Question> questions = questionRepository.findByForm(form);
+        if (questions.isEmpty()) {
+            log.error("No questions found for form: {}", form.getId());
             updateFillRequestStatus(fillRequest, Constants.FILL_REQUEST_STATUS_FAILED);
             return 0;
         }
 
-        // Prepare 'Other' text pools for radio/checkbox per question
-        try {
-            Map<UUID, Queue<String>> poolPerQuestion = new ConcurrentHashMap<>();
-            Map<UUID, java.util.List<String>> basePerQuestion = new ConcurrentHashMap<>();
-            Map<UUID, AtomicInteger> indexPerQuestion = new ConcurrentHashMap<>();
-            for (AnswerDistribution d : distributions) {
-                try {
-                    if (d.getQuestion() == null || d.getOption() == null)
-                        continue;
-                    Question q = d.getQuestion();
-                    QuestionOption opt = d.getOption();
-                    String optValue = opt.getValue();
-                    String val = d.getValueString();
-                    // Check if this is an "Other" option - either by optValue or by the option's
-                    // value field
-                    boolean isOtherOption =
-                            (optValue != null && "__other_option__".equalsIgnoreCase(optValue))
-                                    || (opt.getValue() != null
-                                            && "__other_option__".equalsIgnoreCase(opt.getValue()));
-                    if (isOtherOption && val != null && !val.trim().isEmpty()) {
-                        log.debug("Found 'Other' option for question {} with valueString: {}",
-                                q.getId(), val);
-                        Queue<String> qPool = poolPerQuestion.computeIfAbsent(q.getId(),
-                                k -> new ConcurrentLinkedQueue<>());
-                        // Base list stores unique user values for round-robin reuse
-                        java.util.List<String> base = basePerQuestion.computeIfAbsent(q.getId(),
-                                k -> new java.util.ArrayList<>());
-                        base.add(val.trim());
-                        // Queue will be populated lazily from base list during consumption
-                        indexPerQuestion.putIfAbsent(q.getId(), new AtomicInteger(0));
-                    }
-                } catch (Exception ignore) {
-                }
-            }
-            otherTextPoolsByFillRequest.put(fillRequestId, poolPerQuestion);
-            otherTextBaseByFillRequest.put(fillRequestId, basePerQuestion);
-            otherTextIndexByFillRequest.put(fillRequestId, indexPerQuestion);
-            log.info("Prepared 'Other' text pools for {} questions", poolPerQuestion.size());
-        } catch (Exception e) {
-            log.warn("Failed to prepare 'Other' text pools: {}", e.getMessage());
-        }
+        List<AnswerDistribution> distributions =
+                answerDistributionRepository.findByFillRequestId(fillRequestId);
 
-        // Create a record in fill form sessionExecute
-        final SesstionExecution sessionExecute = SesstionExecution.builder().formId(form.getId())
-                .fillRequestId(fillRequestId).startTime(LocalDateTime.now())
-                .totalExecutions(fillRequest.getSurveyCount()).successfulExecutions(0)
-                .failedExecutions(0).status(FormStatusEnum.PROCESSING).build();
-
-        sessionExecutionRepository.save(sessionExecute);
-
-        // Update request status to RUNNING using direct update to avoid entity overwrite of
-        // counters
-        try {
-            fillRequestRepository.updateStatus(fillRequest.getId(),
-                    com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.IN_PROCESS);
-        } catch (Exception ignore) {
-            // fallback to existing method
-            updateFillRequestStatus(fillRequest,
-                    com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.IN_PROCESS
-                            .name());
-        }
-
-        // Ensure user is in room and send initial updates
-        ensureUserInRoom(fillRequest);
-
-        // Group distributions by question ID to avoid entity identity issues
-        Map<UUID, List<AnswerDistribution>> distributionsByQuestionId = distributions.stream()
-                .collect(Collectors.groupingBy(dist -> dist.getQuestion().getId()));
-
-        // Convert back to Question-based map for compatibility
+        // Group distributions by question and create execution plans for remaining surveys
         Map<Question, List<AnswerDistribution>> distributionsByQuestion = new HashMap<>();
-        for (Map.Entry<UUID, List<AnswerDistribution>> entry : distributionsByQuestionId
-                .entrySet()) {
-            UUID questionId = entry.getKey();
-            List<AnswerDistribution> questionDistributions = entry.getValue();
-
-            // Get the question from the first distribution
-            Question question = questionDistributions.get(0).getQuestion();
-            distributionsByQuestion.put(question, questionDistributions);
-
-            log.debug("Grouped {} distributions for question: '{}' (ID: {})",
-                    questionDistributions.size(), question.getTitle(), questionId);
+        for (AnswerDistribution dist : distributions) {
+            Question question = dist.getQuestion();
+            distributionsByQuestion.computeIfAbsent(question, k -> new ArrayList<>()).add(dist);
         }
-
-        // Create execution plan based on percentages
         List<Map<Question, QuestionOption>> executionPlans =
-                createExecutionPlans(distributionsByQuestion, fillRequest.getSurveyCount());
+                createExecutionPlans(distributionsByQuestion, remainingSurveys);
+
+        if (executionPlans.isEmpty()) {
+            log.error("No execution plans created for fillRequestId: {}", fillRequestId);
+            updateFillRequestStatus(fillRequest, Constants.FILL_REQUEST_STATUS_FAILED);
+            return 0;
+        }
 
         // Add critical logging to debug execution plans
-        log.info("Created {} execution plans for {} surveys (fillRequestId: {})",
-                executionPlans.size(), fillRequest.getSurveyCount(), fillRequestId);
+        log.info("Created {} execution plans for {} remaining surveys (fillRequestId: {})",
+                executionPlans.size(), remainingSurveys, fillRequestId);
 
-        if (executionPlans.size() != fillRequest.getSurveyCount()) {
+        if (executionPlans.size() != remainingSurveys) {
             log.error(
-                    "CRITICAL: Execution plans count ({}) does not match survey count ({}) for fillRequestId: {}",
-                    executionPlans.size(), fillRequest.getSurveyCount(), fillRequestId);
+                    "CRITICAL: Execution plans count ({}) does not match remaining surveys ({}) for fillRequestId: {}",
+                    executionPlans.size(), remainingSurveys, fillRequestId);
         }
 
         // Initialize counters
@@ -483,8 +425,9 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             executor = Executors.newFixedThreadPool(threadPoolSize);
             currentFillRequestIdHolder.set(fillRequestId);
 
-            // Execute form filling tasks
-            log.info("Starting execution of {} form filling tasks for fillRequestId: {}",
+            // Execute form filling tasks for remaining surveys
+            log.info(
+                    "Starting execution of {} form filling tasks for remaining surveys (fillRequestId: {})",
                     executionPlans.size(), fillRequestId);
 
             int planIndex = 0;
@@ -523,14 +466,14 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                         }
 
                         log.info("Progress: {}/{} tasks completed for fillRequestId: {}", processed,
-                                fillRequest.getSurveyCount(), fillRequestId);
+                                remainingSurveys, fillRequestId);
 
-                        if (processed == fillRequest.getSurveyCount()) {
+                        if (processed == remainingSurveys) {
                             // All tasks finished execution, update final status based on DB state
                             log.info(
                                     "All {} tasks completed for fillRequestId: {}. Updating final status...",
                                     processed, fillRequestId);
-                            updateFinalStatus(fillRequest, sessionExecute, successCount.get(),
+                            updateFinalStatus(fillRequest, null, successCount.get(),
                                     failCount.get());
                         }
                     });
@@ -538,32 +481,13 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                     futures.add(future);
 
                 } catch (Exception e) {
-                    log.error(
-                            "Error creating CompletableFuture for plan {}/{} (fillRequestId: {}): {}",
+                    log.error("Failed to schedule execution plan {}/{} for fillRequestId: {}: {}",
                             planIndex, executionPlans.size(), fillRequestId, e.getMessage(), e);
                     failCount.incrementAndGet();
-
-                    // Since CompletableFuture creation failed, we need to manually handle progress
-                    int processed = totalProcessed.incrementAndGet();
-                    log.warn(
-                            "Plan {}/{} failed during setup - marking as processed: {}/{} for fillRequestId: {}",
-                            planIndex, executionPlans.size(), processed,
-                            fillRequest.getSurveyCount(), fillRequestId);
-
-                    // Check if this was the last task
-                    if (processed == fillRequest.getSurveyCount()) {
-                        log.info(
-                                "Last task failed during setup - updating final status for fillRequestId: {}",
-                                fillRequestId);
-                        updateFinalStatus(fillRequest, sessionExecute, successCount.get(),
-                                failCount.get());
-                    }
                 }
             }
 
-            // Shut down executor and wait for completion
-            log.info("Waiting for {} async tasks to complete (fillRequestId: {})", futures.size(),
-                    fillRequestId);
+            // Wait for all tasks to complete
             CompletableFuture<Void> allTasks =
                     CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
             try {
@@ -1008,9 +932,9 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             if (com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.IN_PROCESS
                     .equals(fillRequest.getStatus())) {
                 fillRequest.setStatus(
-                        com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.PENDING);
+                        com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.QUEUED);
                 fillRequestRepository.save(fillRequest);
-                log.info("Reset fill request {} status from RUNNING to PENDING", fillRequestId);
+                log.info("Reset fill request {} status from RUNNING to QUEUED", fillRequestId);
             } else {
                 log.info("Fill request {} is not in RUNNING state, current status: {}",
                         fillRequestId, fillRequest.getStatus());
@@ -1031,23 +955,19 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     @Transactional
     protected void updateFillRequestStatus(FillRequest fillRequest, String status) {
         try {
-            // Reload fill request to ensure we have latest state
-            FillRequest current = fillRequestRepository.findById(fillRequest.getId()).orElseThrow(
-                    () -> new ResourceNotFoundException("Fill Request", "id", fillRequest.getId()));
+            // Use optimistic locking for status updates
+            com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum newStatusEnum =
+                    com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum
+                            .valueOf(status);
 
-            // Only update if status actually changed
-            String currentStatus = current.getStatus() != null ? current.getStatus().name() : null;
-            if (!status.equals(currentStatus)) {
-                current.setStatus(
-                        com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum
-                                .valueOf(status));
-                fillRequestRepository.save(current);
-                log.info("Updated fill request {} status to: {}", current.getId(), status);
+            boolean success =
+                    fillRequestCounterService.updateStatus(fillRequest.getId(), newStatusEnum);
 
-                // Emit realtime update only when status changes
-                emitSingleUpdate(current);
+            if (success) {
+                log.info("Updated fill request {} status to: {}", fillRequest.getId(), status);
             } else {
-                log.debug("Fill request {} status unchanged: {}", current.getId(), status);
+                log.warn("Failed to update fill request {} status to: {}", fillRequest.getId(),
+                        status);
             }
         } catch (Exception e) {
             log.error("Failed to update fill request status: {}", e.getMessage(), e);
@@ -3965,16 +3885,14 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                 successCount.incrementAndGet();
                 log.info("Form fill task succeeded for fillRequest {}", fillRequestId);
                 try {
-                    // Use dedicated counter service with REQUIRES_NEW transaction and retry logic
-                    boolean incrementSuccess = fillRequestCounterService
-                            .incrementCompletedSurveyWithDelay(fillRequestId);
+                    // Use simple atomic increment - this was working fine before
+                    boolean incrementSuccess =
+                            fillRequestCounterService.incrementCompletedSurvey(fillRequestId);
                     if (!incrementSuccess) {
                         log.warn(
-                                "Failed to increment completedSurvey for {} after retries (may have reached limit)",
+                                "Failed to increment completedSurvey for {} (may have reached limit)",
                                 fillRequestId);
                     }
-                    // Emit progress update after increment so FE reflects latest completedSurvey
-                    emitProgressUpdate(fillRequestId);
                 } catch (Exception e) {
                     log.error("Failed to increment completedSurvey for {}: {}", fillRequestId,
                             e.getMessage());

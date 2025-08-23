@@ -240,14 +240,14 @@ public class FormServiceImpl implements FormService {
               .orElseThrow(() -> new ResourceNotFoundException("Question", "id", question.getId()))
               .getOptions());
     }
-    // Fetch fill requests
+    // Fetch fill requests with eager loading of answer distributions
     List<FillRequest> fillRequestDbs = fillRequestRepository.findByForm(form);
     for (FillRequest fillRequest : form.getFillRequests()) {
-      fillRequest.setAnswerDistributions(
-          fillRequestDbs.stream().filter(f -> f.getId().equals(fillRequest.getId())).findFirst()
-              .orElseThrow(
-                  () -> new ResourceNotFoundException("FillRequest", "id", fillRequest.getId()))
-              .getAnswerDistributions());
+      // Use findByIdWithAllData to get AnswerDistributions with eager loading
+      FillRequest fillRequestWithData =
+          fillRequestRepository.findByIdWithAllData(fillRequest.getId()).orElseThrow(
+              () -> new ResourceNotFoundException("FillRequest", "id", fillRequest.getId()));
+      fillRequest.setAnswerDistributions(fillRequestWithData.getAnswerDistributions());
     }
     // Sort
     SortUtil.sortByPosition(form);

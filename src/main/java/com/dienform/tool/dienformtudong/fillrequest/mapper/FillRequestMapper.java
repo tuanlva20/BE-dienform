@@ -30,7 +30,9 @@ public interface FillRequestMapper {
       FillRequestResponse.AnswerDistributionResponse.AnswerDistributionResponseBuilder builder =
           FillRequestResponse.AnswerDistributionResponse.builder()
               .questionId(distribution.getQuestion().getId())
-              .percentage(distribution.getPercentage()).count(distribution.getCount())
+              .percentage(distribution.getPercentage())
+              .count(distribution.getCount() != null ? distribution.getCount() : 0) // Handle null
+                                                                                    // count
               .valueString(distribution.getValueString()).rowId(distribution.getRowId())
               .positionIndex(distribution.getPositionIndex());
 
