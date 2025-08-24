@@ -7,7 +7,7 @@ spring:
     open-in-view: false
     show-sql: false # Disable SQL logging in production
     hibernate:
-      ddl-auto: update # Validate schema in production
+      ddl-auto: none # Validate schema in production
   datasource:
     url: ${DATABASE_URL:jdbc:mysql://160.25.72.91:3306/fill_form}
     username: ${DATABASE_USERNAME:fillform}
