@@ -6,6 +6,7 @@ import java.util.UUID;
 import org.springframework.data.annotation.CreatedDate;
 import org.springframework.data.annotation.LastModifiedDate;
 import org.springframework.data.jpa.domain.support.AuditingEntityListener;
+import com.dienform.common.util.DateTimeUtil;
 import jakarta.persistence.Column;
 import jakarta.persistence.EntityListeners;
 import jakarta.persistence.GeneratedValue;
@@ -39,15 +40,15 @@ public abstract class AuditEntity implements Serializable {
   @PrePersist
   protected void onCreate() {
     if (createdAt == null) {
-      createdAt = LocalDateTime.now();
+      createdAt = DateTimeUtil.now();
     }
     if (updatedAt == null) {
-      updatedAt = LocalDateTime.now();
+      updatedAt = DateTimeUtil.now();
     }
   }
 
   @PreUpdate
   protected void onUpdate() {
-    updatedAt = LocalDateTime.now();
+    updatedAt = DateTimeUtil.now();
   }
 }

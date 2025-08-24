@@ -3,9 +3,10 @@ package com.dienform.tool.dienformtudong.datamapping.dto.request;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
+import com.dienform.common.util.Iso8601LocalDateTimeDeserializer;
 import com.fasterxml.jackson.annotation.JsonAlias;
-import com.fasterxml.jackson.annotation.JsonFormat;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.Min;
@@ -37,10 +38,10 @@ public class DataFillRequestDTO {
   @JsonProperty("isHumanLike")
   private Boolean isHumanLike = false;
 
-  @JsonFormat(pattern = "yyyy-MM-dd'T'HH:mm:ss[.SSS]")
+  @JsonDeserialize(using = Iso8601LocalDateTimeDeserializer.class)
   private LocalDateTime startDate;
 
-  @JsonFormat(pattern = "yyyy-MM-dd'T'HH:mm:ss[.SSS]")
+  @JsonDeserialize(using = Iso8601LocalDateTimeDeserializer.class)
   private LocalDateTime endDate;
 }
 

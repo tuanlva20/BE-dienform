@@ -4,6 +4,7 @@ import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.springframework.stereotype.Service;
+import com.dienform.common.util.DateTimeUtil;
 import lombok.extern.slf4j.Slf4j;
 
 /**
@@ -21,7 +22,7 @@ public class PriorityCalculationService {
      * older requests to prevent starvation
      */
     public int calculateAgeBasedPriority(LocalDateTime createdAt) {
-        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime now = DateTimeUtil.now();
         long hoursWaited = Duration.between(createdAt, now).toHours();
 
         // Priority increases with waiting time to prevent starvation
@@ -42,7 +43,7 @@ public class PriorityCalculationService {
      * Calculate priority with linear formula Priority increases by 1 point every 30 minutes
      */
     public int calculateLinearAgePriority(LocalDateTime createdAt) {
-        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime now = DateTimeUtil.now();
         long minutesWaited = Duration.between(createdAt, now).toMinutes();
 
         // Priority increases 1 point every 30 minutes
@@ -56,7 +57,7 @@ public class PriorityCalculationService {
      * Calculate priority with logarithmic formula (slower increase)
      */
     public int calculateLogarithmicAgePriority(LocalDateTime createdAt) {
-        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime now = DateTimeUtil.now();
         long hoursWaited = Duration.between(createdAt, now).toHours();
 
         // Priority increases logarithmically: log(hours + 1) * 3

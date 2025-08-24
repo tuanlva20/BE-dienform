@@ -1,6 +1,5 @@
 package com.dienform.tool.dienformtudong.aisuggestion.service;
 
-import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -15,6 +14,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import com.dienform.common.util.DateTimeUtil;
 import com.dienform.tool.dienformtudong.aisuggestion.dto.request.AISuggestionRequest;
 import com.dienform.tool.dienformtudong.aisuggestion.dto.request.AnswerAttributesRequest;
 import com.dienform.tool.dienformtudong.aisuggestion.dto.response.AnswerAttributesResponse;
@@ -83,7 +83,7 @@ public class AISuggestionQueueService {
             AISuggestionRequestEntity entity =
                     AISuggestionRequestEntity.builder().formId(request.getFormId())
                             .sampleCount(request.getSampleCount()).priority(request.getPriority())
-                            .queuePosition(nextPosition).queuedAt(LocalDateTime.now())
+                            .queuePosition(nextPosition).queuedAt(DateTimeUtil.now())
                             .status(AISuggestionStatus.QUEUED).requestData(requestData).build();
 
             AISuggestionRequestEntity saved = repository.save(entity);
@@ -190,7 +190,7 @@ public class AISuggestionQueueService {
         stats.put("activeRequests", activeRequests.get());
         stats.put("maxConcurrent", maxConcurrent);
         stats.put("maxQueueSize", maxQueueSize);
-        stats.put("timestamp", LocalDateTime.now());
+        stats.put("timestamp", DateTimeUtil.now());
 
         return stats;
     }
@@ -202,7 +202,7 @@ public class AISuggestionQueueService {
         try {
             // Update status to PROCESSING
             request.setStatus(AISuggestionStatus.PROCESSING);
-            request.setProcessingStartedAt(LocalDateTime.now());
+            request.setProcessingStartedAt(DateTimeUtil.now());
             repository.save(request);
 
             // Remove from queue and update positions
@@ -233,7 +233,7 @@ public class AISuggestionQueueService {
 
                     // Update with success
                     request.setStatus(AISuggestionStatus.COMPLETED);
-                    request.setProcessingCompletedAt(LocalDateTime.now());
+                    request.setProcessingCompletedAt(DateTimeUtil.now());
                     request.setResultData(convertResponseToMap(response));
                     repository.save(request);
 

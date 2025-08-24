@@ -5,6 +5,7 @@ import java.util.Map;
 import java.util.UUID;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
+import com.dienform.common.util.DateTimeUtil;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
@@ -20,8 +21,8 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 /**
- * Entity for AI Suggestion requests in queue system
- * Supports priority-based processing and status tracking
+ * Entity for AI Suggestion requests in queue system Supports priority-based processing and status
+ * tracking
  */
 @Entity
 @Table(name = "ai_suggestion_request")
@@ -30,6 +31,17 @@ import lombok.NoArgsConstructor;
 @NoArgsConstructor
 @AllArgsConstructor
 public class AISuggestionRequestEntity {
+
+    /**
+     * Status enum for AI Suggestion requests
+     */
+    public enum AISuggestionStatus {
+        QUEUED, // Request is in queue waiting to be processed
+        PROCESSING, // Request is currently being processed
+        COMPLETED, // Request completed successfully
+        FAILED, // Request failed after max retries
+        CANCELLED // Request was cancelled
+    }
 
     @Id
     @GeneratedValue(strategy = GenerationType.UUID)
@@ -89,8 +101,8 @@ public class AISuggestionRequestEntity {
 
     @PrePersist
     protected void onCreate() {
-        createdAt = LocalDateTime.now();
-        updatedAt = LocalDateTime.now();
+        createdAt = DateTimeUtil.now();
+        updatedAt = DateTimeUtil.now();
         if (status == null) {
             status = AISuggestionStatus.QUEUED;
         }
@@ -103,16 +115,5 @@ public class AISuggestionRequestEntity {
         if (maxRetries == null) {
             maxRetries = 3;
         }
-    }
-
-    /**
-     * Status enum for AI Suggestion requests
-     */
-    public enum AISuggestionStatus {
-        QUEUED,      // Request is in queue waiting to be processed
-        PROCESSING,  // Request is currently being processed
-        COMPLETED,   // Request completed successfully
-        FAILED,      // Request failed after max retries
-        CANCELLED    // Request was cancelled
     }
 }

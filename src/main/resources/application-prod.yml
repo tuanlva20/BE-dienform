@@ -3,13 +3,27 @@ server:
   port: 2412
 
 spring:
+  jackson:
+    time-zone: Asia/Ho_Chi_Minh
+    date-format: yyyy-MM-dd HH:mm:ss
+    deserialization:
+      fail-on-unknown-properties: false
+    serialization:
+      write-dates-as-timestamps: false
+      write-date-timestamps-as-nanoseconds: false
   jpa:
     open-in-view: false
     show-sql: false # Disable SQL logging in production
     hibernate:
       ddl-auto: none # Validate schema in production
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: Asia/Ho_Chi_Minh
+        connection:
+          timezone: Asia/Ho_Chi_Minh
   datasource:
-    url: ${DATABASE_URL:jdbc:mysql://160.25.72.91:3306/fill_form}
+    url: ${DATABASE_URL:jdbc:mysql://160.25.72.91:3306/fill_form?useSSL=false&serverTimezone=Asia/Ho_Chi_Minh}
     username: ${DATABASE_USERNAME:fillform}
     password: ${DATABASE_PASSWORD:admin@}
     driver-class-name: com.mysql.cj.jdbc.Driver

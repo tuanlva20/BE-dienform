@@ -7,6 +7,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import com.dienform.common.util.DateTimeUtil;
 import com.dienform.tool.dienformtudong.fillrequest.entity.FillRequest;
 import com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum;
 import com.dienform.tool.dienformtudong.fillrequest.repository.FillRequestRepository;
@@ -62,7 +63,7 @@ public class DynamicPriorityService {
                         request.getCreatedAt(), request.isHumanLike(),
                         request.getTotalPrice().compareTo(BigDecimal.valueOf(1000000)) > 0, // isHighValue
                         request.getStartDate() != null && java.time.Duration
-                                .between(LocalDateTime.now(), request.getStartDate()).toHours() < 1 // isUrgent
+                                .between(DateTimeUtil.now(), request.getStartDate()).toHours() < 1 // isUrgent
                 );
 
                 // Only update if priority has changed
@@ -99,7 +100,7 @@ public class DynamicPriorityService {
                     .calculatePriorityWithHumanFactor(request.getCreatedAt(), request.isHumanLike(),
                             request.getTotalPrice().compareTo(BigDecimal.valueOf(1000000)) > 0, // isHighValue
                             request.getStartDate() != null && java.time.Duration
-                                    .between(LocalDateTime.now(), request.getStartDate())
+                                    .between(DateTimeUtil.now(), request.getStartDate())
                                     .toHours() < 1 // isUrgent
                     );
 
@@ -142,7 +143,7 @@ public class DynamicPriorityService {
         }
 
         stats.totalQueued = queuedRequests.size();
-        stats.timestamp = LocalDateTime.now();
+        stats.timestamp = DateTimeUtil.now();
 
         return stats;
     }

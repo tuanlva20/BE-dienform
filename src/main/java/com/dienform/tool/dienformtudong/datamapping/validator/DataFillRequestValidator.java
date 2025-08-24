@@ -216,7 +216,7 @@ public class DataFillRequestValidator {
       }
 
       // Start date cannot be in the past (with timezone consideration)
-      LocalDateTime nowVietnam = DateTimeUtil.nowVietnam();
+      LocalDateTime nowVietnam = DateTimeUtil.now();
       if (startDate.isBefore(nowVietnam.minusMinutes(5))) {
         errors.add("Ngày bắt đầu không thể là thời điểm trong quá khứ");
       }

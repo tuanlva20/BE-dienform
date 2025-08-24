@@ -1,6 +1,5 @@
 package com.dienform.tool.dienformtudong.fillrequest.service;
 
-import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -15,6 +14,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import com.dienform.common.util.CurrentUserUtil;
+import com.dienform.common.util.DateTimeUtil;
 import com.dienform.realtime.FillRequestRealtimeGateway;
 import com.dienform.tool.dienformtudong.datamapping.dto.request.DataFillRequestDTO;
 import com.dienform.tool.dienformtudong.datamapping.service.GoogleSheetsService;
@@ -191,7 +191,7 @@ public class QueueManagementService {
       // Update fill request to QUEUED status
       fillRequest.setStatus(FillRequestStatusEnum.QUEUED);
       fillRequest.setQueuePosition(nextPosition);
-      fillRequest.setQueuedAt(LocalDateTime.now());
+      fillRequest.setQueuedAt(DateTimeUtil.now());
       fillRequestRepository.save(fillRequest);
 
       log.info("Added fill request {} to queue at position {}", fillRequest.getId(), nextPosition);
@@ -341,9 +341,9 @@ public class QueueManagementService {
         }
 
         // Check if request can be processed (startDate check)
-        if (request.getStartDate() != null && request.getStartDate().isAfter(LocalDateTime.now())) {
+        if (request.getStartDate() != null && request.getStartDate().isAfter(DateTimeUtil.now())) {
           log.debug("Skipping non-human request {} - startDate {} is in the future",
-              request.getId(), request.getStartDate());
+              request.getId(), DateTimeUtil.formatForLog(request.getStartDate()));
           continue;
         }
 
@@ -362,9 +362,9 @@ public class QueueManagementService {
         }
 
         // Check if request can be processed (startDate check)
-        if (request.getStartDate() != null && request.getStartDate().isAfter(LocalDateTime.now())) {
+        if (request.getStartDate() != null && request.getStartDate().isAfter(DateTimeUtil.now())) {
           log.debug("Skipping human request {} - startDate {} is in the future", request.getId(),
-              request.getStartDate());
+              DateTimeUtil.formatForLog(request.getStartDate()));
           continue;
         }
 

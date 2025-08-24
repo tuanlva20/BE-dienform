@@ -1,9 +1,7 @@
 package com.dienform.tool.dienformtudong.fillrequest.service.impl;
 
 import java.math.BigDecimal;
-import java.time.Instant;
 import java.time.LocalDateTime;
-import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -387,7 +385,7 @@ public class FillRequestServiceImpl implements FillRequestService {
     boolean isUrgent = false;
     if (request.getStartDate() != null) {
       long hoursUntilStart =
-          java.time.Duration.between(LocalDateTime.now(), request.getStartDate()).toHours();
+          java.time.Duration.between(DateTimeUtil.now(), request.getStartDate()).toHours();
       isUrgent = hoursUntilStart < 1; // Less than 1 hour until start
     }
 
@@ -418,7 +416,7 @@ public class FillRequestServiceImpl implements FillRequestService {
     boolean isUrgent = false;
     if (request.getStartDate() != null) {
       long hoursUntilStart =
-          java.time.Duration.between(LocalDateTime.now(), request.getStartDate()).toHours();
+          java.time.Duration.between(DateTimeUtil.now(), request.getStartDate()).toHours();
       isUrgent = hoursUntilStart < 1; // Less than 1 hour until start
     }
 
@@ -547,12 +545,8 @@ public class FillRequestServiceImpl implements FillRequestService {
       return null;
     }
     try {
-      // Parse ISO 8601 string to Instant
-      Instant instant = Instant.parse(utcString);
-      // Convert to LocalDateTime in UTC
-      LocalDateTime utcDateTime = LocalDateTime.ofInstant(instant, ZoneOffset.UTC);
-      // Convert to Vietnam timezone
-      return DateTimeUtil.fromUtcToVietnam(utcDateTime);
+      // Use the new DateTimeUtil method for parsing ISO 8601
+      return DateTimeUtil.parseIso8601ToVietnamTime(utcString);
     } catch (Exception e) {
       log.error("Error parsing UTC string '{}': {}", utcString, e.getMessage());
       throw new BadRequestException("Invalid date format: " + utcString);
@@ -568,16 +562,22 @@ public class FillRequestServiceImpl implements FillRequestService {
     }
 
     try {
-      boolean isValid = DateTimeUtil.validateVietnamTimezone(dateTime, fieldName);
-      if (!isValid) {
-        log.warn("Timezone validation failed for {}: {}. Data may have timezone inconsistency.",
+      // Check if datetime is reasonable (not too far in past/future)
+      LocalDateTime now = DateTimeUtil.now();
+      if (dateTime.isAfter(now.plusYears(10))) {
+        log.warn(
+            "Timezone validation warning for {}: DateTime {} is too far in future, possible timezone issue",
             fieldName, dateTime);
-        // Don't throw exception, just log warning to avoid breaking existing functionality
       }
 
-      // Log timezone offset for debugging
-      int offsetHours = DateTimeUtil.getVietnamUtcOffsetHours(dateTime);
-      log.debug("Vietnam timezone offset for {}: {} hours", fieldName, offsetHours);
+      if (dateTime.isBefore(now.minusYears(10))) {
+        log.warn(
+            "Timezone validation warning for {}: DateTime {} is too far in past, possible timezone issue",
+            fieldName, dateTime);
+      }
+
+      log.debug("Timezone validation passed for {}: {}", fieldName,
+          DateTimeUtil.formatForLog(dateTime));
 
     } catch (Exception e) {
       log.error("Error during timezone validation for {}: {}", fieldName, e.getMessage());

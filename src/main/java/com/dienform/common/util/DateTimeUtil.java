@@ -4,168 +4,118 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
-import lombok.extern.slf4j.Slf4j;
 
 /**
- * Utility class for consistent date/time handling across the application Provides timezone-aware
- * conversions and formatting
+ * Utility class for handling timezone-aware datetime operations Ensures all datetime operations use
+ * Vietnam timezone (Asia/Ho_Chi_Minh)
  */
-@Slf4j
 public class DateTimeUtil {
 
-  private static final ZoneId VIETNAM_TIMEZONE = ZoneId.of("Asia/Ho_Chi_Minh");
-  private static final ZoneId UTC_TIMEZONE = ZoneId.of("UTC");
-  private static final DateTimeFormatter ISO_FORMATTER =
-      DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
+  private static final ZoneId VIETNAM_ZONE = ZoneId.of("Asia/Ho_Chi_Minh");
+  private static final DateTimeFormatter FORMATTER =
+      DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
+  /**
+   * Get current datetime in Vietnam timezone
+   */
+  public static LocalDateTime now() {
+    return LocalDateTime.now(VIETNAM_ZONE);
+  }
+
+  /**
+   * Get current datetime as ZonedDateTime in Vietnam timezone
+   */
+  public static ZonedDateTime nowZoned() {
+    return ZonedDateTime.now(VIETNAM_ZONE);
+  }
 
   /**
    * Convert LocalDateTime to Vietnam timezone
-   * 
-   * @param localDateTime the local date time to convert
-   * @return LocalDateTime in Vietnam timezone
    */
-  public static LocalDateTime toVietnamTime(LocalDateTime localDateTime) {
-    if (localDateTime == null) {
+  public static LocalDateTime toVietnamTime(LocalDateTime dateTime) {
+    if (dateTime == null) {
       return null;
     }
-
-    // Since FE sends data with @JsonFormat(timezone = "Asia/Ho_Chi_Minh"),
-    // the LocalDateTime is already in Vietnam timezone, no conversion needed
-    log.debug("Input already in Vietnam timezone: {}", localDateTime);
-    return localDateTime;
+    return dateTime.atZone(ZoneId.systemDefault()).withZoneSameInstant(VIETNAM_ZONE)
+        .toLocalDateTime();
   }
 
   /**
-   * Convert LocalDateTime from UTC to Vietnam timezone
-   * 
-   * @param utcDateTime the UTC date time to convert
-   * @return LocalDateTime in Vietnam timezone
+   * Format datetime for logging
    */
-  public static LocalDateTime fromUtcToVietnam(LocalDateTime utcDateTime) {
-    if (utcDateTime == null) {
-      return null;
+  public static String formatForLog(LocalDateTime dateTime) {
+    if (dateTime == null) {
+      return "null";
     }
-
-    ZonedDateTime utcZoned = utcDateTime.atZone(UTC_TIMEZONE);
-    ZonedDateTime vietnamZoned = utcZoned.withZoneSameInstant(VIETNAM_TIMEZONE);
-
-    log.debug("Converting {} (UTC) to {} (Vietnam)", utcDateTime, vietnamZoned.toLocalDateTime());
-    return vietnamZoned.toLocalDateTime();
+    return dateTime.format(FORMATTER) + " (VN)";
   }
 
   /**
-   * Convert LocalDateTime from Vietnam timezone to UTC
-   * 
-   * @param vietnamDateTime the Vietnam local date time to convert
-   * @return LocalDateTime in UTC
+   * Check if a datetime is in the future (Vietnam timezone)
    */
-  public static LocalDateTime toUtcTime(LocalDateTime vietnamDateTime) {
-    if (vietnamDateTime == null) {
-      return null;
+  public static boolean isInFuture(LocalDateTime dateTime) {
+    if (dateTime == null) {
+      return false;
     }
-
-    // Assume the input is in Vietnam time and convert to UTC
-    ZonedDateTime vietnamZoned = vietnamDateTime.atZone(VIETNAM_TIMEZONE);
-    ZonedDateTime utcZoned = vietnamZoned.withZoneSameInstant(UTC_TIMEZONE);
-
-    log.debug("Converting {} (Vietnam) to {} (UTC)", vietnamDateTime, utcZoned.toLocalDateTime());
-    return utcZoned.toLocalDateTime();
+    return dateTime.isAfter(now());
   }
 
   /**
-   * Get current time in Vietnam timezone
-   * 
-   * @return current LocalDateTime in Vietnam timezone
+   * Check if a datetime is in the past (Vietnam timezone)
    */
-  public static LocalDateTime nowVietnam() {
-    return LocalDateTime.now(VIETNAM_TIMEZONE);
-  }
-
-  /**
-   * Get current time in UTC
-   * 
-   * @return current LocalDateTime in UTC
-   */
-  public static LocalDateTime nowUtc() {
-    return LocalDateTime.now(UTC_TIMEZONE);
-  }
-
-  /**
-   * Format LocalDateTime to ISO string
-   * 
-   * @param localDateTime the date time to format
-   * @return formatted string
-   */
-  public static String formatIso(LocalDateTime localDateTime) {
-    if (localDateTime == null) {
-      return null;
+  public static boolean isInPast(LocalDateTime dateTime) {
+    if (dateTime == null) {
+      return false;
     }
-    return localDateTime.format(ISO_FORMATTER);
+    return dateTime.isBefore(now());
   }
 
   /**
-   * Parse ISO string to LocalDateTime
-   * 
-   * @param isoString the ISO formatted string
-   * @return parsed LocalDateTime
+   * Get Vietnam timezone ID
    */
-  public static LocalDateTime parseIso(String isoString) {
+  public static ZoneId getVietnamZone() {
+    return VIETNAM_ZONE;
+  }
+
+  /**
+   * Parse ISO 8601 datetime string to LocalDateTime in Vietnam timezone Handles formats like:
+   * "2025-08-24T17:00:00.000Z" (UTC) or "2025-08-25T00:00:00" (local time)
+   */
+  public static LocalDateTime parseIso8601ToVietnamTime(String isoString) {
     if (isoString == null || isoString.trim().isEmpty()) {
       return null;
     }
-    return LocalDateTime.parse(isoString, ISO_FORMATTER);
-  }
-
-  /**
-   * Validate timezone consistency for input date times
-   * 
-   * @param dateTime the date time to validate
-   * @param fieldName the field name for logging
-   * @return true if valid, false otherwise
-   */
-  public static boolean validateVietnamTimezone(LocalDateTime dateTime, String fieldName) {
-    if (dateTime == null) {
-      return true; // null is valid
-    }
 
     try {
-      LocalDateTime now = nowVietnam();
-
-      // Check if the datetime is reasonable (not too far in past/future)
-      if (dateTime.isAfter(now.plusYears(10))) {
-        log.warn(
-            "Timezone validation warning for {}: DateTime {} is too far in future, possible timezone issue",
-            fieldName, dateTime);
-        return false;
+      // Handle ISO 8601 format with Z suffix (UTC)
+      if (isoString.endsWith("Z")) {
+        java.time.Instant instant = java.time.Instant.parse(isoString);
+        return LocalDateTime.ofInstant(instant, VIETNAM_ZONE);
       }
 
-      if (dateTime.isBefore(now.minusYears(10))) {
-        log.warn(
-            "Timezone validation warning for {}: DateTime {} is too far in past, possible timezone issue",
-            fieldName, dateTime);
-        return false;
+      // Handle ISO 8601 format without Z suffix - treat as local time in Vietnam timezone
+      try {
+        return LocalDateTime.parse(isoString, DateTimeFormatter.ISO_LOCAL_DATE_TIME);
+      } catch (Exception e2) {
+        // If local parsing fails, try adding Z and parsing as UTC
+        java.time.Instant instant = java.time.Instant.parse(isoString + "Z");
+        return LocalDateTime.ofInstant(instant, VIETNAM_ZONE);
       }
 
-      log.debug("Timezone validation passed for {}: {}", fieldName, dateTime);
-      return true;
     } catch (Exception e) {
-      log.error("Error validating timezone for {}: {}", fieldName, e.getMessage());
-      return false;
+      throw new IllegalArgumentException("Invalid ISO 8601 datetime format: " + isoString, e);
     }
   }
 
   /**
-   * Get timezone offset between Vietnam and UTC at given time
-   * 
-   * @param localDateTime the local date time
-   * @return offset in hours
+   * Convert LocalDateTime to ISO 8601 string in UTC
    */
-  public static int getVietnamUtcOffsetHours(LocalDateTime localDateTime) {
-    if (localDateTime == null) {
-      localDateTime = nowVietnam();
+  public static String toIso8601String(LocalDateTime dateTime) {
+    if (dateTime == null) {
+      return null;
     }
 
-    ZonedDateTime vietnamTime = localDateTime.atZone(VIETNAM_TIMEZONE);
-    return vietnamTime.getOffset().getTotalSeconds() / 3600;
+    java.time.Instant instant = dateTime.atZone(VIETNAM_ZONE).toInstant();
+    return instant.toString();
   }
 }

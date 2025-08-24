@@ -8,6 +8,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import com.dienform.common.util.DateTimeUtil;
 import com.dienform.config.CampaignSchedulerConfig.CampaignSchedulerProperties;
 import com.dienform.tool.dienformtudong.datamapping.dto.request.ColumnMapping;
 import com.dienform.tool.dienformtudong.datamapping.dto.request.DataFillRequestDTO;
@@ -61,10 +62,11 @@ public class SurveySchedulerService {
       return;
     }
 
-    log.debug("Checking for QUEUED campaigns to start at {}", LocalDateTime.now());
+    log.debug("Checking for QUEUED campaigns to start at {}",
+        DateTimeUtil.formatForLog(DateTimeUtil.now()));
 
     // Find QUEUED campaigns that should start now
-    LocalDateTime now = LocalDateTime.now();
+    LocalDateTime now = DateTimeUtil.now();
     LocalDateTime checkTime = now.plusMinutes(1); // Include campaigns starting in next minute
 
     List<FillRequest> queuedCampaigns = fillRequestRepository
@@ -95,7 +97,7 @@ public class SurveySchedulerService {
     }
 
     log.debug("SurveySchedulerService: Checking for QUEUED requests to process at {}",
-        LocalDateTime.now());
+        DateTimeUtil.formatForLog(DateTimeUtil.now()));
 
     // Check if queue management service has capacity
     if (!queueManagementService.hasAvailableCapacity()) {
@@ -104,8 +106,9 @@ public class SurveySchedulerService {
     }
 
     // Find QUEUED requests that can be processed immediately
+    LocalDateTime now = DateTimeUtil.now();
     List<FillRequest> queuedRequests = fillRequestRepository
-        .findByStatusAndStartDateLessThanEqual(FillRequestStatusEnum.QUEUED, LocalDateTime.now());
+        .findByStatusAndStartDateLessThanEqual(FillRequestStatusEnum.QUEUED, now);
 
     if (queuedRequests.isEmpty()) {
       log.debug("SurveySchedulerService: No QUEUED requests to process");
