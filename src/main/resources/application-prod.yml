@@ -32,6 +32,18 @@ logging:
     org.hibernate.SQL: WARN
     org.hibernate.type.descriptor.sql.BasicBinder: WARN
 
+# Security Configuration
+security:
+  sensitive-files:
+    enabled: true
+    log-blocked-requests: true
+    return-404-for-blocked: true
+
+  rate-limiting:
+    enabled: true
+    max-requests-per-minute: 500
+    max-requests-per-hour: 1000
+
 # Google Form optimization settings for production
 google:
   api:

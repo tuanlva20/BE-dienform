@@ -94,7 +94,8 @@ public class SurveySchedulerService {
       return;
     }
 
-    log.debug("SurveySchedulerService: Checking for QUEUED requests to process at {}", LocalDateTime.now());
+    log.debug("SurveySchedulerService: Checking for QUEUED requests to process at {}",
+        LocalDateTime.now());
 
     // Check if queue management service has capacity
     if (!queueManagementService.hasAvailableCapacity()) {
@@ -132,21 +133,23 @@ public class SurveySchedulerService {
 
     for (FillRequest request : sortedRequests) {
       if (processed >= availableSlots) {
-        log.debug("SurveySchedulerService: Reached capacity limit ({} slots), stopping processing", availableSlots);
+        log.debug("SurveySchedulerService: Reached capacity limit ({} slots), stopping processing",
+            availableSlots);
         break;
       }
 
       if (processQueuedRequest(request)) {
         processed++;
-        log.info("SurveySchedulerService: Started processing QUEUED request: {} ({}/{})", request.getId(), processed,
-            availableSlots);
+        log.info("SurveySchedulerService: Started processing QUEUED request: {} ({}/{})",
+            request.getId(), processed, availableSlots);
       }
     }
 
     if (processed > 0) {
-      log.info("SurveySchedulerService: Successfully started processing {} QUEUED requests", processed);
+      log.info("SurveySchedulerService: Successfully started processing {} QUEUED requests",
+          processed);
     } else {
-      log.debug("SurveySchedulerService: No requests were processed (capacity: {}, available: {})", 
+      log.debug("SurveySchedulerService: No requests were processed (capacity: {}, available: {})",
           queueManagementService.getThreadPoolSize(), availableSlots);
     }
   }

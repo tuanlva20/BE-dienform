@@ -39,6 +39,18 @@ logging:
     org.hibernate.SQL: DEBUG
     org.hibernate.type.descriptor.sql.BasicBinder: TRACE
 
+# Security Configuration for local development
+security:
+  sensitive-files:
+    enabled: true
+    log-blocked-requests: true
+    return-404-for-blocked: true
+
+  rate-limiting:
+    enabled: true
+    max-requests-per-minute: 200 # Higher limit for development
+    max-requests-per-hour: 2000
+
 # Google Form optimization settings
 google:
   api:
