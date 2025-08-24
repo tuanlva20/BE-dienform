@@ -110,7 +110,7 @@ app:
   security:
     enable-ip-on-register: ${ENABLE_IP_ON_REGISTER:false}
   cookie:
-    domain: ${APP_COOKIE_DOMAIN:true}
+    domain: ${APP_COOKIE_DOMAIN:}
     secure: ${APP_COOKIE_SECURE:true}
     samesite: ${APP_COOKIE_SAMESITE:Strict}
   monitoring:
