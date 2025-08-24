@@ -6,12 +6,22 @@ spring:
     open-in-view: false
     show-sql: true
     hibernate:
-      ddl-auto: none
+      ddl-auto: update
   datasource:
-    url: jdbc:mysql://localhost:3306/fill_form
+    url: jdbc:mysql://localhost:3306/fill_form?lock_wait_timeout=60&innodb_lock_wait_timeout=60&innodb_deadlock_detect=ON
     username: fillform
     password: admin@
     driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+      leak-detection-threshold: 60000
+      connection-test-query: SELECT 1
+      validation-timeout: 5000
+      pool-name: FillFormHikariPool
   mail:
     host: smtp.gmail.com
     port: 587
@@ -34,14 +44,14 @@ google:
   api:
     key: AIzaSyBCFk8JZ8OYLVEjs92cSLfcccyFH7VyeU0
   form:
-    # Performance settings
-    timeout-seconds: 30
-    thread-pool-size: 5
-    max-retries: 3
-    retry-delay-ms: 1000
+    # Performance settings optimized for 2-core server
+    timeout-seconds: 45 # Reduced from 60s
+    thread-pool-size: 2 # Optimized for 2-core server
+    max-retries: 2 # Reduced from 3
+    retry-delay-ms: 2000 # Increased from 1000ms
 
     # Feature flags
-    auto-submit: false # Set to false for local debugging
+    auto-submit: true # Set to false for local debugging
     headless: false # Set to false for local debugging
     async-enabled: true
     cache-enabled: true
@@ -52,10 +62,17 @@ google:
   oauth:
     client-id: 576659994866-msfjs05kr5mqtk8nsli7hmmrid9qlc3t.apps.googleusercontent.com
 
+# Queue Management Configuration
+queue:
+  max-size: 10 # Reduced from 20
+  check-interval: 30000 # 45 seconds - increased for 2-core
+  max-retries: 2 # Reduced from 3
+  retry-delay: 8000 # 8 seconds - increased
+
 # Campaign Scheduler Configuration
 campaign:
   scheduler:
-    fixed-rate: 10000 # Check every 10 seconds (10000ms)
+    fixed-rate: 120000 # Check every 2 minutes (120000ms) - reduced for 2-core
     enabled: true
 
 # JWT Configuration for production
@@ -67,6 +84,14 @@ jwt:
 app:
   frontend:
     url: ${FRONTEND_URL:http://localhost:3000}
+  monitoring:
+    enabled: true
+  async:
+    core-pool-size: 2 # Optimized for 2-core server
+    max-pool-size: 4 # Optimized for 2-core server
+    queue-capacity: 50 # Reduced queue capacity
+    thread-name-prefix: Async-
+
 realtime:
   socket:
     path: /socket.io
@@ -85,3 +110,27 @@ facebook:
   app:
     id: ${FACEBOOK_APP_ID:}
     secret: ${FACEBOOK_APP_SECRET:}
+
+ai:
+  suggestion:
+    enabled: true
+    provider: gemini
+    queue:
+      max-size: 50
+      max-concurrent: 2
+      processing-interval: 5000
+      max-retries: 3
+      retry-delay: 10000
+    gemini:
+      api-key: AIzaSyDINl0xLfEZm5_QVT_nang30Vgt8El7VZU
+      base-url: https://generativelanguage.googleapis.com/v1beta/models
+      model: gemini-2.0-flash
+      max-tokens: 800000
+      timeout: 30000
+      batch-size: 10
+      parallelism: 3
+    validation:
+      max-sample-count: 1000
+      max-questions-per-form: 1000
+      min-sample-count: 1
+      max-instruction-length: 1000

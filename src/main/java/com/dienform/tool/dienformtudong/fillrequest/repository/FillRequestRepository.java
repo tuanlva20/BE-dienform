@@ -19,10 +19,9 @@ import jakarta.persistence.LockModeType;
 @Repository
 public interface FillRequestRepository extends JpaRepository<FillRequest, UUID> {
 
-        @EntityGraph(attributePaths = {"answerDistributions"})
-        @Query("SELECT fr FROM FillRequest fr WHERE fr.form = ?1")
-        List<FillRequest> findByForm(Form form);
-
+        /**
+         * Find FillRequest with form loaded to avoid LazyInitializationException
+         */
         @EntityGraph(attributePaths = {"form"})
         @Query("SELECT fr FROM FillRequest fr WHERE fr.id = ?1")
         Optional<FillRequest> findByIdWithFetchForm(UUID id);
@@ -34,6 +33,13 @@ public interface FillRequestRepository extends JpaRepository<FillRequest, UUID> 
                         "answerDistributions.question", "answerDistributions.option"})
         @Query("SELECT fr FROM FillRequest fr WHERE fr.id = ?1")
         Optional<FillRequest> findByIdWithAllData(UUID id);
+
+        /**
+         * Find FillRequest by form
+         */
+        @EntityGraph(attributePaths = {"answerDistributions"})
+        @Query("SELECT fr FROM FillRequest fr WHERE fr.form = ?1")
+        List<FillRequest> findByForm(Form form);
 
         /**
          * Find PENDING campaigns that should start now or in the past
@@ -80,14 +86,6 @@ public interface FillRequestRepository extends JpaRepository<FillRequest, UUID> 
          */
         @Query("SELECT COUNT(fr) FROM FillRequest fr WHERE fr.status = ?1")
         long countByStatus(FillRequestStatusEnum status);
-
-        /**
-         * Find requests by status and updated time for recovery
-         */
-        @EntityGraph(attributePaths = {"form"})
-        @Query("SELECT fr FROM FillRequest fr WHERE fr.status = ?1 AND fr.updatedAt < ?2")
-        List<FillRequest> findByStatusAndUpdatedAtBefore(FillRequestStatusEnum status,
-                        LocalDateTime updatedAt);
 
         /**
          * Find all requests by status

@@ -73,11 +73,21 @@ public class ScheduleDistributionService {
    */
   public List<ScheduledTask> distributeSchedule(int submissionCount, LocalDateTime startDate,
       LocalDateTime endDate, boolean isHumanLike) {
+    return distributeSchedule(submissionCount, startDate, endDate, isHumanLike, 0);
+  }
+
+  /**
+   * Distribute form filling tasks across time period with human-like behavior
+   * 
+   * @param completedSurvey Number of surveys already completed (affects first form delay)
+   */
+  public List<ScheduledTask> distributeSchedule(int submissionCount, LocalDateTime startDate,
+      LocalDateTime endDate, boolean isHumanLike, int completedSurvey) {
     List<ScheduledTask> schedule = new ArrayList<>();
 
     if (endDate == null) {
       // If no end date, schedule all tasks starting from start date
-      return distributeWithoutEndDate(submissionCount, startDate, isHumanLike);
+      return distributeWithoutEndDate(submissionCount, startDate, isHumanLike, completedSurvey);
     }
 
     // CRITICAL FIX: If startDate equals endDate OR non-human-like, execute immediately without
@@ -85,18 +95,19 @@ public class ScheduleDistributionService {
     if (startDate.equals(endDate) || !isHumanLike) {
       log.info("Execute immediately - startDate equals endDate: {} OR non-human-like: {}",
           startDate.equals(endDate), !isHumanLike);
-      return distributeWithoutEndDate(submissionCount, startDate, isHumanLike);
+      return distributeWithoutEndDate(submissionCount, startDate, isHumanLike, completedSurvey);
     }
 
     // Convert to Vietnam timezone for realistic scheduling
     ZonedDateTime startZoned = startDate.atZone(VIETNAM_TIMEZONE);
     ZonedDateTime endZoned = endDate.atZone(VIETNAM_TIMEZONE);
 
-    log.info("Distributing {} submissions from {} to {} (Vietnam time), humanLike: {}",
-        submissionCount, startZoned, endZoned, isHumanLike);
+    log.info(
+        "Distributing {} submissions from {} to {} (Vietnam time), humanLike: {}, completedSurvey: {}",
+        submissionCount, startZoned, endZoned, isHumanLike, completedSurvey);
 
     if (isHumanLike) {
-      schedule = createHumanLikeSchedule(submissionCount, startZoned, endZoned);
+      schedule = createHumanLikeSchedule(submissionCount, startZoned, endZoned, completedSurvey);
     } else {
       schedule = createFastSchedule(submissionCount, startZoned, endZoned);
     }
@@ -108,7 +119,7 @@ public class ScheduleDistributionService {
    * Create human-like schedule with realistic patterns
    */
   private List<ScheduledTask> createHumanLikeSchedule(int submissionCount, ZonedDateTime start,
-      ZonedDateTime end) {
+      ZonedDateTime end, int completedSurvey) {
     List<ScheduledTask> schedule = new ArrayList<>();
 
     long totalMinutes = java.time.Duration.between(start, end).toMinutes();
@@ -120,14 +131,40 @@ public class ScheduleDistributionService {
       TimeSlot selectedSlot = selectWeightedTimeSlot(timeSlots);
       LocalDateTime executionTime = selectedSlot.getRandomTimeInSlot();
 
-      // Human-like delay tightened to 10-30 seconds
-      int delaySeconds = 10 + random.nextInt(21); // 10-60 seconds
+      // Calculate delay based on completedSurvey logic
+      int delaySeconds;
+      if (i == 0 && completedSurvey == 0) {
+        // First form should have 0 delay if no surveys completed yet
+        delaySeconds = 0;
+        log.debug("First task scheduled with 0 delay (completedSurvey = 0)");
+      } else {
+        // Human-like delay tightened to 10-30 seconds for subsequent forms
+        delaySeconds = 10 + random.nextInt(21); // 10-30 seconds
+      }
 
       schedule.add(new ScheduledTask(executionTime, delaySeconds, i));
     }
 
-    // Sort by execution time
+    // Sort by execution time and recalculate delays based on actual execution times
     schedule.sort((a, b) -> a.getExecutionTime().compareTo(b.getExecutionTime()));
+
+    // Recalculate delays based on completedSurvey logic and execution order
+    for (int i = 0; i < schedule.size(); i++) {
+      ScheduledTask task = schedule.get(i);
+      int newDelaySeconds;
+
+      if (i == 0 && completedSurvey == 0) {
+        // First form should have 0 delay if no surveys completed yet
+        newDelaySeconds = 0;
+      } else {
+        // Human-like delay tightened to 10-30 seconds for subsequent forms
+        newDelaySeconds = 10 + random.nextInt(21); // 10-30 seconds
+      }
+
+      // Create new task with updated delay
+      schedule.set(i,
+          new ScheduledTask(task.getExecutionTime(), newDelaySeconds, task.getRowIndex()));
+    }
 
     return schedule;
   }
@@ -170,19 +207,26 @@ public class ScheduleDistributionService {
    * Distribute without end date - start immediately
    */
   private List<ScheduledTask> distributeWithoutEndDate(int submissionCount, LocalDateTime startDate,
-      boolean isHumanLike) {
+      boolean isHumanLike, int completedSurvey) {
     List<ScheduledTask> schedule = new ArrayList<>();
     LocalDateTime currentTime = startDate;
 
-    log.info("Creating immediate execution schedule for {} tasks (humanLike: {})", submissionCount,
-        isHumanLike);
+    log.info(
+        "Creating immediate execution schedule for {} tasks (humanLike: {}, completedSurvey: {})",
+        submissionCount, isHumanLike, completedSurvey);
 
     for (int i = 0; i < submissionCount; i++) {
       int delaySeconds;
 
       if (isHumanLike) {
-        // Human-like delays tightened to 10-30 seconds between tasks
-        delaySeconds = 10 + random.nextInt(21);
+        // First form should have 0 delay if no surveys completed yet
+        if (i == 0 && completedSurvey == 0) {
+          delaySeconds = 0;
+          log.debug("First task scheduled with 0 delay (completedSurvey = 0)");
+        } else {
+          // Human-like delays tightened to 10-30 seconds between tasks
+          delaySeconds = 10 + random.nextInt(21);
+        }
 
         // Set execution time in the future for human-like behavior
         currentTime = currentTime.plusSeconds(delaySeconds);
