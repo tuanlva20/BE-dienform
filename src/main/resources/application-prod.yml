@@ -13,6 +13,16 @@ spring:
     username: ${DATABASE_USERNAME:fillform}
     password: ${DATABASE_PASSWORD:admin@}
     driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      maximum-pool-size: 15
+      minimum-idle: 8
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+      leak-detection-threshold: 60000
+      connection-test-query: SELECT 1
+      validation-timeout: 5000
+      pool-name: FillFormHikariPool
   mail:
     host: smtp.gmail.com
     port: 587
@@ -51,8 +61,8 @@ google:
   form:
     # Performance settings optimized for production
     timeout-seconds: 60
-    thread-pool-size: 2
-    max-retries: 3
+    thread-pool-size: 3
+    max-retries: 2
     retry-delay-ms: 2000
 
     # Feature flags for production
@@ -82,9 +92,10 @@ realtime:
     progress-emit-interval-ms: ${FILLREQ_PROGRESS_EMIT_INTERVAL_MS:1000}
     progress-emit-delta: ${FILLREQ_PROGRESS_EMIT_DELTA:1}
     burst-max-per-sec: ${FILLREQ_BURST_MAX_EVENTS_PER_SEC:10}
+
 campaign:
   scheduler:
-    fixed-rate: 60000 # Check every 60 seconds in production
+    fixed-rate: 30000 # Check every 60 seconds in production
     enabled: true
 
 # JWT Configuration for production
@@ -102,8 +113,39 @@ app:
     domain: ${APP_COOKIE_DOMAIN:}
     secure: ${APP_COOKIE_SECURE:false}
     samesite: ${APP_COOKIE_SAMESITE:Lax}
+  monitoring:
+    enabled: true
+  async:
+    core-pool-size: 2 # Optimized for 2-core server
+    max-pool-size: 4 # Optimized for 2-core server
+    queue-capacity: 50 # Reduced queue capacity
+    thread-name-prefix: Async-
 
 facebook:
   app:
     id: ${FACEBOOK_APP_ID:}
     secret: ${FACEBOOK_APP_SECRET:}
+
+ai:
+  suggestion:
+    enabled: true
+    provider: gemini
+    queue:
+      max-size: 100
+      max-concurrent: 2
+      processing-interval: 5000
+      max-retries: 3
+      retry-delay: 10000
+    gemini:
+      api-key: AIzaSyDINl0xLfEZm5_QVT_nang30Vgt8El7VZU
+      base-url: https://generativelanguage.googleapis.com/v1beta/models
+      model: gemini-2.0-flash
+      max-tokens: 800000
+      timeout: 30000
+      batch-size: 8
+      parallelism: 2
+    validation:
+      max-sample-count: 1000
+      max-questions-per-form: 1000
+      min-sample-count: 1
+      max-instruction-length: 1000
