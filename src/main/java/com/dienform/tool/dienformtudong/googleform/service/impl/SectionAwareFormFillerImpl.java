@@ -86,23 +86,13 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
       // Use findByIdWithAllData to avoid LazyInitializationException
       FillRequest fillRequest =
           fillRequestRepository.findByIdWithAllData(fillRequestId).orElse(null);
-      log.debug("FillRequest found for setup: {}", fillRequest != null);
       if (fillRequest != null && fillRequest.getAnswerDistributions() != null) {
-        log.debug("AnswerDistributions count for setup: {}",
-            fillRequest.getAnswerDistributions().size());
         for (AnswerDistribution dist : fillRequest.getAnswerDistributions()) {
-          log.debug(
-              "Processing AnswerDistribution - questionId: {}, optionValue: {}, valueString: {}",
-              dist.getQuestion() != null ? dist.getQuestion().getId() : "null",
-              dist.getOption() != null ? dist.getOption().getValue() : "null",
-              dist.getValueString());
 
           if (dist.getQuestion() != null && dist.getOption() != null
               && "__other_option__".equalsIgnoreCase(dist.getOption().getValue())
               && dist.getValueString() != null && !dist.getValueString().trim().isEmpty()) {
             localOtherText.put(dist.getQuestion().getId(), dist.getValueString().trim());
-            log.debug("Added 'Other' text mapping for question {}: {}", dist.getQuestion().getId(),
-                dist.getValueString().trim());
           }
         }
       }
@@ -137,8 +127,6 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
       }
 
       dataFillOtherTextByQuestion.set(localOtherText);
-      log.info("Set up 'Other' text mapping for {} questions: {}", localOtherText.size(),
-          localOtherText);
     } catch (Exception e) {
       log.warn("Failed to set up 'Other' text mapping: {}", e.getMessage(), e);
     }
@@ -937,30 +925,22 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
   private Map<java.util.UUID, QuestionOption> buildOptionByQuestionId(
       Map<Question, QuestionOption> selections) {
     java.util.Map<java.util.UUID, QuestionOption> map = new java.util.HashMap<>();
-    log.debug("Building optionById map from {} selections", selections.size());
 
     for (Map.Entry<Question, QuestionOption> e : selections.entrySet()) {
       try {
         if (e.getKey() != null && e.getKey().getId() != null && e.getValue() != null) {
           map.put(e.getKey().getId(), e.getValue());
-          log.debug("Added mapping: Question '{}' (ID: {}) -> Option '{}' (ID: {})",
-              e.getKey().getTitle(), e.getKey().getId(), e.getValue().getText(),
-              e.getValue().getId());
         }
       } catch (Exception ignore) {
-        log.warn("Failed to add mapping for question: {}",
-            e.getKey() != null ? e.getKey().getTitle() : "null");
       }
     }
 
-    log.info("Built optionById map with {} entries", map.size());
     return map;
   }
 
   private Map<String, QuestionOption> buildOptionByCompositeKey(
       Map<Question, QuestionOption> selections) {
     java.util.Map<String, QuestionOption> map = new java.util.HashMap<>();
-    log.debug("Building optionByKey map from {} selections", selections.size());
 
     for (Map.Entry<Question, QuestionOption> e : selections.entrySet()) {
       try {
@@ -971,16 +951,11 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
         String key = buildCompositeKey(q);
         if (key != null) {
           map.put(key, o);
-          log.debug("Added composite mapping: Key '{}' -> Option '{}' (ID: {}) for Question '{}'",
-              key, o.getText(), o.getId(), q.getTitle());
         }
       } catch (Exception ignore) {
-        log.warn("Failed to add composite mapping for question: {}",
-            e.getKey() != null ? e.getKey().getTitle() : "null");
       }
     }
 
-    log.info("Built optionByKey map with {} entries", map.size());
     return map;
   }
 
@@ -990,18 +965,10 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
       if (question == null)
         return null;
 
-      log.debug("Finding option for question: '{}' (ID: {})", question.getTitle(),
-          question.getId());
-
       if (question.getId() != null && optionById != null) {
         QuestionOption byId = optionById.get(question.getId());
         if (byId != null) {
-          log.debug("Found option by ID: '{}' (ID: {}) for question: '{}'", byId.getText(),
-              byId.getId(), question.getTitle());
           return byId;
-        } else {
-          log.debug("No option found by ID for question: '{}' (ID: {})", question.getTitle(),
-              question.getId());
         }
       }
 
@@ -1010,18 +977,12 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
         if (key != null) {
           QuestionOption byKey = optionByKey.get(key);
           if (byKey != null) {
-            log.debug("Found option by composite key: '{}' (ID: {}) for question: '{}' (key: {})",
-                byKey.getText(), byKey.getId(), question.getTitle(), key);
             return byKey;
-          } else {
-            log.debug("No option found by composite key for question: '{}' (key: {})",
-                question.getTitle(), key);
           }
         }
       }
 
-      log.warn("No option found for question: '{}' (ID: {})", question.getTitle(),
-          question.getId());
+      return null;
     } catch (Exception e) {
       log.error("Error finding option for question '{}': {}", question.getTitle(), e.getMessage(),
           e);
@@ -1402,12 +1363,43 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
     log.info("Opening browser for URL: {}", formUrl);
 
     ChromeOptions options = new ChromeOptions();
+
+    // Essential Chrome options for stability and performance
+    options.addArguments("--remote-allow-origins=*");
+    options.addArguments("--no-sandbox");
+    options.addArguments("--disable-dev-shm-usage");
+
+    // Set window size for consistent behavior between headless and non-headless
+    options.addArguments("--window-size=1920,1080");
+    options.addArguments("--start-maximized");
+
+    // Performance optimizations
+    options.addArguments("--disable-gpu");
+    options.addArguments("--disable-extensions");
+    options.addArguments("--disable-plugins");
+    options.addArguments("--disable-images");
+    options.addArguments("--disable-web-security");
+    options.addArguments("--disable-features=VizDisplayCompositor");
+    options.addArguments("--disable-blink-features=AutomationControlled");
+    options.addArguments("--disable-infobars");
+    options.addArguments("--disable-notifications");
+    options.addArguments("--disable-popup-blocking");
+    options.addArguments("--disable-save-password-bubble");
+    options.addArguments("--disable-translate");
+    options.addArguments("--no-first-run");
+    options.addArguments("--no-default-browser-check");
+
+    // Add viewport and device emulation for consistent rendering
     if (headless) {
       options.addArguments("--headless=new");
+      // Additional headless-specific optimizations
+      options.addArguments("--force-device-scale-factor=1");
+      options.addArguments("--high-dpi-support=1");
+      options.addArguments("--force-color-profile=srgb");
+      log.info("Running Chrome in headless mode with window size 1920x1080");
+    } else {
+      log.info("Running Chrome in non-headless mode with window size 1920x1080");
     }
-    options.addArguments("--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage");
-    options.addArguments("--disable-blink-features=AutomationControlled");
-    options.addArguments("--disable-extensions");
 
     if (humanLike) {
       // Add user agent for more human-like behavior
@@ -1415,11 +1407,47 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
           "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
     }
 
+    // Faster page initialization
+    options.setPageLoadStrategy(org.openqa.selenium.PageLoadStrategy.EAGER);
+
+    // Disable images to speed up load
+    java.util.Map<String, Object> prefs = new java.util.HashMap<>();
+    prefs.put("profile.managed_default_content_settings.images", 2);
+    options.setExperimentalOption("prefs", prefs);
+
+    // Disable automation flags to prevent detection
+    options.setExperimentalOption("excludeSwitches",
+        java.util.Collections.singletonList("enable-automation"));
+    options.setExperimentalOption("useAutomationExtension", false);
+
     WebDriver driver = new ChromeDriver(options);
+
+    // Set viewport size after driver creation for headless mode
+    if (headless) {
+      try {
+        // Set viewport size to ensure consistent rendering
+        driver.manage().window().setSize(new org.openqa.selenium.Dimension(1920, 1080));
+        Thread.sleep(500);
+      } catch (Exception e) {
+        log.warn("Failed to set viewport size: {}", e.getMessage());
+      }
+    }
 
     try {
       log.info("Navigating to form URL...");
       driver.get(formUrl);
+
+      // Wait for page to fully load and stabilize in headless mode
+      if (headless) {
+        try {
+          Thread.sleep(2000); // Give extra time for layout to settle
+
+          // Ensure viewport is properly set after page load
+          driver.manage().window().setSize(new org.openqa.selenium.Dimension(1920, 1080));
+        } catch (Exception e) {
+          log.warn("Error during headless mode stabilization: {}", e.getMessage());
+        }
+      }
 
       // Wait for page to load
       log.info("Waiting for page to load...");
@@ -1538,13 +1566,11 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
       }
 
       String sampleText = getOtherTextForPosition(questionId);
-      log.debug("getOtherTextForPosition returned for question {}: {}", questionId, sampleText);
 
       if (sampleText == null) {
         // Debug: Let's check what's happening
         debugValueStringLookup(questionId);
         sampleText = generateAutoOtherText();
-        log.debug("Using auto-generated text for question {}: {}", questionId, sampleText);
       }
 
       if (humanLike) {
@@ -1678,50 +1704,33 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
   private String getOtherTextForPosition(UUID questionId) {
     String sampleText = null;
 
-    log.debug("getOtherTextForPosition called for questionId: {}", questionId);
-
     // Prefer per-submission explicit 'Other' text provided via ThreadLocal
     try {
       Map<UUID, String> local = dataFillOtherTextByQuestion.get();
-      log.debug("ThreadLocal dataFillOtherTextByQuestion.get() returned: {}", local);
       if (local != null && questionId != null) {
         String v = local.get(questionId);
-        log.debug("ThreadLocal lookup for questionId {} returned: {}", questionId, v);
         if (v != null && !v.trim().isEmpty()) {
           sampleText = v.trim();
-          log.debug("Found 'Other' text for question {} from ThreadLocal: {}", questionId,
-              sampleText);
           return sampleText;
         }
       }
     } catch (Exception ignore) {
-      log.debug("Exception while checking ThreadLocal: {}", ignore.getMessage());
     }
 
     // Fallback: Try to get valueString from AnswerDistribution directly
     try {
       // Use the stored fill request ID
-      log.debug("currentFillRequestId: {}", currentFillRequestId);
       if (currentFillRequestId != null) {
         FillRequest fillRequest =
             fillRequestRepository.findByIdWithAllData(currentFillRequestId).orElse(null);
-        log.debug("FillRequest found: {}", fillRequest != null);
         if (fillRequest != null && fillRequest.getAnswerDistributions() != null) {
-          log.debug("AnswerDistributions count: {}", fillRequest.getAnswerDistributions().size());
           for (AnswerDistribution dist : fillRequest.getAnswerDistributions()) {
-            log.debug(
-                "Checking AnswerDistribution - questionId: {}, optionValue: {}, valueString: {}",
-                dist.getQuestion() != null ? dist.getQuestion().getId() : "null",
-                dist.getOption() != null ? dist.getOption().getValue() : "null",
-                dist.getValueString());
 
             if (dist.getQuestion() != null && questionId.equals(dist.getQuestion().getId())
                 && dist.getOption() != null
                 && "__other_option__".equalsIgnoreCase(dist.getOption().getValue())
                 && dist.getValueString() != null && !dist.getValueString().trim().isEmpty()) {
               sampleText = dist.getValueString().trim();
-              log.debug("Found valueString for question {} from AnswerDistribution: {}", questionId,
-                  sampleText);
               break;
             }
           }
@@ -1732,7 +1741,6 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
           e.getMessage());
     }
 
-    log.debug("getOtherTextForPosition returning: {}", sampleText);
     return sampleText;
   }
 
@@ -1802,11 +1810,9 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
       List<WebElement> submitButtons = driver.findElements(SUBMIT_BUTTON);
       for (WebElement button : submitButtons) {
         if (button.isDisplayed()) {
-          log.debug("Submit button found and visible");
           return true;
         }
       }
-      log.debug("Submit button not visible");
       return false;
     } catch (Exception e) {
       log.debug("Error checking Submit button visibility: {}", e.getMessage());
@@ -1822,11 +1828,9 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
       List<WebElement> nextButtons = driver.findElements(NEXT_BUTTON);
       for (WebElement button : nextButtons) {
         if (button.isDisplayed()) {
-          log.debug("Next button found and visible");
           return true;
         }
       }
-      log.debug("Next button not visible");
       return false;
     } catch (Exception e) {
       log.debug("Error checking Next button visibility: {}", e.getMessage());
@@ -1855,11 +1859,6 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
           || !checkboxes.isEmpty() || !listboxes.isEmpty();
 
       boolean hasQuestions = hasQuestionElements || hasInputElements;
-
-      log.debug(
-          "Section question check: questionElements={}, textInputs={}, radioGroups={}, checkboxes={}, listboxes={}, hasQuestions={}",
-          questionElements.size(), textInputs.size(), radioGroups.size(), checkboxes.size(),
-          listboxes.size(), hasQuestions);
 
       return hasQuestions;
     } catch (Exception e) {

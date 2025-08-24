@@ -565,7 +565,8 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
           return true;
         }
 
-        log.error("No navigation buttons found and no questions filled at section {}", sectionCounter);
+        log.error("No navigation buttons found and no questions filled at section {}",
+            sectionCounter);
         return false;
       }
 
@@ -759,9 +760,17 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
 
   private WebDriver openBrowser(String formUrl, boolean humanLike) {
     ChromeOptions options = new ChromeOptions();
+
+    // Essential Chrome options for stability and performance
     options.addArguments("--remote-allow-origins=*");
     options.addArguments("--no-sandbox");
     options.addArguments("--disable-dev-shm-usage");
+
+    // Set window size for consistent behavior between headless and non-headless
+    options.addArguments("--window-size=1920,1080");
+    options.addArguments("--start-maximized");
+
+    // Performance optimizations
     options.addArguments("--disable-gpu");
     options.addArguments("--disable-extensions");
     options.addArguments("--disable-plugins");
@@ -776,15 +785,24 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
     options.addArguments("--disable-translate");
     options.addArguments("--no-first-run");
     options.addArguments("--no-default-browser-check");
+
+    // Add viewport and device emulation for consistent rendering
+    if (headless) {
+      options.addArguments("--headless=new");
+      // Additional headless-specific optimizations
+      options.addArguments("--force-device-scale-factor=1");
+      options.addArguments("--high-dpi-support=1");
+      options.addArguments("--force-color-profile=srgb");
+      log.info("Running Chrome in headless mode with window size 1920x1080");
+    } else {
+      log.info("Running Chrome in non-headless mode with window size 1920x1080");
+    }
+
     options.setPageLoadStrategy(org.openqa.selenium.PageLoadStrategy.EAGER);
 
     java.util.Map<String, Object> prefs = new java.util.HashMap<>();
     prefs.put("profile.managed_default_content_settings.images", 2);
     options.setExperimentalOption("prefs", prefs);
-
-    if (headless) {
-      options.addArguments("--headless=new");
-    }
 
     options.setExperimentalOption("excludeSwitches",
         java.util.Collections.singletonList("enable-automation"));
@@ -792,11 +810,34 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
 
     WebDriver driver = new ChromeDriver(options);
 
+    // Set viewport size after driver creation for headless mode
+    if (headless) {
+      try {
+        // Set viewport size to ensure consistent rendering
+        driver.manage().window().setSize(new org.openqa.selenium.Dimension(1920, 1080));
+        Thread.sleep(500);
+      } catch (Exception e) {
+        log.warn("Failed to set viewport size: {}", e.getMessage());
+      }
+    }
+
     driver.manage().timeouts().pageLoadTimeout(Duration.ofSeconds(10));
     driver.manage().timeouts().implicitlyWait(Duration.ZERO);
 
     WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(15));
     driver.get(formUrl);
+
+    // Wait for page to fully load and stabilize in headless mode
+    if (headless) {
+      try {
+        Thread.sleep(2000); // Give extra time for layout to settle
+
+        // Ensure viewport is properly set after page load
+        driver.manage().window().setSize(new org.openqa.selenium.Dimension(1920, 1080));
+      } catch (Exception e) {
+        log.warn("Error during headless mode stabilization: {}", e.getMessage());
+      }
+    }
 
     try {
       wait.until(ExpectedConditions.presenceOfElementLocated(By.xpath("//div[@role='listitem']")));
