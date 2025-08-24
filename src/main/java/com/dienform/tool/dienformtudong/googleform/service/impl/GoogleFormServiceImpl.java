@@ -2110,14 +2110,16 @@ public class GoogleFormServiceImpl implements GoogleFormService {
         options.addArguments("--remote-allow-origins=*");
         options.addArguments("--no-sandbox");
         options.addArguments("--disable-dev-shm-usage");
-        // options.addArguments("--window-size=1920,1080");
+
+        // Set window size for consistent behavior between headless and non-headless
+        options.addArguments("--window-size=1920,1080");
+        options.addArguments("--start-maximized");
 
         // Performance optimizations
         options.addArguments("--disable-gpu");
         options.addArguments("--disable-extensions");
         options.addArguments("--disable-plugins");
         options.addArguments("--disable-images");
-        // options.addArguments("--disable-javascript");
         options.addArguments("--disable-web-security");
         options.addArguments("--disable-features=VizDisplayCompositor");
 
@@ -2131,6 +2133,34 @@ public class GoogleFormServiceImpl implements GoogleFormService {
         options.addArguments("--no-first-run");
         options.addArguments("--no-default-browser-check");
 
+        // Add viewport and device emulation for consistent rendering
+        if (headless) {
+            options.addArguments("--headless=new");
+            // Additional headless-specific optimizations
+            options.addArguments("--force-device-scale-factor=1");
+            options.addArguments("--high-dpi-support=1");
+            options.addArguments("--force-color-profile=srgb");
+
+            // Disable mobile emulation
+            options.addArguments("--disable-mobile-emulation");
+            options.addArguments("--disable-touch-emulation");
+
+            // Force desktop user agent
+            options.addArguments(
+                    "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+
+            // Additional headless optimizations
+            options.addArguments("--disable-background-timer-throttling");
+            options.addArguments("--disable-backgrounding-occluded-windows");
+            options.addArguments("--disable-renderer-backgrounding");
+            options.addArguments("--disable-features=TranslateUI");
+            options.addArguments("--disable-ipc-flooding-protection");
+
+            log.info("Running Chrome in headless mode with enhanced optimizations");
+        } else {
+            log.info("Running Chrome in non-headless mode with window size 1920x1080");
+        }
+
         // Faster page initialization: do not block for full load
         options.setPageLoadStrategy(org.openqa.selenium.PageLoadStrategy.EAGER);
 
@@ -2138,12 +2168,6 @@ public class GoogleFormServiceImpl implements GoogleFormService {
         java.util.Map<String, Object> prefs = new java.util.HashMap<>();
         prefs.put("profile.managed_default_content_settings.images", 2);
         options.setExperimentalOption("prefs", prefs);
-
-        // Set headless mode based on configuration
-        if (headless) {
-            options.addArguments("--headless=new");
-            log.info("Running Chrome in headless mode");
-        }
 
         // Disable automation flags to prevent detection
         options.setExperimentalOption("excludeSwitches",
@@ -2158,17 +2182,50 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             throw new RuntimeException("Failed to create ChromeDriver");
         }
 
+        // Set viewport size after driver creation for headless mode
+        if (headless) {
+            try {
+                // Set viewport size to ensure consistent rendering
+                driver.manage().window().setSize(new org.openqa.selenium.Dimension(1920, 1080));
+                Thread.sleep(500);
+            } catch (Exception e) {
+                log.warn("Failed to set viewport size: {}", e.getMessage());
+            }
+        }
+
         // Set optimized timeouts: short pageLoadTimeout and zero implicit wait
         driver.manage().timeouts().pageLoadTimeout(Duration.ofSeconds(10));
         driver.manage().timeouts().implicitlyWait(Duration.ZERO);
 
         // Create wait object with shorter timeout
-        WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(15)); // Reduced from 180s
-                                                                                // to 15s
+        WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(15));
 
         // Navigate to form URL with retry mechanism
         log.info("Navigating to form URL: {}", formUrl);
         driver.get(formUrl);
+
+        // Wait for page to fully load and stabilize in headless mode
+        if (headless) {
+            try {
+                Thread.sleep(3000); // Give extra time for layout to settle
+
+                // Force layout recalculation
+                ((JavascriptExecutor) driver).executeScript("document.body.style.zoom = '1';"
+                        + "document.body.style.transform = 'scale(1)';"
+                        + "window.dispatchEvent(new Event('resize'));");
+
+                // Wait for layout to settle
+                Thread.sleep(2000);
+
+                // Ensure viewport is properly set after page load
+                driver.manage().window().setSize(new org.openqa.selenium.Dimension(1920, 1080));
+
+                // Additional wait for layout to settle
+                Thread.sleep(1000);
+            } catch (Exception e) {
+                log.warn("Error during headless mode stabilization: {}", e.getMessage());
+            }
+        }
 
         // Wait for form to be ready (minimal wait)
         try {
@@ -2182,8 +2239,6 @@ public class GoogleFormServiceImpl implements GoogleFormService {
         } catch (Exception e) {
             log.warn("Waiting for form containers failed: {}. Proceeding.", e.getMessage());
         }
-
-        // Proceed immediately
 
         return driver;
     }

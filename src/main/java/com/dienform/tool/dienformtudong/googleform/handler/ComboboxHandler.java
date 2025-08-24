@@ -12,8 +12,7 @@ import org.springframework.stereotype.Component;
 import lombok.extern.slf4j.Slf4j;
 
 /**
- * Dedicated handler for combobox/dropdown question types This class is separated from
- * GoogleFormServiceImpl to avoid affecting other question types
+ * Dedicated handler for combobox/dropdown question types
  */
 @Component
 @Slf4j
@@ -71,20 +70,69 @@ public class ComboboxHandler {
    * Find dropdown trigger element within the question
    */
   private WebElement findDropdownTrigger(WebElement questionElement, String questionTitle) {
-    try {
-      // Look for dropdown trigger specifically within this question element
-      WebElement dropdownTrigger = questionElement.findElement(By.cssSelector("[role='listbox']"));
+    return findDropdownTriggerEnhanced(questionElement, questionTitle);
+  }
 
-      if (dropdownTrigger == null) {
-        log.error("No dropdown trigger found within question element for: {}", questionTitle);
-        return null;
+  /**
+   * Enhanced dropdown trigger detection for headless mode
+   */
+  private WebElement findDropdownTriggerEnhanced(WebElement questionElement, String questionTitle) {
+    try {
+      // Strategy 1: Standard role='listbox' selector
+      try {
+        WebElement dropdownTrigger =
+            questionElement.findElement(By.cssSelector("[role='listbox']"));
+        if (dropdownTrigger != null && dropdownTrigger.isDisplayed()) {
+          return dropdownTrigger;
+        }
+      } catch (Exception e) {
+        // Continue to next strategy
       }
 
-      log.debug("Found dropdown trigger for question: {}", questionTitle);
-      return dropdownTrigger;
+      // Strategy 2: Look for elements with aria-expanded attribute
+      try {
+        List<WebElement> candidates =
+            questionElement.findElements(By.cssSelector("[aria-expanded]"));
+        for (WebElement candidate : candidates) {
+          if (candidate.isDisplayed() && candidate.isEnabled()) {
+            return candidate;
+          }
+        }
+      } catch (Exception e) {
+        // Continue to next strategy
+      }
 
+      // Strategy 3: Look for clickable elements within question
+      try {
+        List<WebElement> candidates = questionElement
+            .findElements(By.cssSelector("[tabindex], [role='button'], [role='listbox']"));
+        for (WebElement candidate : candidates) {
+          if (candidate.isDisplayed() && candidate.isEnabled()) {
+            return candidate;
+          }
+        }
+      } catch (Exception e) {
+        // Continue to next strategy
+      }
+
+      // Strategy 4: Look for any interactive element
+      try {
+        List<WebElement> candidates =
+            questionElement.findElements(By.cssSelector("[onclick], [jsaction], [tabindex]"));
+        for (WebElement candidate : candidates) {
+          if (candidate.isDisplayed() && candidate.isEnabled()) {
+            return candidate;
+          }
+        }
+      } catch (Exception e) {
+        // Continue to next strategy
+      }
+
+      log.error("No dropdown trigger found within question element for: {}", questionTitle);
+      return null;
     } catch (Exception e) {
-      log.error("No dropdown trigger found for question: {}", questionTitle);
+      log.error("Enhanced dropdown trigger detection failed for {}: {}", questionTitle,
+          e.getMessage());
       return null;
     }
   }
@@ -94,82 +142,129 @@ public class ComboboxHandler {
    */
   private boolean expandDropdown(WebDriver driver, WebElement dropdownTrigger, String questionTitle,
       WebDriverWait wait) {
+    return expandDropdownEnhanced(driver, dropdownTrigger, questionTitle, wait);
+  }
+
+  /**
+   * Enhanced dropdown expansion for headless mode
+   */
+  private boolean expandDropdownEnhanced(WebDriver driver, WebElement dropdownTrigger,
+      String questionTitle, WebDriverWait wait) {
     try {
-      // If it's already expanded, don't toggle it closed
+      // Check if already expanded
+      String initialExpanded = dropdownTrigger.getAttribute("aria-expanded");
+      if ("true".equals(initialExpanded)) {
+        return true;
+      }
+
+      // Enhanced scrolling for headless mode
+      scrollToElementEnhanced(driver, dropdownTrigger);
+
+      // Multiple click strategies with verification
+      boolean expanded = false;
+
+      // Strategy 1: JavaScript click with verification
       try {
-        String initialExpanded = dropdownTrigger.getAttribute("aria-expanded");
-        if ("true".equals(initialExpanded)) {
-          log.debug("Dropdown already expanded for question: {}", questionTitle);
+        ((JavascriptExecutor) driver).executeScript("arguments[0].click();", dropdownTrigger);
+        Thread.sleep(500);
+        expanded = verifyDropdownExpanded(dropdownTrigger);
+        if (expanded) {
           return true;
         }
-      } catch (Exception ignore) {
-      }
-
-      // Scroll to the dropdown trigger to ensure it's visible and clickable
-      try {
-        ((JavascriptExecutor) driver)
-            .executeScript("arguments[0].scrollIntoView({block: 'center'});", dropdownTrigger);
-        Thread.sleep(200);
       } catch (Exception e) {
-        log.debug("Could not scroll to dropdown trigger: {}", e.getMessage());
+        // Continue to next strategy
       }
 
-      // Click to expand the dropdown with multiple strategies
-      wait.until(ExpectedConditions.elementToBeClickable(dropdownTrigger));
-
-      // Strategy 1: Regular click
-      dropdownTrigger.click();
-      log.info("Clicked dropdown trigger for question: {}", questionTitle);
-
-      // Verify dropdown expanded
-      Thread.sleep(500);
-      String ariaExpanded = dropdownTrigger.getAttribute("aria-expanded");
-      if (!"true".equals(ariaExpanded)) {
-        log.warn("Dropdown not expanded after regular click, trying JavaScript click");
-        try {
-          // Strategy 2: JavaScript click
-          ((JavascriptExecutor) driver).executeScript("arguments[0].click();", dropdownTrigger);
-          Thread.sleep(500);
-          ariaExpanded = dropdownTrigger.getAttribute("aria-expanded");
-        } catch (Exception e) {
-          log.debug("JavaScript click failed: {}", e.getMessage());
+      // Strategy 2: Focus + Enter key
+      try {
+        dropdownTrigger.sendKeys(Keys.TAB);
+        Thread.sleep(200);
+        dropdownTrigger.sendKeys(Keys.ENTER);
+        Thread.sleep(500);
+        expanded = verifyDropdownExpanded(dropdownTrigger);
+        if (expanded) {
+          return true;
         }
-
-        if (!"true".equals(ariaExpanded)) {
-          // Strategy 3: Keyboard toggle as fallback
-          try {
-            dropdownTrigger.sendKeys(Keys.SPACE);
-            Thread.sleep(400);
-            ariaExpanded = dropdownTrigger.getAttribute("aria-expanded");
-          } catch (Exception e) {
-            log.debug("Space key failed: {}", e.getMessage());
-          }
-        }
-
-        if (!"true".equals(ariaExpanded)) {
-          try {
-            dropdownTrigger.sendKeys(Keys.ENTER);
-            Thread.sleep(400);
-            ariaExpanded = dropdownTrigger.getAttribute("aria-expanded");
-          } catch (Exception e) {
-            log.debug("Enter key failed: {}", e.getMessage());
-          }
-        }
-
-        if (!"true".equals(ariaExpanded)) {
-          log.warn("Dropdown still not expanded after all strategies");
-          return false;
-        }
+      } catch (Exception e) {
+        // Continue to next strategy
       }
 
-      // Wait a bit for dropdown to expand
-      Thread.sleep(1000);
+      // Strategy 3: Space key
+      try {
+        dropdownTrigger.sendKeys(Keys.SPACE);
+        Thread.sleep(500);
+        expanded = verifyDropdownExpanded(dropdownTrigger);
+        if (expanded) {
+          return true;
+        }
+      } catch (Exception e) {
+        // Continue to next strategy
+      }
 
-      log.debug("Dropdown expanded successfully for question: {}", questionTitle);
-      return true;
+      // Strategy 4: Regular click as last resort
+      try {
+        dropdownTrigger.click();
+        Thread.sleep(500);
+        expanded = verifyDropdownExpanded(dropdownTrigger);
+        if (expanded) {
+          return true;
+        }
+      } catch (Exception e) {
+        // Continue to next strategy
+      }
+
+      // Strategy 5: Additional JavaScript click with longer wait
+      try {
+        ((JavascriptExecutor) driver).executeScript("arguments[0].click();", dropdownTrigger);
+        Thread.sleep(800);
+        expanded = verifyDropdownExpanded(dropdownTrigger);
+        if (expanded) {
+          return true;
+        }
+      } catch (Exception e) {
+        // Continue to next strategy
+      }
+
+      log.warn("All click strategies failed for: {}", questionTitle);
+      return false;
 
     } catch (Exception e) {
-      log.error("Error expanding dropdown for question '{}': {}", questionTitle, e.getMessage());
+      log.error("Enhanced dropdown expansion failed for {}: {}", questionTitle, e.getMessage());
+      return false;
+    }
+  }
+
+  /**
+   * Enhanced scrolling for headless mode
+   */
+  private void scrollToElementEnhanced(WebDriver driver, WebElement element) {
+    try {
+      // Multiple scrolling strategies
+      ((JavascriptExecutor) driver).executeScript(
+          "arguments[0].scrollIntoView({block: 'center', inline: 'center'});", element);
+      Thread.sleep(300);
+
+      ((JavascriptExecutor) driver).executeScript(
+          "window.scrollTo(0, arguments[0].offsetTop - window.innerHeight/2);", element);
+      Thread.sleep(200);
+
+      // Force element to be visible
+      ((JavascriptExecutor) driver).executeScript("arguments[0].style.visibility = 'visible';"
+          + "arguments[0].style.display = 'block';" + "arguments[0].style.opacity = '1';", element);
+      Thread.sleep(200);
+    } catch (Exception e) {
+      // Ignore scrolling errors
+    }
+  }
+
+  /**
+   * Verify dropdown is expanded
+   */
+  private boolean verifyDropdownExpanded(WebElement dropdownTrigger) {
+    try {
+      String ariaExpanded = dropdownTrigger.getAttribute("aria-expanded");
+      return "true".equals(ariaExpanded);
+    } catch (Exception e) {
       return false;
     }
   }
@@ -183,8 +278,6 @@ public class ComboboxHandler {
     try {
       // Get the location of the dropdown trigger to find the closest popup
       org.openqa.selenium.Point triggerLocation = dropdownTrigger.getLocation();
-      log.debug("Dropdown trigger location: x={}, y={}", triggerLocation.getX(),
-          triggerLocation.getY());
 
       // Strategy 1: Look for popup container with role="option" and data-value (most stable)
       try {
@@ -193,13 +286,10 @@ public class ComboboxHandler {
 
         if (!popupContainers.isEmpty()) {
           WebElement closestPopup = findClosestPopup(popupContainers, triggerLocation);
-          log.debug(
-              "Found popup container with role='option' and data-value, closest to dropdown trigger");
           return closestPopup;
         }
       } catch (Exception e) {
-        log.debug("Could not find popup container with role='option' and data-value: {}",
-            e.getMessage());
+        // Continue to next strategy
       }
 
       // Strategy 2: Look for popup container with role="option" and jsslot span
@@ -209,13 +299,10 @@ public class ComboboxHandler {
 
         if (!popupContainers.isEmpty()) {
           WebElement closestPopup = findClosestPopup(popupContainers, triggerLocation);
-          log.debug(
-              "Found popup container with role='option' and jsslot span, closest to dropdown trigger");
           return closestPopup;
         }
       } catch (Exception e) {
-        log.debug("Could not find popup container with role='option' and jsslot span: {}",
-            e.getMessage());
+        // Continue to next strategy
       }
 
       // Strategy 3: Look for popup container with aria-selected attribute
@@ -225,12 +312,10 @@ public class ComboboxHandler {
 
         if (!popupContainers.isEmpty()) {
           WebElement closestPopup = findClosestPopup(popupContainers, triggerLocation);
-          log.debug(
-              "Found popup container with aria-selected options, closest to dropdown trigger");
           return closestPopup;
         }
       } catch (Exception e) {
-        log.debug("Could not find popup container with aria-selected options: {}", e.getMessage());
+        // Continue to next strategy
       }
 
       // Strategy 4: Look for popup container with tabindex attribute
@@ -240,11 +325,10 @@ public class ComboboxHandler {
 
         if (!popupContainers.isEmpty()) {
           WebElement closestPopup = findClosestPopup(popupContainers, triggerLocation);
-          log.debug("Found popup container with tabindex options, closest to dropdown trigger");
           return closestPopup;
         }
       } catch (Exception e) {
-        log.debug("Could not find popup container with tabindex options: {}", e.getMessage());
+        // Continue to next strategy
       }
 
       // Strategy 5: Look for any visible popup container with role="option"
@@ -254,13 +338,10 @@ public class ComboboxHandler {
 
         if (!popupContainers.isEmpty()) {
           WebElement closestPopup = findClosestPopup(popupContainers, triggerLocation);
-          log.debug(
-              "Found {} popup containers with role='option', using the closest one to dropdown trigger",
-              popupContainers.size());
           return closestPopup;
         }
       } catch (Exception e) {
-        log.debug("Could not find any popup containers with role='option': {}", e.getMessage());
+        // Continue to next strategy
       }
 
       // Strategy 6: Fallback - look for any visible popup container
@@ -270,12 +351,10 @@ public class ComboboxHandler {
 
         if (!popupContainers.isEmpty()) {
           WebElement closestPopup = findClosestPopup(popupContainers, triggerLocation);
-          log.debug("Found {} general popup containers, using the closest one to dropdown trigger",
-              popupContainers.size());
           return closestPopup;
         }
       } catch (Exception e) {
-        log.debug("Could not find any general popup containers: {}", e.getMessage());
+        // Continue to next strategy
       }
 
       // Strategy 7: As a final fallback, some forms render options inside the listbox itself.
@@ -286,17 +365,15 @@ public class ComboboxHandler {
         List<WebElement> inlineOptions =
             dropdownTrigger.findElements(By.cssSelector("[role='option']"));
         if ("true".equals(expanded) && !inlineOptions.isEmpty()) {
-          log.debug("Using dropdown trigger as popup container (inline options detected: {})",
-              inlineOptions.size());
           return dropdownTrigger;
         }
       } catch (Exception e) {
-        log.debug("Inline options fallback check failed: {}", e.getMessage());
+        // Continue to next strategy
       }
 
       return null;
     } catch (Exception e) {
-      log.debug("Error finding popup container: {}", e.getMessage());
+      // Continue to next strategy
       return null;
     }
   }
@@ -319,17 +396,9 @@ public class ComboboxHandler {
           closestPopup = popup;
         }
 
-        log.debug("Popup at ({}, {}) - distance: {:.2f}", popupLocation.getX(),
-            popupLocation.getY(), distance);
       } catch (Exception e) {
-        log.debug("Could not get location for popup: {}", e.getMessage());
+        // Continue to next popup
       }
-    }
-
-    if (closestPopup != null) {
-      org.openqa.selenium.Point closestLocation = closestPopup.getLocation();
-      log.debug("Selected closest popup at ({}, {}) with distance: {:.2f}", closestLocation.getX(),
-          closestLocation.getY(), minDistance);
     }
 
     return closestPopup;
@@ -362,21 +431,17 @@ public class ComboboxHandler {
       // Verify that options are actually clickable
       List<WebElement> options = popupContainer.findElements(By.cssSelector("[role='option']"));
       if (options.isEmpty()) {
-        log.warn("No options found in popup container after waiting");
         return false;
       }
 
       // Try to wait for at least one option to be clickable
       try {
         wait.until(ExpectedConditions.elementToBeClickable(options.get(0)));
-        log.debug("Popup container is ready with {} options", options.size());
         return true;
       } catch (Exception e) {
-        log.warn("Options not clickable after waiting: {}", e.getMessage());
         return false;
       }
     } catch (Exception e) {
-      log.error("Error waiting for popup to be ready: {}", e.getMessage());
       return false;
     }
   }
@@ -389,9 +454,6 @@ public class ComboboxHandler {
     try {
       String normalizedOptionText = normalize(optionText);
       List<WebElement> options = popupContainer.findElements(By.cssSelector("[role='option']"));
-
-      log.debug("Looking for option: '{}' (normalized: '{}') in {} options", optionText,
-          normalizedOptionText, options.size());
 
       // First pass: Look for exact match with tabindex="0" priority
       WebElement preferredMatch = null;
@@ -408,15 +470,11 @@ public class ComboboxHandler {
           String tabindex = option.getAttribute("tabindex");
           boolean isPreferred = "0".equals(tabindex);
 
-          log.debug("Checking option {}: {} (tabindex: {})", i + 1, option.getText(), tabindex);
-
           // Strategy 1: Check data-value attribute (most stable - from HTML example)
           String dataValue = normalize(option.getAttribute("data-value"));
           if (!dataValue.isEmpty()) {
-            log.debug("Option {} data-value: '{}'", i + 1, dataValue);
             if (dataValue.equals(normalizedOptionText)) {
               if (isPreferred) {
-                log.debug("Found preferred exact match by data-value: '{}'", dataValue);
                 return option;
               } else if (exactMatch == null) {
                 exactMatch = option;
@@ -433,10 +491,8 @@ public class ComboboxHandler {
           // Strategy 2: Check aria-label attribute
           String ariaLabel = normalize(option.getAttribute("aria-label"));
           if (!ariaLabel.isEmpty()) {
-            log.debug("Option {} aria-label: '{}'", i + 1, ariaLabel);
             if (ariaLabel.equals(normalizedOptionText)) {
               if (isPreferred) {
-                log.debug("Found preferred exact match by aria-label: '{}'", ariaLabel);
                 return option;
               } else if (exactMatch == null) {
                 exactMatch = option;
@@ -455,10 +511,8 @@ public class ComboboxHandler {
             WebElement span = option.findElement(By.cssSelector("span[jsslot]"));
             String spanText = normalize(span.getText());
             if (!spanText.isEmpty()) {
-              log.debug("Option {} span[jsslot] text: '{}'", i + 1, spanText);
               if (spanText.equals(normalizedOptionText)) {
                 if (isPreferred) {
-                  log.debug("Found preferred exact match by span text: '{}'", spanText);
                   return option;
                 } else if (exactMatch == null) {
                   exactMatch = option;
@@ -478,10 +532,8 @@ public class ComboboxHandler {
           // Strategy 4: Check any text content in the option
           String optionTextContent = normalize(option.getText());
           if (!optionTextContent.isEmpty()) {
-            log.debug("Option {} text content: '{}'", i + 1, optionTextContent);
             if (optionTextContent.equals(normalizedOptionText)) {
               if (isPreferred) {
-                log.debug("Found preferred exact match by text content: '{}'", optionTextContent);
                 return option;
               } else if (exactMatch == null) {
                 exactMatch = option;
@@ -501,10 +553,8 @@ public class ComboboxHandler {
             // If this option is selected, check if it matches our target
             String selectedText = normalize(option.getText());
             if (!selectedText.isEmpty()) {
-              log.debug("Option {} is selected with text: '{}'", i + 1, selectedText);
               if (selectedText.equals(normalizedOptionText)) {
                 if (isPreferred) {
-                  log.debug("Found preferred selected option by text: '{}'", selectedText);
                   return option;
                 } else if (exactMatch == null) {
                   exactMatch = option;
@@ -514,27 +564,21 @@ public class ComboboxHandler {
           }
 
         } catch (Exception e) {
-          log.debug("Error checking option {}: {}", i + 1, e.getMessage());
-          continue;
+          // Continue to next option
         }
       }
 
       // Return the best match found (preferred > exact > partial)
       if (preferredMatch != null) {
-        log.debug("Returning preferred partial match");
         return preferredMatch;
       } else if (exactMatch != null) {
-        log.debug("Returning exact match");
         return exactMatch;
       } else if (partialMatch != null) {
-        log.debug("Returning partial match");
         return partialMatch;
       }
 
-      log.warn("Could not find option '{}' in any of the {} options", optionText, options.size());
       return null;
     } catch (Exception e) {
-      log.error("Error finding option by stable attributes: {}", e.getMessage());
       return null;
     }
   }
@@ -545,23 +589,16 @@ public class ComboboxHandler {
   private boolean selectOptionFromPopup(WebDriver driver, WebElement popupContainer,
       String optionText, String questionTitle, WebDriverWait wait) {
     try {
-      log.debug("Attempting to select option '{}' from popup for question: {}", optionText,
-          questionTitle);
-
       // Wait for popup to be fully loaded and ready
       if (!waitForPopupReady(driver, popupContainer, wait)) {
-        log.warn("Popup container not ready for interaction");
         return false;
       }
 
       // Find the target option using stable attributes
       WebElement targetOption = findOptionByStableAttributes(popupContainer, optionText);
       if (targetOption == null) {
-        log.error("Could not find option '{}' in popup container", optionText);
         return false;
       }
-
-      log.debug("Found target option, attempting to click");
 
       // Enhanced click strategy with multiple approaches
       boolean clickSuccess = false;
@@ -577,22 +614,18 @@ public class ComboboxHandler {
       try {
         WebElement spanElement = targetOption.findElement(By.cssSelector("span[jsslot]"));
         ((JavascriptExecutor) driver).executeScript("arguments[0].click();", spanElement);
-        log.info("Selected option '{}' for question: {} using span[jsslot] click", optionText,
-            questionTitle);
         clickSuccess = true;
       } catch (Exception spanClickException) {
-        log.debug("Span[jsslot] click failed: {}", spanClickException.getMessage());
+        // Continue to next strategy
       }
 
       // Strategy 2: Try JavaScript click on the option element
       if (!clickSuccess) {
         try {
           ((JavascriptExecutor) driver).executeScript("arguments[0].click();", targetOption);
-          log.info("Selected option '{}' for question: {} using JavaScript click", optionText,
-              questionTitle);
           clickSuccess = true;
         } catch (Exception jsClickException) {
-          log.debug("JavaScript click failed: {}", jsClickException.getMessage());
+          // Continue to next strategy
         }
       }
 
@@ -601,11 +634,9 @@ public class ComboboxHandler {
         try {
           wait.until(ExpectedConditions.elementToBeClickable(targetOption));
           targetOption.click();
-          log.info("Selected option '{}' for question: {} using regular click", optionText,
-              questionTitle);
           clickSuccess = true;
         } catch (Exception regularClickException) {
-          log.debug("Regular click failed: {}", regularClickException.getMessage());
+          // Continue to next strategy
         }
       }
 
@@ -613,11 +644,9 @@ public class ComboboxHandler {
       if (!clickSuccess) {
         try {
           targetOption.sendKeys(Keys.ENTER);
-          log.info("Selected option '{}' for question: {} using Enter key", optionText,
-              questionTitle);
           clickSuccess = true;
         } catch (Exception enterKeyException) {
-          log.debug("Enter key failed: {}", enterKeyException.getMessage());
+          // Continue to next strategy
         }
       }
 
@@ -625,11 +654,9 @@ public class ComboboxHandler {
       if (!clickSuccess) {
         try {
           targetOption.sendKeys(Keys.SPACE);
-          log.info("Selected option '{}' for question: {} using Space key", optionText,
-              questionTitle);
           clickSuccess = true;
         } catch (Exception spaceKeyException) {
-          log.debug("Space key failed: {}", spaceKeyException.getMessage());
+          // Continue to next strategy
         }
       }
 
@@ -644,32 +671,24 @@ public class ComboboxHandler {
             // If popup disappeared, likely the selection was applied
             boolean popupStillVisible = popupContainer.isDisplayed();
             if (!popupStillVisible) {
-              log.debug("Popup closed after click; treating selection as successful for '{}': {}",
-                  questionTitle, optionText);
               verified = true;
             }
           } catch (Exception ignore) {
             // Stale element or not visible -> assume closed
-            log.debug("Popup container not visible/stale; assuming it closed after selection");
             verified = true;
           }
         }
 
         if (verified) {
-          log.info("Option selection verified successfully for question: {}", questionTitle);
           return true;
         } else {
-          log.warn("Option selection verification failed for question: {}", questionTitle);
           return false;
         }
       } else {
-        log.warn("All click strategies failed for option '{}'", optionText);
         return false;
       }
 
     } catch (Exception e) {
-      log.error("Error selecting option from popup for question '{}': {}", questionTitle,
-          e.getMessage());
       return false;
     }
   }
@@ -693,27 +712,21 @@ public class ComboboxHandler {
           String normalizedOptionText = normalize(optionText);
 
           if (normalizedTriggerText.contains(normalizedOptionText)) {
-            log.debug("Option selection verified: trigger text '{}' contains selected option '{}'",
-                triggerText, optionText);
             return true;
           }
 
           // Also check aria-label attribute
           String ariaLabel = trigger.getAttribute("aria-label");
           if (ariaLabel != null && normalize(ariaLabel).contains(normalizedOptionText)) {
-            log.debug("Option selection verified: aria-label '{}' contains selected option '{}'",
-                ariaLabel, optionText);
             return true;
           }
         } catch (Exception e) {
-          log.debug("Error checking dropdown trigger: {}", e.getMessage());
+          // Continue to next trigger
         }
       }
 
-      log.warn("Could not verify option selection for question: {}", questionTitle);
       return false;
     } catch (Exception e) {
-      log.error("Error verifying option selection: {}", e.getMessage());
       return false;
     }
   }
