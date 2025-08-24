@@ -87,18 +87,18 @@ public class SurveySchedulerService {
    * Scheduled task that processes QUEUED requests when there's capacity Runs more frequently to
    * handle immediate processing
    */
-  @Scheduled(fixedRate = 10000) // 10 seconds
+  @Scheduled(fixedRate = 30000) // 30 seconds - increased for better coordination
   @Transactional
   public void processQueuedRequests() {
     if (!schedulerConfig.isEnabled()) {
       return;
     }
 
-    log.debug("Checking for QUEUED requests to process at {}", LocalDateTime.now());
+    log.debug("SurveySchedulerService: Checking for QUEUED requests to process at {}", LocalDateTime.now());
 
     // Check if queue management service has capacity
     if (!queueManagementService.hasAvailableCapacity()) {
-      log.debug("No capacity available for processing QUEUED requests");
+      log.debug("SurveySchedulerService: No capacity available for processing QUEUED requests");
       return;
     }
 
@@ -107,11 +107,11 @@ public class SurveySchedulerService {
         .findByStatusAndStartDateLessThanEqual(FillRequestStatusEnum.QUEUED, LocalDateTime.now());
 
     if (queuedRequests.isEmpty()) {
-      log.debug("No QUEUED requests to process");
+      log.debug("SurveySchedulerService: No QUEUED requests to process");
       return;
     }
 
-    log.info("Found {} QUEUED requests to process", queuedRequests.size());
+    log.info("SurveySchedulerService: Found {} QUEUED requests to process", queuedRequests.size());
 
     // Process QUEUED requests based on priority and queue position
     List<FillRequest> sortedRequests = queuedRequests.stream().sorted((a, b) -> {
@@ -132,18 +132,22 @@ public class SurveySchedulerService {
 
     for (FillRequest request : sortedRequests) {
       if (processed >= availableSlots) {
+        log.debug("SurveySchedulerService: Reached capacity limit ({} slots), stopping processing", availableSlots);
         break;
       }
 
       if (processQueuedRequest(request)) {
         processed++;
-        log.info("Started processing QUEUED request: {} ({}/{})", request.getId(), processed,
+        log.info("SurveySchedulerService: Started processing QUEUED request: {} ({}/{})", request.getId(), processed,
             availableSlots);
       }
     }
 
     if (processed > 0) {
-      log.info("Started processing {} QUEUED requests", processed);
+      log.info("SurveySchedulerService: Successfully started processing {} QUEUED requests", processed);
+    } else {
+      log.debug("SurveySchedulerService: No requests were processed (capacity: {}, available: {})", 
+          queueManagementService.getThreadPoolSize(), availableSlots);
     }
   }
 

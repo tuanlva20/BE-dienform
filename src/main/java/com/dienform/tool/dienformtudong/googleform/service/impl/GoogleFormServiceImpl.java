@@ -39,6 +39,7 @@ import org.openqa.selenium.support.ui.ExpectedConditions;
 import org.openqa.selenium.support.ui.WebDriverWait;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import com.dienform.common.exception.ResourceNotFoundException;
 import com.dienform.common.util.ArrayUtils;
@@ -333,7 +334,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     }
 
     @Override
-    @Transactional
+    // @Transactional
     public int fillForm(UUID fillRequestId) {
         log.info("Starting form filling for fillRequestId: {}", fillRequestId);
 
@@ -375,8 +376,8 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             return 0;
         }
 
-        // Get questions and answer distributions
-        List<Question> questions = questionRepository.findByForm(form);
+        // Get questions and answer distributions with eager loading
+        List<Question> questions = questionRepository.findByFormWithOptions(form);
         if (questions.isEmpty()) {
             log.error("No questions found for form: {}", form.getId());
             updateFillRequestStatus(fillRequest, Constants.FILL_REQUEST_STATUS_FAILED);
@@ -392,6 +393,8 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             Question question = dist.getQuestion();
             distributionsByQuestion.computeIfAbsent(question, k -> new ArrayList<>()).add(dist);
         }
+
+        // Create execution plans with eager loaded data
         List<Map<Question, QuestionOption>> executionPlans =
                 createExecutionPlans(distributionsByQuestion, remainingSurveys);
 
@@ -436,31 +439,40 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                 try {
                     log.debug("Processing execution plan {}/{} for fillRequestId: {}", planIndex,
                             executionPlans.size(), fillRequestId);
-                    if (fillRequest.isHumanLike()) {
-                        // Check if this is the first form (completedSurvey = 0 and planIndex = 1)
-                        if (fillRequest.getCompletedSurvey() == 0 && planIndex == 1) {
-                            // First form: use minimal delay of 36 seconds
-                            int delaySeconds = 36;
-                            Thread.sleep(delaySeconds * 1000L);
-                            log.debug("Human-like mode: First form with minimal delay of {} seconds", delaySeconds);
-                        } else {
-                            // Subsequent forms: use proper delay range 36-399 seconds
-                            int delaySeconds = 36 + random.nextInt(364); // 36-399 seconds
-                            Thread.sleep(delaySeconds * 1000L);
-                            log.debug("Human-like mode: Subsequent form with delay of {} seconds", delaySeconds);
-                        }
-                    } else {
-                        // Fast mode: only 1 second delay between forms, no delay during filling
-                        if (totalProcessed.get() > 0) {
-                            Thread.sleep(1000); // 1 second between forms
-                            log.debug("Fast mode: 1 second delay between forms");
-                        }
-                    }
 
                     final int currentPlanIndex = planIndex; // capture for lambda
+
+                    // Calculate delay for human-like mode
+                    final int delaySeconds;
+                    if (fillRequest.isHumanLike()) {
+                        if (fillRequest.getCompletedSurvey() == 0 && planIndex == 1) {
+                            delaySeconds = 36; // First form: minimal delay
+                        } else {
+                            delaySeconds = 36 + random.nextInt(364); // 36-399 seconds
+                        }
+                        log.debug("Human-like mode: Form {} with delay of {} seconds", planIndex,
+                                delaySeconds);
+                    } else if (totalProcessed.get() > 0) {
+                        delaySeconds = 1; // Fast mode: 1 second between forms
+                        log.debug("Fast mode: 1 second delay between forms");
+                    } else {
+                        delaySeconds = 0;
+                    }
+
                     CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
-                        executeFormFillTask(fillRequestId, link, plan, fillRequest.isHumanLike(),
-                                successCount, failCount);
+                        try {
+                            // Apply delay in async context to avoid blocking main thread
+                            if (delaySeconds > 0) {
+                                Thread.sleep(delaySeconds * 1000L);
+                            }
+
+                            executeFormFillTask(fillRequestId, link, plan,
+                                    fillRequest.isHumanLike(), successCount, failCount);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            log.warn("Task interrupted for plan {}/{} (fillRequestId: {})",
+                                    currentPlanIndex, executionPlans.size(), fillRequestId);
+                        }
                     }, executor).whenComplete((v, t) -> {
                         int processed = totalProcessed.incrementAndGet();
                         if (t != null) {
@@ -480,7 +492,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                             log.info(
                                     "All {} tasks completed for fillRequestId: {}. Updating final status...",
                                     processed, fillRequestId);
-                            updateFinalStatus(fillRequest, null, successCount.get(),
+                            updateFinalStatusInTransaction(fillRequest, null, successCount.get(),
                                     failCount.get());
                         }
                     });
@@ -510,7 +522,8 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                 log.error(
                         "Form filling execution was interrupted or timed out for fillRequestId: {}",
                         fillRequestId, e);
-                updateFillRequestStatus(fillRequest, Constants.FILL_REQUEST_STATUS_FAILED);
+                updateFillRequestStatusInTransaction(fillRequest,
+                        Constants.FILL_REQUEST_STATUS_FAILED);
                 return 0;
             }
 
@@ -959,8 +972,16 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     /**
      * Update fill request status with transaction
      */
-    @Transactional
+    @Transactional(propagation = Propagation.REQUIRES_NEW, timeout = 10)
     protected void updateFillRequestStatus(FillRequest fillRequest, String status) {
+        updateFillRequestStatusInTransaction(fillRequest, status);
+    }
+
+    /**
+     * Update fill request status in separate transaction to avoid connection leak
+     */
+    @Transactional(propagation = Propagation.REQUIRES_NEW, timeout = 10)
+    protected void updateFillRequestStatusInTransaction(FillRequest fillRequest, String status) {
         try {
             // Use optimistic locking for status updates
             com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum newStatusEnum =
@@ -985,9 +1006,18 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     /**
      * Update final status for both fill request and session execution
      */
-    @Transactional
+    @Transactional(propagation = Propagation.REQUIRES_NEW, timeout = 15)
     protected void updateFinalStatus(FillRequest fillRequest, SesstionExecution sessionExecute,
             int successCount, int failCount) {
+        updateFinalStatusInTransaction(fillRequest, sessionExecute, successCount, failCount);
+    }
+
+    /**
+     * Update final status in separate transaction to avoid connection leak
+     */
+    @Transactional(propagation = Propagation.REQUIRES_NEW, timeout = 15)
+    protected void updateFinalStatusInTransaction(FillRequest fillRequest,
+            SesstionExecution sessionExecute, int successCount, int failCount) {
         try {
             // Determine final status based on persisted completedSurvey first
             FillRequest current = fillRequestRepository.findById(fillRequest.getId()).orElseThrow(

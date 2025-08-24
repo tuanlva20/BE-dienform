@@ -121,4 +121,20 @@ public interface FillRequestRepository extends JpaRepository<FillRequest, UUID> 
         @Query("UPDATE FillRequest fr SET fr.status = ?2 WHERE fr.id = ?1")
         int updateStatus(UUID id,
                         com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum status);
+
+        /**
+         * Atomic update retry count to avoid optimistic locking conflicts
+         */
+        @Modifying(flushAutomatically = true, clearAutomatically = true)
+        @Transactional
+        @Query("UPDATE FillRequest fr SET fr.retryCount = ?2, fr.updatedAt = NOW() WHERE fr.id = ?1")
+        int updateRetryCount(UUID id, int retryCount);
+
+        /**
+         * Atomic update status and retry count to avoid optimistic locking conflicts
+         */
+        @Modifying(flushAutomatically = true, clearAutomatically = true)
+        @Transactional
+        @Query("UPDATE FillRequest fr SET fr.status = ?2, fr.retryCount = ?3, fr.updatedAt = NOW() WHERE fr.id = ?1")
+        int updateStatusAndRetryCount(UUID id, FillRequestStatusEnum status, int retryCount);
 }

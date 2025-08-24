@@ -6,10 +6,10 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -210,17 +210,13 @@ public class QueueManagementService {
    * Check if thread pool has available capacity
    */
   public boolean hasAvailableCapacity() {
-    if (queueExecutor instanceof ThreadPoolExecutor) {
-      ThreadPoolExecutor threadPool = (ThreadPoolExecutor) queueExecutor;
-      int activeCount = threadPool.getActiveCount();
-      int corePoolSize = threadPool.getCorePoolSize();
-
-      // For FixedThreadPool, we should check against the core pool size
-      boolean hasCapacity = activeCount < corePoolSize;
-      return hasCapacity;
-    }
+    // Use activeRequests counter for more accurate capacity checking
     int activeRequestsCount = activeRequests.get();
     boolean hasCapacity = activeRequestsCount < threadPoolSize;
+
+    log.debug("Capacity check: active={}, max={}, hasCapacity={}", activeRequestsCount,
+        threadPoolSize, hasCapacity);
+
     return hasCapacity;
   }
 
@@ -312,7 +308,7 @@ public class QueueManagementService {
         return;
       }
 
-      // Get next queued request
+      // Get all queued requests ordered by priority (ignore startDate for immediate processing)
       List<FillRequest> queuedRequests =
           fillRequestRepository.findQueuedRequestsOrderedByPriority(FillRequestStatusEnum.QUEUED);
 
@@ -321,22 +317,74 @@ public class QueueManagementService {
         return;
       }
 
+      log.info("Found {} queued requests, checking capacity for processing", queuedRequests.size());
+
+      // Separate human and non-human requests for better prioritization
+      List<FillRequest> nonHumanRequests =
+          queuedRequests.stream().filter(req -> !req.isHumanLike()).collect(Collectors.toList());
+
+      List<FillRequest> humanRequests =
+          queuedRequests.stream().filter(req -> req.isHumanLike()).collect(Collectors.toList());
+
+      log.debug("Queue breakdown: {} non-human requests, {} human requests",
+          nonHumanRequests.size(), humanRequests.size());
+
       // Process up to available capacity
       int availableSlots = threadPoolSize - activeRequests.get();
       int processed = 0;
 
-      for (FillRequest request : queuedRequests) {
+      // First, process non-human requests (higher priority)
+      for (FillRequest request : nonHumanRequests) {
         if (processed >= availableSlots) {
+          log.debug("Reached capacity limit ({} slots), stopping processing", availableSlots);
           break;
+        }
+
+        // Check if request can be processed (startDate check)
+        if (request.getStartDate() != null && request.getStartDate().isAfter(LocalDateTime.now())) {
+          log.debug("Skipping non-human request {} - startDate {} is in the future",
+              request.getId(), request.getStartDate());
+          continue;
         }
 
         if (processQueuedRequest(request)) {
           processed++;
+          log.info("Started processing non-human queued request: {} ({}/{})", request.getId(),
+              processed, availableSlots);
+        }
+      }
+
+      // Then, process human requests if there's still capacity
+      for (FillRequest request : humanRequests) {
+        if (processed >= availableSlots) {
+          log.debug("Reached capacity limit ({} slots), stopping processing", availableSlots);
+          break;
+        }
+
+        // Check if request can be processed (startDate check)
+        if (request.getStartDate() != null && request.getStartDate().isAfter(LocalDateTime.now())) {
+          log.debug("Skipping human request {} - startDate {} is in the future", request.getId(),
+              request.getStartDate());
+          continue;
+        }
+
+        if (processQueuedRequest(request)) {
+          processed++;
+          log.info("Started processing human queued request: {} ({}/{})", request.getId(),
+              processed, availableSlots);
         }
       }
 
       if (processed > 0) {
-        log.info("Processed {} queued requests", processed);
+        log.info("Successfully started processing {} queued requests ({} non-human, {} human)",
+            processed,
+            nonHumanRequests.stream()
+                .filter(req -> req.getStatus() == FillRequestStatusEnum.IN_PROCESS).count(),
+            humanRequests.stream()
+                .filter(req -> req.getStatus() == FillRequestStatusEnum.IN_PROCESS).count());
+      } else {
+        log.debug("No requests were processed (capacity: {}, available: {})", threadPoolSize,
+            availableSlots);
       }
 
     } catch (Exception e) {
@@ -471,20 +519,30 @@ public class QueueManagementService {
    */
   private void handleProcessingError(FillRequest fillRequest, Throwable error) {
     try {
-      fillRequest.setRetryCount(fillRequest.getRetryCount() + 1);
+      // Use atomic update to avoid optimistic locking conflicts
+      int newRetryCount = fillRequest.getRetryCount() + 1;
 
-      if (fillRequest.getRetryCount() >= fillRequest.getMaxRetries()) {
-        fillRequest.setStatus(FillRequestStatusEnum.FAILED);
-        log.error("Request {} exceeded max retries, marking as FAILED", fillRequest.getId());
+      if (newRetryCount >= fillRequest.getMaxRetries()) {
+        // Update status to FAILED atomically
+        int updated = fillRequestRepository.updateStatusAndRetryCount(fillRequest.getId(),
+            FillRequestStatusEnum.FAILED, newRetryCount);
+        if (updated > 0) {
+          log.error("Request {} exceeded max retries, marking as FAILED", fillRequest.getId());
+        }
       } else {
-        // Re-queue for retry
+        // Re-queue for retry and update retry count atomically
         addToQueue(fillRequest);
-        log.info("Re-queued request {} for retry (attempt {}/{})", fillRequest.getId(),
-            fillRequest.getRetryCount(), fillRequest.getMaxRetries());
+        int updated = fillRequestRepository.updateRetryCount(fillRequest.getId(), newRetryCount);
+        if (updated > 0) {
+          log.info("Re-queued request {} for retry (attempt {}/{})", fillRequest.getId(),
+              newRetryCount, fillRequest.getMaxRetries());
+        }
       }
 
-      fillRequestRepository.save(fillRequest);
-      emitQueueUpdate(fillRequest);
+      // Emit update with fresh data
+      FillRequest updatedRequest =
+          fillRequestRepository.findById(fillRequest.getId()).orElse(fillRequest);
+      emitQueueUpdate(updatedRequest);
 
     } catch (Exception e) {
       log.error("Failed to handle processing error for request: {}", fillRequest.getId(), e);

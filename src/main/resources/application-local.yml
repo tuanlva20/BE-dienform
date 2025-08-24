@@ -8,13 +8,13 @@ spring:
     hibernate:
       ddl-auto: update
   datasource:
-    url: jdbc:mysql://localhost:3306/fill_form?lock_wait_timeout=60&innodb_lock_wait_timeout=60&innodb_deadlock_detect=ON
+    url: jdbc:mysql://localhost:3306/fill_form?useSSL=false&serverTimezone=Asia/Ho_Chi_Minh
     username: fillform
     password: admin@
     driver-class-name: com.mysql.cj.jdbc.Driver
     hikari:
-      maximum-pool-size: 10
-      minimum-idle: 2
+      maximum-pool-size: 15
+      minimum-idle: 8
       connection-timeout: 30000
       idle-timeout: 600000
       max-lifetime: 1800000
@@ -45,8 +45,8 @@ google:
     key: AIzaSyBCFk8JZ8OYLVEjs92cSLfcccyFH7VyeU0
   form:
     # Performance settings optimized for 2-core server
-    timeout-seconds: 45 # Reduced from 60s
-    thread-pool-size: 2 # Optimized for 2-core server
+    timeout-seconds: 30 # Reduced for 2-core server
+    thread-pool-size: 3 # Increased to allow parallel processing
     max-retries: 2 # Reduced from 3
     retry-delay-ms: 2000 # Increased from 1000ms
 
@@ -64,15 +64,15 @@ google:
 
 # Queue Management Configuration
 queue:
-  max-size: 10 # Reduced from 20
-  check-interval: 30000 # 45 seconds - increased for 2-core
+  max-size: 20 # Increased for better parallel processing
+  check-interval: 30000 # 30 seconds - optimized for parallel processing
   max-retries: 2 # Reduced from 3
-  retry-delay: 8000 # 8 seconds - increased
+  retry-delay: 10000 # 10 seconds - increased for 2-core
 
 # Campaign Scheduler Configuration
 campaign:
   scheduler:
-    fixed-rate: 120000 # Check every 2 minutes (120000ms) - reduced for 2-core
+    fixed-rate: 60000 # Check every 1 minute (60000ms) - optimized for parallel processing
     enabled: true
 
 # JWT Configuration for production

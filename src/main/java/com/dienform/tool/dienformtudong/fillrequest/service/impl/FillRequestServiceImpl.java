@@ -391,13 +391,14 @@ public class FillRequestServiceImpl implements FillRequestService {
       isUrgent = hoursUntilStart < 1; // Less than 1 hour until start
     }
 
-    // Calculate hybrid priority
-    int calculatedPriority = priorityCalculationService
-        .calculateHybridPriority(request.getCreatedAt(), agePriority, isHighValue, isUrgent);
+    // Calculate priority with human-like factor consideration
+    int calculatedPriority = priorityCalculationService.calculatePriorityWithHumanFactor(
+        request.getCreatedAt(), request.isHumanLike(), isHighValue, isUrgent);
 
     log.debug(
-        "Priority calculation for request {}: agePriority={}, isHighValue={}, isUrgent={}, finalPriority={}",
-        request.getId(), agePriority, isHighValue, isUrgent, calculatedPriority);
+        "Priority calculation for request {}: agePriority={}, isHighValue={}, isUrgent={}, isHumanLike={}, finalPriority={}",
+        request.getId(), agePriority, isHighValue, isUrgent, request.isHumanLike(),
+        calculatedPriority);
 
     return calculatedPriority;
   }
@@ -421,13 +422,14 @@ public class FillRequestServiceImpl implements FillRequestService {
       isUrgent = hoursUntilStart < 1; // Less than 1 hour until start
     }
 
-    // Calculate hybrid priority
-    int calculatedPriority = priorityCalculationService
-        .calculateHybridPriority(request.getCreatedAt(), agePriority, isHighValue, isUrgent);
+    // Calculate priority with human-like factor consideration
+    int calculatedPriority = priorityCalculationService.calculatePriorityWithHumanFactor(
+        request.getCreatedAt(), request.isHumanLike(), isHighValue, isUrgent);
 
     log.debug(
-        "Priority calculation for data fill request {}: agePriority={}, isHighValue={}, isUrgent={}, finalPriority={}",
-        request.getId(), agePriority, isHighValue, isUrgent, calculatedPriority);
+        "Priority calculation for data fill request {}: agePriority={}, isHighValue={}, isUrgent={}, isHumanLike={}, finalPriority={}",
+        request.getId(), agePriority, isHighValue, isUrgent, request.isHumanLike(),
+        calculatedPriority);
 
     return calculatedPriority;
   }
