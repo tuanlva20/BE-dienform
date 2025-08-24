@@ -131,15 +131,16 @@ public class ScheduleDistributionService {
       TimeSlot selectedSlot = selectWeightedTimeSlot(timeSlots);
       LocalDateTime executionTime = selectedSlot.getRandomTimeInSlot();
 
-      // Calculate delay based on completedSurvey logic
+      // Calculate delay based on new logic: first form always immediate, others based on
+      // completedSurvey
       int delaySeconds;
-      if (i == 0 && completedSurvey == 0) {
-        // First form should have 0 delay if no surveys completed yet
+      if (i == 0) {
+        // First form always has 0 delay for immediate execution
         delaySeconds = 0;
-        log.debug("First task scheduled with 0 delay (completedSurvey = 0)");
+        log.debug("First task scheduled with 0 delay (immediate execution)");
       } else {
-        // Human-like delay tightened to 10-30 seconds for subsequent forms
-        delaySeconds = 10 + random.nextInt(21); // 10-30 seconds
+        delaySeconds = (2 + random.nextInt(14)) * 60;; // 2-15 minutes
+        log.debug("Task {} scheduled with {} seconds delay (10-30 seconds)", i, delaySeconds);
       }
 
       schedule.add(new ScheduledTask(executionTime, delaySeconds, i));
@@ -148,17 +149,20 @@ public class ScheduleDistributionService {
     // Sort by execution time and recalculate delays based on actual execution times
     schedule.sort((a, b) -> a.getExecutionTime().compareTo(b.getExecutionTime()));
 
-    // Recalculate delays based on completedSurvey logic and execution order
+    // Recalculate delays based on new logic and execution order
     for (int i = 0; i < schedule.size(); i++) {
       ScheduledTask task = schedule.get(i);
       int newDelaySeconds;
 
-      if (i == 0 && completedSurvey == 0) {
-        // First form should have 0 delay if no surveys completed yet
+      if (i == 0) {
+        // First form always has 0 delay for immediate execution
         newDelaySeconds = 0;
+      } else if (completedSurvey > 0) {
+        // When completedSurvey > 0, subsequent forms have 2-15 minutes delay
+        newDelaySeconds = (2 + random.nextInt(14)) * 60; // 2-15 minutes in seconds
       } else {
-        // Human-like delay tightened to 10-30 seconds for subsequent forms
-        newDelaySeconds = 10 + random.nextInt(21); // 10-30 seconds
+        // When completedSurvey = 0, subsequent forms have 2-15 minutes delay
+        newDelaySeconds = (2 + random.nextInt(14)) * 60; // 2-15 minutes in seconds
       }
 
       // Create new task with updated delay
@@ -219,13 +223,19 @@ public class ScheduleDistributionService {
       int delaySeconds;
 
       if (isHumanLike) {
-        // First form should have 0 delay if no surveys completed yet
-        if (i == 0 && completedSurvey == 0) {
+        // New logic: first form always immediate, others based on completedSurvey
+        if (i == 0) {
+          // First form always has 0 delay for immediate execution
           delaySeconds = 0;
-          log.debug("First task scheduled with 0 delay (completedSurvey = 0)");
+          log.debug("First task scheduled with 0 delay (immediate execution)");
+        } else if (completedSurvey > 0) {
+          // When completedSurvey > 0, subsequent forms have 2-15 minutes delay
+          delaySeconds = (2 + random.nextInt(14)) * 60; // 2-15 minutes in seconds
+          log.debug("Task {} scheduled with {} seconds delay (2-15 minutes)", i, delaySeconds);
         } else {
-          // Human-like delays tightened to 10-30 seconds between tasks
-          delaySeconds = 10 + random.nextInt(21);
+          // When completedSurvey = 0, subsequent forms have 10-30 seconds delay
+          delaySeconds = 10 + random.nextInt(21); // 10-30 seconds
+          log.debug("Task {} scheduled with {} seconds delay (10-30 seconds)", i, delaySeconds);
         }
 
         // Set execution time in the future for human-like behavior

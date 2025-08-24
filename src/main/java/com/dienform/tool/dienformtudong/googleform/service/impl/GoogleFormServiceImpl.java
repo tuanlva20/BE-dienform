@@ -437,11 +437,18 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                     log.debug("Processing execution plan {}/{} for fillRequestId: {}", planIndex,
                             executionPlans.size(), fillRequestId);
                     if (fillRequest.isHumanLike()) {
-                        // Human-like behavior: use proper delay range 36-399 seconds
-                        int delaySeconds = 36 + random.nextInt(364); // 36-399 seconds
-                        Thread.sleep(delaySeconds * 1000L);
-                        log.debug("Human-like mode: Scheduled task with delay of {} seconds",
-                                delaySeconds);
+                        // Check if this is the first form (completedSurvey = 0 and planIndex = 1)
+                        if (fillRequest.getCompletedSurvey() == 0 && planIndex == 1) {
+                            // First form: use minimal delay of 36 seconds
+                            int delaySeconds = 36;
+                            Thread.sleep(delaySeconds * 1000L);
+                            log.debug("Human-like mode: First form with minimal delay of {} seconds", delaySeconds);
+                        } else {
+                            // Subsequent forms: use proper delay range 36-399 seconds
+                            int delaySeconds = 36 + random.nextInt(364); // 36-399 seconds
+                            Thread.sleep(delaySeconds * 1000L);
+                            log.debug("Human-like mode: Subsequent form with delay of {} seconds", delaySeconds);
+                        }
                     } else {
                         // Fast mode: only 1 second delay between forms, no delay during filling
                         if (totalProcessed.get() > 0) {
