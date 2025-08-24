@@ -215,7 +215,7 @@ public class GeminiServiceClient implements AIServiceClient {
     generationConfig.put("temperature", 0.7);
     generationConfig.put("topP", 0.8);
     generationConfig.put("topK", 40);
-    generationConfig.put("maxOutputTokens", maxTokens / 2); // Reserve half for response
+    generationConfig.put("maxOutputTokens", maxTokens);
 
     payload.put("generationConfig", generationConfig);
 

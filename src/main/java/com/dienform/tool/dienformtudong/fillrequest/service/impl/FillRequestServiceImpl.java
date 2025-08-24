@@ -5,19 +5,16 @@ import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.transaction.event.TransactionPhase;
-import org.springframework.transaction.event.TransactionalEventListener;
+// Transaction event imports removed - no longer needed
 import com.dienform.common.exception.BadRequestException;
 import com.dienform.common.exception.ResourceNotFoundException;
 import com.dienform.common.util.DateTimeUtil;
@@ -30,12 +27,14 @@ import com.dienform.tool.dienformtudong.fillrequest.dto.response.FillRequestResp
 import com.dienform.tool.dienformtudong.fillrequest.entity.FillRequest;
 import com.dienform.tool.dienformtudong.fillrequest.entity.FillRequestMapping;
 import com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum;
-import com.dienform.tool.dienformtudong.fillrequest.event.FillRequestCreatedEvent;
+// FillRequestCreatedEvent import removed - no longer needed
 import com.dienform.tool.dienformtudong.fillrequest.mapper.FillRequestMapper;
 import com.dienform.tool.dienformtudong.fillrequest.repository.FillRequestMappingRepository;
 import com.dienform.tool.dienformtudong.fillrequest.repository.FillRequestRepository;
 import com.dienform.tool.dienformtudong.fillrequest.service.DataFillCampaignService;
 import com.dienform.tool.dienformtudong.fillrequest.service.FillRequestService;
+import com.dienform.tool.dienformtudong.fillrequest.service.PriorityCalculationService;
+import com.dienform.tool.dienformtudong.fillrequest.service.QueueManagementService;
 import com.dienform.tool.dienformtudong.fillrequest.service.ScheduleDistributionService;
 import com.dienform.tool.dienformtudong.fillrequest.validator.DataFillValidator;
 import com.dienform.tool.dienformtudong.form.entity.Form;
@@ -70,6 +69,8 @@ public class FillRequestServiceImpl implements FillRequestService {
   private final ApplicationEventPublisher eventPublisher;
   private final com.dienform.realtime.FillRequestRealtimeGateway realtimeGateway;
   private final com.dienform.common.util.CurrentUserUtil currentUserUtil;
+  private final QueueManagementService queueManagementService;
+  private final PriorityCalculationService priorityCalculationService;
 
   @PersistenceContext
   private EntityManager entityManager;
@@ -116,10 +117,19 @@ public class FillRequestServiceImpl implements FillRequestService {
             .totalPrice(fillRequestDTO.getPricePerSurvey()
                 .multiply(BigDecimal.valueOf(fillRequestDTO.getSurveyCount())))
             .humanLike(Boolean.TRUE.equals(fillRequestDTO.getIsHumanLike())).startDate(startDate)
-            .endDate(endDate).status(FillRequestStatusEnum.PENDING).build();
+            .endDate(endDate).status(FillRequestStatusEnum.QUEUED).priority(0).build();
 
     FillRequest savedRequest = fillRequestRepository.save(fillRequest);
     log.info("Fill request saved with ID: {}", savedRequest.getId());
+
+    // Calculate and update priority based on business logic
+    int calculatedPriority = calculatePriorityForRequest(savedRequest, fillRequestDTO);
+    savedRequest.setPriority(calculatedPriority);
+    fillRequestRepository.save(savedRequest);
+
+    log.info("Fill request {} created with calculated priority: {} ({})", savedRequest.getId(),
+        calculatedPriority,
+        priorityCalculationService.getPriorityLevelDescription(calculatedPriority));
 
     // Realtime: ensure current user joins user-specific room and receive bulk + initial update
     try {
@@ -148,197 +158,76 @@ public class FillRequestServiceImpl implements FillRequestService {
     for (Map.Entry<UUID, List<FillRequestDTO.AnswerDistributionRequest>> entry : groupedByQuestion
         .entrySet()) {
       UUID questionId = entry.getKey();
+      List<FillRequestDTO.AnswerDistributionRequest> distributionRequests = entry.getValue();
+
       Question question = questions.stream().filter(q -> q.getId().equals(questionId)).findFirst()
-          .orElseThrow(() -> new ResourceNotFoundException("Question", "id", questionId));
-      List<FillRequestDTO.AnswerDistributionRequest> questionDistributions = entry.getValue();
+          .orElseThrow(() -> new BadRequestException("Question not found: " + questionId));
 
-      // Check if this is a matrix question (has rowId)
-      boolean hasRowId = questionDistributions.stream()
-          .anyMatch(dist -> dist.getRowId() != null && !dist.getRowId().isEmpty());
+      // Create answer distributions for this question
+      for (FillRequestDTO.AnswerDistributionRequest distributionRequest : distributionRequests) {
+        AnswerDistribution distribution = AnswerDistribution.builder().fillRequest(savedRequest)
+            .question(question).percentage(distributionRequest.getPercentage().intValue()).build();
 
-      if (hasRowId) {
-        // For matrix questions, group by rowId and process each row separately
-        Map<String, List<FillRequestDTO.AnswerDistributionRequest>> distributionsByRow =
-            questionDistributions.stream()
-                .filter(dist -> dist.getRowId() != null && !dist.getRowId().isEmpty())
-                .collect(Collectors.groupingBy(FillRequestDTO.AnswerDistributionRequest::getRowId));
-
-        for (Map.Entry<String, List<FillRequestDTO.AnswerDistributionRequest>> rowEntry : distributionsByRow
-            .entrySet()) {
-          String rowId = rowEntry.getKey();
-          List<FillRequestDTO.AnswerDistributionRequest> rowDistributions = rowEntry.getValue();
-
-          // Calculate count for each option in this row based on percentage
-          for (FillRequestDTO.AnswerDistributionRequest dist : rowDistributions) {
-            int count;
-            QuestionOption option = null;
-
-            if (dist.getPercentage() == 0.0 && dist.getOptionId() == null) {
-              count = 1;
-            } else {
-              count = (int) Math
-                  .round(fillRequestDTO.getSurveyCount() * (dist.getPercentage() / 100.0));
-              option =
-                  question.getOptions().stream().filter(o -> o.getId().equals(dist.getOptionId()))
-                      .findAny().orElseThrow(() -> new ResourceNotFoundException("Question Option",
-                          "id", dist.getOptionId()));
-            }
-
-            AnswerDistribution distribution = AnswerDistribution.builder().fillRequest(savedRequest)
-                .question(question).option(option).percentage(dist.getPercentage().intValue())
-                .count(count).rowId(rowId)
-                .positionIndex(dist.getPositionIndex() != null ? dist.getPositionIndex() : 0)
-                .build();
-
-            distributions.add(distribution);
-          }
+        // Handle option-based distributions
+        if (distributionRequest.getOptionId() != null) {
+          QuestionOption option = optionRepository.findById(distributionRequest.getOptionId())
+              .orElseThrow(() -> new BadRequestException(
+                  "Question option not found: " + distributionRequest.getOptionId()));
+          distribution.setOption(option);
         }
-      } else {
-        // For regular questions, process as before
-        // Calculate count for each option based on percentage
-        for (FillRequestDTO.AnswerDistributionRequest dist : questionDistributions) {
-          int count;
-          QuestionOption option = null;
 
-          // Xử lý đặc biệt cho câu hỏi text
-          if ("text".equalsIgnoreCase(question.getType())
-              || "email".equalsIgnoreCase(question.getType())
-              || "textarea".equalsIgnoreCase(question.getType())) {
-            count =
-                (int) Math.round(fillRequestDTO.getSurveyCount() * (dist.getPercentage() / 100.0));
-
-            // Sử dụng builder trực tiếp thay vì factory method
-            AnswerDistribution distribution = AnswerDistribution.builder().fillRequest(savedRequest)
-                .question(question).option(null).percentage(dist.getPercentage().intValue())
-                .count(count).valueString(dist.getValueString())
-                .positionIndex(dist.getPositionIndex() != null ? dist.getPositionIndex() : 0)
-                .build();
-
-            distributions.add(distribution);
-          } else {
-            // Xử lý câu hỏi không phải text
-            if (dist.getPercentage() == 0.0 && dist.getOptionId() == null) {
-              count = 1;
-            } else {
-              count = (int) Math
-                  .round(fillRequestDTO.getSurveyCount() * (dist.getPercentage() / 100.0));
-              option =
-                  question.getOptions().stream().filter(o -> o.getId().equals(dist.getOptionId()))
-                      .findAny().orElseThrow(() -> new ResourceNotFoundException("Question Option",
-                          "id", dist.getOptionId()));
-            }
-
-            // Ensure 'Khác' with valueString gets stored and count at least 1 when percentage = 0
-            if (option != null && "__other_option__".equalsIgnoreCase(option.getValue())
-                && dist.getValueString() != null && !dist.getValueString().trim().isEmpty()
-                && dist.getPercentage() == 0.0) {
-              count = 1;
-            }
-
-            AnswerDistribution distribution = AnswerDistribution.builder().fillRequest(savedRequest)
-                .question(question).option(option).percentage(dist.getPercentage().intValue())
-                .count(count).valueString(dist.getValueString())
-                .positionIndex(dist.getPositionIndex() != null ? dist.getPositionIndex() : 0)
-                .build();
-
-            distributions.add(distribution);
-          }
+        // Handle text-based distributions
+        if (distributionRequest.getValueString() != null) {
+          distribution.setValueString(distributionRequest.getValueString());
         }
+
+        // Handle rowId for grid questions
+        if (distributionRequest.getRowId() != null) {
+          distribution.setRowId(distributionRequest.getRowId());
+        }
+
+        // Handle positionIndex for text questions
+        if (distributionRequest.getPositionIndex() != null) {
+          distribution.setPositionIndex(distributionRequest.getPositionIndex());
+        }
+
+        distributions.add(distribution);
       }
     }
 
-    // Auto-generate distributions for required text questions that don't have user data
+    // Process questions that don't have user-provided distributions
+    Set<UUID> questionsWithDistributions = groupedByQuestion.keySet();
     for (Question question : questions) {
-      if (Boolean.TRUE.equals(question.getRequired())
-          && ("text".equalsIgnoreCase(question.getType())
-              || "email".equalsIgnoreCase(question.getType())
-              || "textarea".equalsIgnoreCase(question.getType()))) {
+      if (!questionsWithDistributions.contains(question.getId())) {
+        // Create default distribution for this question
+        AnswerDistribution defaultDistribution = AnswerDistribution.builder()
+            .fillRequest(savedRequest).question(question).percentage(100).build();
 
-        // Check if this question already has distributions
-        boolean hasDistribution = groupedByQuestion.containsKey(question.getId());
-
-        if (!hasDistribution) {
-          // Auto-generate a distribution for text questions
-          int count = fillRequestDTO.getSurveyCount();
-          AnswerDistribution distribution = AnswerDistribution.builder().fillRequest(savedRequest)
-              .question(question).option(null).percentage(100) // 100% since it's required
-              .count(count).valueString(null) // Will be auto-generated during form filling
-              .positionIndex(0) // Default position index for auto-generated distributions
-              .build();
-
-          distributions.add(distribution);
-          log.info("Auto-generated distribution for required text question: {}",
-              question.getTitle());
+        // For questions with options, select the first option as default
+        if (!question.getOptions().isEmpty()) {
+          defaultDistribution.setOption(question.getOptions().get(0));
         }
+
+        distributions.add(defaultDistribution);
       }
     }
 
     distributionRepository.saveAll(distributions);
+    log.info("Created {} answer distributions for fill request {}", distributions.size(),
+        savedRequest.getId());
 
-    entityManager.flush();
+    // Always add to queue instead of starting immediately
+    // This ensures proper queue management and prevents race conditions
+    log.info("Adding fill request {} to queue for proper scheduling", savedRequest.getId());
 
-    // CRITICAL FIX: Sử dụng event để đảm bảo transaction commit trước khi chạy async task
-    FillRequestResponse response = fillRequestMapper.toReponse(savedRequest);
+    // The request is already in QUEUED status, so we just need to ensure it's properly queued
+    // The scheduler will pick it up when there's capacity and it's time to start
 
-    // Publish event để trigger form filling sau khi transaction commit
-    eventPublisher.publishEvent(new FillRequestCreatedEvent(this, savedRequest.getId()));
-
-    return response;
+    return fillRequestMapper.toReponse(savedRequest);
   }
 
-  /**
-   * Event listener để start form filling sau khi transaction commit Đảm bảo không có race condition
-   */
-  @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
-  public void handleFillRequestCreated(FillRequestCreatedEvent event) {
-    try {
-      log.info("Fill request created event received for ID: {}", event.getFillRequestId());
-
-      // Start the form filling process asynchronously
-      CompletableFuture.runAsync(() -> {
-        try {
-          // Thêm delay nhỏ để đảm bảo database transaction đã hoàn toàn commit
-          Thread.sleep(200);
-
-          log.info("Starting automated form filling for request ID: {}", event.getFillRequestId());
-          googleFormService.fillForm(event.getFillRequestId());
-        } catch (Exception e) {
-          log.error("Error starting form filling process: {}", e.getMessage(), e);
-          // Update request status to failed if there's an error
-          try {
-            FillRequest request =
-                fillRequestRepository.findById(event.getFillRequestId()).orElse(null);
-            if (request != null) {
-              request.setStatus(FillRequestStatusEnum.FAILED);
-              fillRequestRepository.save(request);
-              try {
-                com.dienform.realtime.dto.FillRequestUpdateEvent evt =
-                    com.dienform.realtime.dto.FillRequestUpdateEvent.builder()
-                        .formId(request.getForm().getId().toString())
-                        .requestId(request.getId().toString())
-                        .status(FillRequestStatusEnum.FAILED.name())
-                        .completedSurvey(request.getCompletedSurvey())
-                        .surveyCount(request.getSurveyCount())
-                        .updatedAt(java.time.Instant.now().toString()).build();
-                realtimeGateway.emitUpdate(request.getForm().getId().toString(), evt);
-                currentUserUtil.getCurrentUserIdIfPresent().ifPresent(uid -> {
-                  String userId = uid.toString();
-                  String formIdStr = request.getForm().getId().toString();
-                  realtimeGateway.emitUpdateForUser(userId, formIdStr, evt);
-                  realtimeGateway.leaveUserFormRoom(userId, formIdStr);
-                });
-              } catch (Exception ignore) {
-              }
-            }
-          } catch (Exception ex) {
-            log.error("Error updating fill request status: {}", ex.getMessage(), ex);
-          }
-        }
-      });
-    } catch (Exception e) {
-      log.error("Error handling fill request created event: {}", e.getMessage(), e);
-    }
-  }
+  // Event listener removed - fill requests will be processed by the scheduler instead
+  // This ensures proper queue management and prevents immediate execution
 
   @Override
   public FillRequestResponse getFillRequestById(UUID id) {
@@ -350,182 +239,7 @@ public class FillRequestServiceImpl implements FillRequestService {
     return mapToFillRequestResponse(fillRequest, distributions);
   }
 
-  @Override
-  @Transactional
-  public Map<String, Object> startFillRequest(UUID id) {
-    FillRequest fillRequest = fillRequestRepository.findById(id)
-        .orElseThrow(() -> new ResourceNotFoundException("Fill Request", "id", id));
 
-    // Validate fill request status before starting
-    if (!(FillRequestStatusEnum.PENDING.equals(fillRequest.getStatus())
-        || FillRequestStatusEnum.IN_PROCESS.equals(fillRequest.getStatus()))) {
-      log.warn("Fill request {} is not in valid state to start. Current status: {}", id,
-          fillRequest.getStatus());
-
-      Map<String, Object> response = new HashMap<>();
-      response.put("id", fillRequest.getId());
-      response.put("status", fillRequest.getStatus());
-      response.put("message", "Fill request is not in valid state to start");
-      response.put("error", true);
-      return response;
-    }
-
-    // If already running, return current status
-    if (FillRequestStatusEnum.IN_PROCESS.equals(fillRequest.getStatus())) {
-      log.info("Fill request {} is already running", id);
-
-      Map<String, Object> response = new HashMap<>();
-      response.put("id", fillRequest.getId());
-      response.put("status", fillRequest.getStatus());
-      response.put("message", "Fill request is already running");
-      return response;
-    }
-
-    // Update status to IN_PROCESS
-    fillRequest.setStatus(FillRequestStatusEnum.IN_PROCESS);
-    fillRequestRepository.save(fillRequest);
-
-    // Emit realtime update for IN_PROCESS transition
-    try {
-      com.dienform.realtime.dto.FillRequestUpdateEvent evt =
-          com.dienform.realtime.dto.FillRequestUpdateEvent.builder()
-              .formId(fillRequest.getForm().getId().toString())
-              .requestId(fillRequest.getId().toString())
-              .status(FillRequestStatusEnum.IN_PROCESS.name())
-              .completedSurvey(fillRequest.getCompletedSurvey())
-              .surveyCount(fillRequest.getSurveyCount())
-              .updatedAt(java.time.Instant.now().toString()).build();
-
-      // Get current user ID if available
-      String userId = null;
-      try {
-        userId = currentUserUtil.getCurrentUserIdIfPresent().map(UUID::toString).orElse(null);
-      } catch (Exception ignore) {
-        log.debug("Failed to get current user ID: {}", ignore.getMessage());
-      }
-
-      // Use centralized emit method with deduplication
-      realtimeGateway.emitUpdateWithUser(fillRequest.getForm().getId().toString(), evt, userId);
-    } catch (Exception ignore) {
-      log.debug("Failed to emit IN_PROCESS update: {}", ignore.getMessage());
-    }
-
-    // Start form filling process asynchronously
-    CompletableFuture.runAsync(() -> {
-      try {
-        log.info("Starting form filling process for request ID: {}", id);
-        int successCount = googleFormService.fillForm(id);
-        log.info("Form filling process completed for request ID: {}. Success count: {}", id,
-            successCount);
-      } catch (Exception e) {
-        log.error("Error in form filling process for request ID {}: {}", id, e.getMessage(), e);
-        // Update status to FAILED if there's an error
-        try {
-          FillRequest failedRequest = fillRequestRepository.findById(id).orElse(null);
-          if (failedRequest != null) {
-            failedRequest.setStatus(FillRequestStatusEnum.FAILED);
-            fillRequestRepository.save(failedRequest);
-            log.info("Updated fill request {} status to FAILED due to error", id);
-
-            // Emit FAILED status update
-            try {
-              com.dienform.realtime.dto.FillRequestUpdateEvent evt =
-                  com.dienform.realtime.dto.FillRequestUpdateEvent.builder()
-                      .formId(failedRequest.getForm().getId().toString())
-                      .requestId(failedRequest.getId().toString())
-                      .status(FillRequestStatusEnum.FAILED.name())
-                      .completedSurvey(failedRequest.getCompletedSurvey())
-                      .surveyCount(failedRequest.getSurveyCount())
-                      .updatedAt(java.time.Instant.now().toString()).build();
-
-              // Get current user ID if available
-              String userId = null;
-              try {
-                userId =
-                    currentUserUtil.getCurrentUserIdIfPresent().map(UUID::toString).orElse(null);
-              } catch (Exception ignore) {
-                log.debug("Failed to get current user ID: {}", ignore.getMessage());
-              }
-
-              // Use centralized emit method with deduplication
-              realtimeGateway.emitUpdateWithUser(failedRequest.getForm().getId().toString(), evt,
-                  userId);
-            } catch (Exception emitException) {
-              log.debug("Failed to emit FAILED update: {}", emitException.getMessage());
-            }
-          }
-        } catch (Exception updateException) {
-          log.error("Failed to update fill request status to FAILED: {}",
-              updateException.getMessage());
-        }
-      }
-    });
-
-    // Return response with status
-    Map<String, Object> response = new HashMap<>();
-    response.put("id", fillRequest.getId());
-    response.put("status", fillRequest.getStatus());
-    response.put("message", "Fill request started successfully");
-
-    return response;
-  }
-
-  @Override
-  @Transactional
-  public Map<String, Object> resetFillRequest(UUID id) {
-    FillRequest fillRequest = fillRequestRepository.findById(id)
-        .orElseThrow(() -> new ResourceNotFoundException("Fill Request", "id", id));
-
-    // Only allow reset if status is RUNNING or FAILED
-    if (!(FillRequestStatusEnum.IN_PROCESS.equals(fillRequest.getStatus())
-        || FillRequestStatusEnum.FAILED.equals(fillRequest.getStatus()))) {
-      log.warn("Fill request {} cannot be reset. Current status: {}", id, fillRequest.getStatus());
-
-      Map<String, Object> response = new HashMap<>();
-      response.put("id", fillRequest.getId());
-      response.put("status", fillRequest.getStatus());
-      response.put("message", "Fill request cannot be reset from current status");
-      response.put("error", true);
-      return response;
-    }
-
-    // Reset status to PENDING
-    fillRequest.setStatus(FillRequestStatusEnum.PENDING);
-    fillRequestRepository.save(fillRequest);
-
-    try {
-      com.dienform.realtime.dto.FillRequestUpdateEvent evt =
-          com.dienform.realtime.dto.FillRequestUpdateEvent.builder()
-              .formId(fillRequest.getForm().getId().toString())
-              .requestId(fillRequest.getId().toString())
-              .status(FillRequestStatusEnum.PENDING.name())
-              .completedSurvey(fillRequest.getCompletedSurvey())
-              .surveyCount(fillRequest.getSurveyCount())
-              .updatedAt(java.time.Instant.now().toString()).build();
-
-      // Get current user ID if available
-      String userId = null;
-      try {
-        userId = currentUserUtil.getCurrentUserIdIfPresent().map(UUID::toString).orElse(null);
-      } catch (Exception ignore) {
-        log.debug("Failed to get current user ID: {}", ignore.getMessage());
-      }
-
-      // Use centralized emit method with deduplication
-      realtimeGateway.emitUpdateWithUser(fillRequest.getForm().getId().toString(), evt, userId);
-    } catch (Exception ignore) {
-      log.debug("Failed to emit PENDING update: {}", ignore.getMessage());
-    }
-
-    log.info("Reset fill request {} status to PENDING", id);
-
-    Map<String, Object> response = new HashMap<>();
-    response.put("id", fillRequest.getId());
-    response.put("status", fillRequest.getStatus());
-    response.put("message", "Fill request reset successfully");
-
-    return response;
-  }
 
   @Override
   @Transactional
@@ -600,9 +314,18 @@ public class FillRequestServiceImpl implements FillRequestService {
         .totalPrice(dataFillRequestDTO.getPricePerSurvey()
             .multiply(BigDecimal.valueOf(requestedSubmissionCount)))
         .humanLike(Boolean.TRUE.equals(dataFillRequestDTO.getIsHumanLike())).startDate(startDate)
-        .endDate(endDate).status(FillRequestStatusEnum.PENDING).build();
+        .endDate(endDate).status(FillRequestStatusEnum.QUEUED).priority(0).build();
 
     FillRequest savedRequest = fillRequestRepository.save(fillRequest);
+
+    // Calculate and update priority based on business logic
+    int calculatedPriority = calculatePriorityForDataFillRequest(savedRequest, dataFillRequestDTO);
+    savedRequest.setPriority(calculatedPriority);
+    fillRequestRepository.save(savedRequest);
+
+    log.info("Data fill request {} created with calculated priority: {} ({})", savedRequest.getId(),
+        calculatedPriority,
+        priorityCalculationService.getPriorityLevelDescription(calculatedPriority));
 
     // Step 6: Create AnswerDistribution for "other" options with valueString
     List<AnswerDistribution> otherDistributions =
@@ -638,44 +361,77 @@ public class FillRequestServiceImpl implements FillRequestService {
     log.info("Created data fill request with ID: {} and {} scheduled tasks with {} mappings",
         savedRequest.getId(), schedule.size(), mappings.size());
 
-    // Step 9: Optionally start the campaign immediately if startDate is now or in the past
-    if (startDate != null && startDate.isBefore(DateTimeUtil.nowVietnam().plusMinutes(5))) {
-      log.info("Starting data fill campaign immediately for request: {}", savedRequest.getId());
+    // Step 9: Always add to queue for proper scheduling
+    // This ensures consistent queue management and prevents race conditions
+    log.info("Adding data fill request {} to queue for proper scheduling", savedRequest.getId());
 
-      // Execute campaign asynchronously
-      dataFillCampaignService.executeCampaign(savedRequest, dataFillRequestDTO, questions, schedule)
-          .thenRun(
-              () -> log.info("Campaign execution completed for request: {}", savedRequest.getId()))
-          .exceptionally(throwable -> {
-            log.error("Campaign execution failed for request: {}", savedRequest.getId(), throwable);
-            return null;
-          });
-    }
+    // The request is already in QUEUED status, so we just need to ensure it's properly queued
+    // The scheduler will pick it up when there's capacity and it's time to start
 
     return fillRequestMapper.toReponse(savedRequest);
   }
 
-  @Override
-  public Map<String, Object> clearCaches() {
-    try {
-      // Clear GoogleFormService caches
-      googleFormService.clearCaches();
 
-      log.info("All caches cleared successfully");
 
-      Map<String, Object> response = new HashMap<>();
-      response.put("message", "All caches cleared successfully");
-      response.put("success", true);
-      return response;
-    } catch (Exception e) {
-      log.error("Error clearing caches: {}", e.getMessage(), e);
+  /**
+   * Calculate priority for a fill request based on business logic
+   */
+  private int calculatePriorityForRequest(FillRequest request, FillRequestDTO requestDTO) {
+    // Calculate age-based priority
+    int agePriority = priorityCalculationService.calculateAgeBasedPriority(request.getCreatedAt());
 
-      Map<String, Object> response = new HashMap<>();
-      response.put("message", "Error clearing caches: " + e.getMessage());
-      response.put("success", false);
-      response.put("error", true);
-      return response;
+    // Determine if this is a high-value request
+    boolean isHighValue = request.getTotalPrice().compareTo(BigDecimal.valueOf(1000000)) > 0;
+
+    // Determine if this is urgent (startDate is close to now)
+    boolean isUrgent = false;
+    if (request.getStartDate() != null) {
+      long hoursUntilStart =
+          java.time.Duration.between(LocalDateTime.now(), request.getStartDate()).toHours();
+      isUrgent = hoursUntilStart < 1; // Less than 1 hour until start
     }
+
+    // Calculate priority with human-like factor consideration
+    int calculatedPriority = priorityCalculationService.calculatePriorityWithHumanFactor(
+        request.getCreatedAt(), request.isHumanLike(), isHighValue, isUrgent);
+
+    log.debug(
+        "Priority calculation for request {}: agePriority={}, isHighValue={}, isUrgent={}, isHumanLike={}, finalPriority={}",
+        request.getId(), agePriority, isHighValue, isUrgent, request.isHumanLike(),
+        calculatedPriority);
+
+    return calculatedPriority;
+  }
+
+  /**
+   * Calculate priority for data fill request
+   */
+  private int calculatePriorityForDataFillRequest(FillRequest request,
+      DataFillRequestDTO requestDTO) {
+    // Calculate age-based priority
+    int agePriority = priorityCalculationService.calculateAgeBasedPriority(request.getCreatedAt());
+
+    // Determine if this is a high-value request
+    boolean isHighValue = request.getTotalPrice().compareTo(BigDecimal.valueOf(1000000)) > 0;
+
+    // Determine if this is urgent (startDate is close to now)
+    boolean isUrgent = false;
+    if (request.getStartDate() != null) {
+      long hoursUntilStart =
+          java.time.Duration.between(LocalDateTime.now(), request.getStartDate()).toHours();
+      isUrgent = hoursUntilStart < 1; // Less than 1 hour until start
+    }
+
+    // Calculate priority with human-like factor consideration
+    int calculatedPriority = priorityCalculationService.calculatePriorityWithHumanFactor(
+        request.getCreatedAt(), request.isHumanLike(), isHighValue, isUrgent);
+
+    log.debug(
+        "Priority calculation for data fill request {}: agePriority={}, isHighValue={}, isUrgent={}, isHumanLike={}, finalPriority={}",
+        request.getId(), agePriority, isHighValue, isUrgent, request.isHumanLike(),
+        calculatedPriority);
+
+    return calculatedPriority;
   }
 
   /**
@@ -953,7 +709,10 @@ public class FillRequestServiceImpl implements FillRequestService {
           FillRequestResponse.AnswerDistributionResponse.AnswerDistributionResponseBuilder builder =
               FillRequestResponse.AnswerDistributionResponse.builder()
                   .questionId(distribution.getQuestion().getId())
-                  .percentage(distribution.getPercentage()).count(distribution.getCount())
+                  .percentage(distribution.getPercentage())
+                  .count(distribution.getCount() != null ? distribution.getCount() : 0) // Handle
+                                                                                        // null
+                                                                                        // count
                   .valueString(distribution.getValueString()).rowId(distribution.getRowId())
                   .positionIndex(distribution.getPositionIndex());
 

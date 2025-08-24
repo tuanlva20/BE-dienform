@@ -2,9 +2,11 @@ package com.dienform.tool.dienformtudong.googleform.service.impl;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.Set;
 import org.openqa.selenium.By;
 import org.openqa.selenium.WebDriver;
 import org.openqa.selenium.WebElement;
@@ -17,6 +19,7 @@ import org.springframework.stereotype.Service;
 import com.dienform.tool.dienformtudong.googleform.service.FormFillingHelper;
 import com.dienform.tool.dienformtudong.googleform.service.RequiredQuestionAutofillService;
 import com.dienform.tool.dienformtudong.googleform.service.SectionNavigationService;
+import com.dienform.tool.dienformtudong.googleform.service.ValidationResult;
 import com.dienform.tool.dienformtudong.question.entity.Question;
 import com.dienform.tool.dienformtudong.question.entity.QuestionOption;
 import lombok.RequiredArgsConstructor;
@@ -54,6 +57,10 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
       // Clear autofill tracking for new form
       requiredQuestionAutofillService.clearAutofillTracking();
 
+      // Track processed section indices to prevent duplicates
+      Set<Integer> processedSectionIndices = new HashSet<>();
+      int currentSectionIndex = 0;
+
       // First page HTML
       wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("form")));
 
@@ -67,6 +74,17 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
       List<String> htmls = new ArrayList<>();
       int maxSections = 50;
       for (int i = 0; i < maxSections; i++) {
+        // Check if this section index has already been processed
+        if (processedSectionIndices.contains(currentSectionIndex)) {
+          log.warn("Section index {} already processed, skipping to prevent duplicate",
+              currentSectionIndex);
+          break;
+        }
+
+        // Mark this section index as processed
+        processedSectionIndices.add(currentSectionIndex);
+        log.info("Processing section index: {} (iteration: {})", currentSectionIndex, i);
+
         // Capture current section HTML
         htmls.add(driver.getPageSource());
 
@@ -86,16 +104,17 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
         boolean hasQuestions = hasQuestionsInCurrentSection(driver);
 
         if (hasQuestions) {
-          // Satisfy required questions minimally before clicking Next
+          // Always attempt to satisfy required questions when there are questions
+          // Don't rely solely on Next button status as it might be misleading
           try {
-            log.info("Attempting to satisfy required questions in section {} (has questions)", i);
+            log.info("Section {} has questions, attempting to satisfy required questions", i);
             boolean autofillSuccess =
                 requiredQuestionAutofillService.satisfyRequiredQuestions(driver);
 
             // Check if Next button is ready after autofill
             boolean nextButtonReady = requiredQuestionAutofillService.isNextButtonReady(driver);
 
-            // Only retry if autofill failed AND Next button is not ready
+            // Only retry if autofill failed AND Next button is still not ready
             if (!autofillSuccess && !nextButtonReady) {
               log.warn("Autofill failed and Next button not ready for section {}, attempting retry",
                   i);
@@ -107,16 +126,6 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
               }
               autofillSuccess = requiredQuestionAutofillService.satisfyRequiredQuestions(driver);
               nextButtonReady = requiredQuestionAutofillService.isNextButtonReady(driver);
-            } else if (autofillSuccess && nextButtonReady) {
-              log.info("Autofill succeeded and Next button is ready for section {}", i);
-            } else if (autofillSuccess && !nextButtonReady) {
-              log.info(
-                  "Autofill succeeded but Next button not ready for section {} (may need more filling)",
-                  i);
-            } else {
-              log.info(
-                  "Autofill failed but Next button is ready for section {} (questions may have been already filled)",
-                  i);
             }
 
             if (autofillSuccess || nextButtonReady) {
@@ -128,7 +137,7 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
             log.warn("Autofill required questions failed (section {}): {}", i, e.getMessage());
           }
 
-          // Verify Next button is still available before clicking
+          // Final verification that Next button is ready before clicking
           if (!requiredQuestionAutofillService.isNextButtonReady(driver)) {
             log.warn("Next button not ready after autofill in section {}, stopping navigation", i);
             break;
@@ -137,33 +146,19 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
           log.info("Section {} has no questions, proceeding directly to Next button", i);
         }
 
-        // Click Next with retry logic
-        try {
-          WebElement next = driver.findElement(NEXT_BUTTON);
-          next.click();
-          log.info("Successfully clicked Next button in section {}", i);
-        } catch (Exception e) {
-          log.warn("Failed to click Next button in section {}: {}", i, e.getMessage());
-          // Try one more time after a brief wait
-          try {
-            Thread.sleep(1000);
-            WebElement next = driver.findElement(NEXT_BUTTON);
-            next.click();
-            log.info("Successfully clicked Next button in section {} (retry)", i);
-          } catch (Exception retryEx) {
-            log.error("Failed to click Next button in section {} after retry: {}", i,
-                retryEx.getMessage());
-            break;
-          }
+        // Click Next with enhanced retry logic and section change detection
+        boolean sectionChanged =
+            clickNextWithSectionChangeDetection(driver, wait, i, currentSectionIndex);
+
+        if (!sectionChanged) {
+          log.error(
+              "Failed to change section after clicking Next button in section index {}, stopping navigation",
+              currentSectionIndex);
+          break;
         }
 
-        // Wait for section change: either a new heading or presence of form root again
-        try {
-          Thread.sleep(300); // brief pause to allow DOM update
-        } catch (InterruptedException ie) {
-          Thread.currentThread().interrupt();
-        }
-        wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("form")));
+        // Increment section index for next iteration
+        currentSectionIndex++;
       }
 
       return htmls;
@@ -216,16 +211,18 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
         boolean firstSectionHasQuestions = hasQuestionsInCurrentSection(driver);
 
         if (firstSectionHasQuestions) {
+          // Always attempt to satisfy required questions when there are questions
+          // Don't rely solely on Next button status as it might be misleading
           try {
             log.info(
-                "Attempting to satisfy required questions in first section for metadata capture (has questions)");
+                "First section has questions, attempting to satisfy required questions for metadata capture");
             boolean autofillSuccess =
                 requiredQuestionAutofillService.satisfyRequiredQuestions(driver);
 
             // Check if Next button is ready after autofill
             boolean nextButtonReady = requiredQuestionAutofillService.isNextButtonReady(driver);
 
-            // Only retry if autofill failed AND Next button is not ready
+            // Only retry if autofill failed AND Next button is still not ready
             if (!autofillSuccess && !nextButtonReady) {
               log.warn(
                   "Autofill failed and Next button not ready for first section, attempting retry");
@@ -237,14 +234,6 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
               }
               autofillSuccess = requiredQuestionAutofillService.satisfyRequiredQuestions(driver);
               nextButtonReady = requiredQuestionAutofillService.isNextButtonReady(driver);
-            } else if (autofillSuccess && nextButtonReady) {
-              log.info("Autofill succeeded and Next button is ready for first section");
-            } else if (autofillSuccess && !nextButtonReady) {
-              log.info(
-                  "Autofill succeeded but Next button not ready for first section (may need more filling)");
-            } else {
-              log.info(
-                  "Autofill failed but Next button is ready for first section (questions may have been already filled)");
             }
 
             if (autofillSuccess || nextButtonReady) {
@@ -576,8 +565,7 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
           return true;
         }
 
-        log.error("No navigation buttons found and no questions filled at section {}",
-            sectionCounter);
+        log.error("No navigation buttons found and no questions filled at section {}", sectionCounter);
         return false;
       }
 
@@ -620,6 +608,10 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
       // Clear autofill tracking for new form
       requiredQuestionAutofillService.clearAutofillTracking();
 
+      // Track processed section indices to prevent duplicates
+      Set<Integer> processedSectionIndices = new HashSet<>();
+      int currentSectionIndex = 0;
+
       // Wait for form to load
       wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("form")));
 
@@ -645,20 +637,32 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
 
       // Navigate through sections and capture both HTML and metadata
       for (int i = 0; i < maxSections; i++) {
+        // Check if this section index has already been processed
+        if (processedSectionIndices.contains(currentSectionIndex)) {
+          log.warn("Section index {} already processed, skipping to prevent duplicate",
+              currentSectionIndex);
+          break;
+        }
+
+        // Mark this section index as processed
+        processedSectionIndices.add(currentSectionIndex);
+        log.info("Processing section index: {} (iteration: {})", currentSectionIndex, i);
+
         // Check if current section has questions
         boolean hasQuestions = hasQuestionsInCurrentSection(driver);
 
         if (hasQuestions) {
-          // Satisfy required questions minimally before clicking Next
+          // Always attempt to satisfy required questions when there are questions
+          // Don't rely solely on Next button status as it might be misleading
           try {
-            log.info("Attempting to satisfy required questions in section {} (has questions)", i);
+            log.info("Section {} has questions, attempting to satisfy required questions", i);
             boolean autofillSuccess =
                 requiredQuestionAutofillService.satisfyRequiredQuestions(driver);
 
             // Check if Next button is ready after autofill
             boolean nextButtonReady = requiredQuestionAutofillService.isNextButtonReady(driver);
 
-            // Only retry if autofill failed AND Next button is not ready
+            // Only retry if autofill failed AND Next button is still not ready
             if (!autofillSuccess && !nextButtonReady) {
               log.warn("Autofill failed and Next button not ready for section {}, attempting retry",
                   i);
@@ -681,7 +685,7 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
             log.warn("Autofill required questions failed (section {}): {}", i, e.getMessage());
           }
 
-          // Verify Next button is still available before clicking
+          // Final verification that Next button is ready before clicking
           if (!requiredQuestionAutofillService.isNextButtonReady(driver)) {
             log.warn("Next button not ready after autofill in section {}, stopping navigation", i);
             break;
@@ -690,33 +694,19 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
           log.info("Section {} has no questions, proceeding directly to Next button", i);
         }
 
-        // Click Next with retry logic
-        try {
-          WebElement next = driver.findElement(NEXT_BUTTON);
-          next.click();
-          log.info("Successfully clicked Next button in section {}", i);
-        } catch (Exception e) {
-          log.warn("Failed to click Next button in section {}: {}", i, e.getMessage());
-          // Try one more time after a brief wait
-          try {
-            Thread.sleep(1000);
-            WebElement next = driver.findElement(NEXT_BUTTON);
-            next.click();
-            log.info("Successfully clicked Next button in section {} (retry)", i);
-          } catch (Exception retryEx) {
-            log.error("Failed to click Next button in section {} after retry: {}", i,
-                retryEx.getMessage());
-            break;
-          }
+        // Click Next with enhanced retry logic and section change detection
+        boolean sectionChanged =
+            clickNextWithSectionChangeDetection(driver, wait, i, currentSectionIndex);
+
+        if (!sectionChanged) {
+          log.error(
+              "Failed to change section after clicking Next button in section index {}, stopping navigation",
+              currentSectionIndex);
+          break;
         }
 
-        // Wait for section change
-        try {
-          Thread.sleep(300); // brief pause to allow DOM update
-        } catch (InterruptedException ie) {
-          Thread.currentThread().interrupt();
-        }
-        wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("form")));
+        // Increment section index for next iteration
+        currentSectionIndex++;
 
         // Capture current section HTML
         htmls.add(driver.getPageSource());
@@ -1142,6 +1132,185 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
 
     } catch (Exception e) {
       log.warn("Error during submission verification: {}", e.getMessage());
+    }
+  }
+
+  /**
+   * Click Next button with enhanced retry logic and section change detection Returns true if
+   * section successfully changed, false if stuck in same section
+   */
+  private boolean clickNextWithSectionChangeDetection(WebDriver driver, WebDriverWait wait,
+      int iteration, int sectionIndex) {
+    try {
+      // CRITICAL: Validate required questions BEFORE attempting to click Next
+      ValidationResult validation =
+          requiredQuestionAutofillService.validateRequiredQuestions(driver);
+      if (!validation.isValid()) {
+        log.error("Cannot proceed to next section - Required questions not filled: {}",
+            validation.getErrorMessage());
+        log.error("Missing required questions: {}", validation.getMissingRequiredQuestions());
+
+        // Try to autofill one more time
+        log.info("Attempting final autofill for missing required questions in section {}",
+            sectionIndex);
+        boolean autofillSuccess = requiredQuestionAutofillService.satisfyRequiredQuestions(driver);
+
+        if (autofillSuccess) {
+          // Re-validate after autofill
+          validation = requiredQuestionAutofillService.validateRequiredQuestions(driver);
+          if (!validation.isValid()) {
+            String errorMsg = String.format(
+                "FORM FILLING ERROR - Section %d: Cannot proceed due to unfilled required questions: %s",
+                sectionIndex, validation.getErrorMessage());
+            log.error(errorMsg);
+            throw new RuntimeException(errorMsg);
+          }
+        } else {
+          String errorMsg = String.format(
+              "FORM FILLING ERROR - Section %d: Autofill failed and required questions remain unfilled: %s",
+              sectionIndex, validation.getErrorMessage());
+          log.error(errorMsg);
+          throw new RuntimeException(errorMsg);
+        }
+      }
+
+      // Store current section identifier before clicking
+      String currentSectionId = getCurrentSectionIdentifier(driver);
+      log.debug("Current section identifier before clicking Next: {}", currentSectionId);
+
+      int clickAttempts = 0;
+      int maxClickAttempts = 3;
+      boolean nextClickSuccess = false;
+
+      while (!nextClickSuccess && clickAttempts < maxClickAttempts) {
+        try {
+          WebElement next = driver.findElement(NEXT_BUTTON);
+
+          // Verify button is actually clickable
+          if (!next.isDisplayed() || !next.isEnabled()) {
+            log.warn("Next button not clickable in section {}", sectionIndex);
+            break;
+          }
+
+          // Check if button is disabled
+          String ariaDisabled = next.getAttribute("aria-disabled");
+          if ("true".equals(ariaDisabled)) {
+            log.warn(
+                "Next button is disabled in section {}, this indicates required questions are not filled",
+                sectionIndex);
+
+            // Re-validate to show what's missing
+            ValidationResult revalidation =
+                requiredQuestionAutofillService.validateRequiredQuestions(driver);
+            if (!revalidation.isValid()) {
+              String errorMsg = String.format(
+                  "FORM FILLING ERROR - Section %d: Next button disabled due to missing required questions: %s",
+                  sectionIndex, revalidation.getErrorMessage());
+              log.error(errorMsg);
+              throw new RuntimeException(errorMsg);
+            }
+            break;
+          }
+
+          next.click();
+          nextClickSuccess = true;
+          clickAttempts++;
+          log.info("Successfully clicked Next button in section {} (attempt {}/{})", sectionIndex,
+              clickAttempts, maxClickAttempts);
+
+        } catch (Exception e) {
+          clickAttempts++;
+          log.warn("Failed to click Next button in section {} (attempt {}/{}): {}", sectionIndex,
+              clickAttempts, maxClickAttempts, e.getMessage());
+
+          if (clickAttempts < maxClickAttempts) {
+            try {
+              Thread.sleep(1000 * clickAttempts); // Exponential backoff
+            } catch (InterruptedException ie) {
+              Thread.currentThread().interrupt();
+              break;
+            }
+          }
+        }
+      }
+
+      if (!nextClickSuccess) {
+        log.error("Failed to click Next button in section {} after {} attempts", sectionIndex,
+            maxClickAttempts);
+        return false;
+      }
+
+      // Wait for section change and verify it actually changed
+      try {
+        Thread.sleep(500); // brief pause to allow DOM update
+      } catch (InterruptedException ie) {
+        Thread.currentThread().interrupt();
+      }
+
+      try {
+        wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("form")));
+
+        // Check if section actually changed by comparing identifiers
+        String newSectionId = getCurrentSectionIdentifier(driver);
+        log.debug("New section identifier after clicking Next: {}", newSectionId);
+
+        if (currentSectionId.equals(newSectionId)) {
+          log.error(
+              "Section did not change after clicking Next button in section index {} (attempt {}/3)",
+              sectionIndex, clickAttempts);
+
+          // If this is the 3rd attempt and still no change, return false
+          if (clickAttempts >= 3) {
+            log.error(
+                "Failed to change section after 3 attempts in section index {}, stopping navigation",
+                sectionIndex);
+            return false;
+          }
+
+          // Try again
+          return clickNextWithSectionChangeDetection(driver, wait, iteration, sectionIndex);
+        } else {
+          log.info("Section successfully changed from {} to {} in section index {}",
+              currentSectionId, newSectionId, sectionIndex);
+          return true;
+        }
+
+      } catch (Exception e) {
+        log.warn("Failed to verify section change: {}", e.getMessage());
+        // Assume change was successful if we can't verify
+        return true;
+      }
+
+    } catch (Exception e) {
+      log.error("Error in clickNextWithSectionChangeDetection for section {}: {}", sectionIndex,
+          e.getMessage());
+      return false;
+    }
+  }
+
+  /**
+   * Get current section identifier for change detection
+   */
+  private String getCurrentSectionIdentifier(WebDriver driver) {
+    try {
+      String currentUrl = driver.getCurrentUrl();
+
+      // Get current page source hash for uniqueness
+      String pageSource = driver.getPageSource();
+      int pageSourceHash = pageSource.hashCode();
+
+      // Get question count
+      List<WebElement> questionElements =
+          driver.findElements(By.cssSelector("div[role='listitem']"));
+      int questionCount = questionElements.size();
+
+      // Create unique identifier
+      String identifier = currentUrl + "|" + pageSourceHash + "|" + questionCount;
+      return String.valueOf(identifier.hashCode());
+
+    } catch (Exception e) {
+      log.debug("Error getting section identifier: {}", e.getMessage());
+      return String.valueOf(System.currentTimeMillis()); // Fallback
     }
   }
 

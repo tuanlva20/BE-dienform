@@ -26,11 +26,6 @@ import lombok.extern.slf4j.Slf4j;
 @RequiredArgsConstructor
 public class FormSubmissionServiceImpl implements FormSubmissionService {
 
-    private final FillRequestRepository fillRequestRepository;
-    private final FormRepository formRepository;
-    private final AnswerDistributionRepository distributionRepository;
-    private final QuestionRepository questionRepository;
-    private final QuestionOptionRepository optionRepository;
     private final SurveyExecutionRepository executionRepository;
 
     @Override

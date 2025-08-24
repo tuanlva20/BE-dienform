@@ -90,6 +90,26 @@ public class DataFillCampaignService {
     log.info("Starting data fill campaign for request: {} with {} tasks using {} threads",
         fillRequest.getId(), schedule.size(), threadPoolSize);
 
+    // Check if already completed
+    if (fillRequest.getCompletedSurvey() >= fillRequest.getSurveyCount()) {
+      log.info("Data fill request {} is already completed ({}), updating status to COMPLETED",
+          fillRequest.getId(), fillRequest.getCompletedSurvey());
+      updateFillRequestStatus(fillRequest, FillRequestStatusEnum.COMPLETED);
+      CompletableFuture<Void> completedFuture = new CompletableFuture<>();
+      completedFuture.complete(null);
+      return completedFuture;
+    }
+
+    // Calculate remaining surveys to complete
+    int remainingSurveys = fillRequest.getSurveyCount() - fillRequest.getCompletedSurvey();
+    log.info("Data fill request {} has {} completed, needs {} more surveys to complete",
+        fillRequest.getId(), fillRequest.getCompletedSurvey(), remainingSurveys);
+
+    // Adjust schedule to only process remaining surveys
+    List<ScheduledTask> remainingSchedule =
+        schedule.subList(0, Math.min(remainingSurveys, schedule.size()));
+    log.info("Adjusted schedule to {} tasks for remaining surveys", remainingSchedule.size());
+
     // Set initial status to IN_PROCESS and ensure user is in room
     updateFillRequestStatus(fillRequest, FillRequestStatusEnum.IN_PROCESS);
     ensureUserInRoom(fillRequest);
@@ -124,17 +144,17 @@ public class DataFillCampaignService {
         return executionFuture;
       }
 
-      // Check if there are enough data rows for the requested survey count
-      if (sheetData.size() < fillRequest.getSurveyCount()) {
+      // Check if there are enough data rows for the remaining survey count
+      if (sheetData.size() < remainingSurveys) {
         log.warn(
-            "Not enough data rows in sheet. Required: {}, Available: {}. Data will be reused from the beginning.",
-            fillRequest.getSurveyCount(), sheetData.size());
+            "Not enough data rows in sheet for remaining surveys. Required: {}, Available: {}. Data will be reused from the beginning.",
+            remainingSurveys, sheetData.size());
       }
 
       AtomicInteger completedTasks = new AtomicInteger(0);
       AtomicInteger successfulTasks = new AtomicInteger(0);
       AtomicInteger submittedTasks = new AtomicInteger(0);
-      int totalTasks = schedule.size();
+      int totalTasks = remainingSchedule.size();
 
       log.info("TASK EXECUTION PLAN: Total {} tasks will be processed with {} threads", totalTasks,
           threadPoolSize);
@@ -144,14 +164,15 @@ public class DataFillCampaignService {
 
       // Execute each task
       log.info("Submitting {} tasks to executor service for fillRequest: {} (thread pool size: {})",
-          schedule.size(), fillRequest.getId(), threadPoolSize);
+          remainingSchedule.size(), fillRequest.getId(), threadPoolSize);
 
-      for (int i = 0; i < schedule.size(); i++) {
-        ScheduledTask task = schedule.get(i);
+      for (int i = 0; i < remainingSchedule.size(); i++) {
+        ScheduledTask task = remainingSchedule.get(i);
         final int taskIndex = i + 1;
         int submitted = submittedTasks.incrementAndGet();
         log.info("Submitting task {}/{} (row {}) for fillRequest: {} - SUBMITTED: {}/{}", taskIndex,
-            schedule.size(), task.getRowIndex(), fillRequest.getId(), submitted, totalTasks);
+            remainingSchedule.size(), task.getRowIndex(), fillRequest.getId(), submitted,
+            totalTasks);
 
         // Add small delay between task submissions for low-spec machines
         if (i > 0) {
@@ -254,7 +275,7 @@ public class DataFillCampaignService {
 
     } catch (Exception e) {
       log.error("Failed to initialize campaign: {}", fillRequest.getId(), e);
-      updateFillRequestStatus(fillRequest, FillRequestStatusEnum.PENDING);
+      updateFillRequestStatus(fillRequest, FillRequestStatusEnum.QUEUED);
       executionFuture.complete(null);
     }
 
@@ -264,28 +285,14 @@ public class DataFillCampaignService {
   @Transactional
   protected void updateFillRequestStatus(FillRequest fillRequest, FillRequestStatusEnum newStatus) {
     try {
-      FillRequest freshRequest = fillRequestRepository.findById(fillRequest.getId()).orElseThrow(
-          () -> new RuntimeException("Fill request not found: " + fillRequest.getId()));
+      // Use optimistic locking service for status updates
+      boolean success = fillRequestCounterService.updateStatus(fillRequest.getId(), newStatus);
 
-      if (newStatus != freshRequest.getStatus()) {
-        freshRequest.setStatus(newStatus);
-        fillRequestRepository.save(freshRequest);
+      if (success) {
         log.info("Updated fill request {} status to: {}", fillRequest.getId(), newStatus.name());
-        // Emit realtime update for any status change
-        try {
-          com.dienform.realtime.dto.FillRequestUpdateEvent evt =
-              com.dienform.realtime.dto.FillRequestUpdateEvent.builder()
-                  .formId(freshRequest.getForm().getId().toString())
-                  .requestId(freshRequest.getId().toString()).status(newStatus.name())
-                  .completedSurvey(freshRequest.getCompletedSurvey())
-                  .surveyCount(freshRequest.getSurveyCount())
-                  .updatedAt(java.time.Instant.now().toString()).build();
-          realtimeGateway.emitUpdate(freshRequest.getForm().getId().toString(), evt);
-        } catch (Exception ignore) {
-          log.debug("Failed to emit status update: {}", ignore.getMessage());
-        }
       } else {
-        log.debug("Fill request {} status unchanged: {}", fillRequest.getId(), newStatus.name());
+        log.warn("Failed to update fill request {} status to: {}", fillRequest.getId(),
+            newStatus.name());
       }
     } catch (Exception e) {
       log.error("Failed to update fill request status: {}", fillRequest.getId(), e);
@@ -499,9 +506,9 @@ public class DataFillCampaignService {
         log.info("Form submission successful for request: {}, row: {}", fillRequest.getId(),
             task.getRowIndex());
         try {
-          // Use dedicated counter service with REQUIRES_NEW transaction and retry logic
+          // Use simple atomic increment - this was working fine before
           boolean incrementSuccess =
-              fillRequestCounterService.incrementCompletedSurveyWithDelay(fillRequest.getId());
+              fillRequestCounterService.incrementCompletedSurvey(fillRequest.getId());
           if (!incrementSuccess) {
             log.warn(
                 "Failed to increment completedSurvey for {} after retries (may have reached limit)",

@@ -5,6 +5,7 @@ import java.util.Optional;
 import java.util.UUID;
 import org.springframework.data.jpa.repository.EntityGraph;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
 import org.springframework.stereotype.Repository;
 import com.dienform.tool.dienformtudong.form.entity.Form;
 import com.dienform.tool.dienformtudong.question.entity.Question;
@@ -19,6 +20,13 @@ public interface QuestionRepository extends JpaRepository<Question, UUID> {
 
   @EntityGraph(attributePaths = {"options"})
   List<Question> findByForm(Form form);
+
+  /**
+   * Find questions with options loaded to avoid LazyInitializationException
+   */
+  @EntityGraph(attributePaths = {"options"})
+  @Query("SELECT q FROM Question q WHERE q.form = ?1")
+  List<Question> findByFormWithOptions(Form form);
 
   /**
    * Find question with options loaded to avoid LazyInitializationException

@@ -149,6 +149,22 @@ public class GlobalExceptionHandler {
         HttpStatus.CONFLICT);
   }
 
+  @ExceptionHandler(org.springframework.web.servlet.resource.NoResourceFoundException.class)
+  public ResponseEntity<ResponseModel<Void>> handleNoResourceFoundException(
+      org.springframework.web.servlet.resource.NoResourceFoundException ex, WebRequest request) {
+
+    // Log at WARN level instead of ERROR for static resource not found
+    log.warn("Static resource not found: {} - {}", request.getDescription(false), ex.getMessage());
+
+    Map<String, Object> details = new HashMap<>();
+    details.put("path", request.getDescription(false));
+    details.put("timestamp", LocalDateTime.now());
+    details.put("resourceType", "static");
+
+    return new ResponseEntity<>(ResponseModel.error("Resource not found", HttpStatus.NOT_FOUND,
+        ErrorCode.NOT_FOUND, details), HttpStatus.NOT_FOUND);
+  }
+
   @ExceptionHandler(Exception.class)
   public ResponseEntity<ResponseModel<Void>> handleGlobalException(Exception ex,
       WebRequest request) {
