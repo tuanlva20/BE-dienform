@@ -34,7 +34,7 @@ public class FillRequestMapping extends AuditEntity {
   @Column(name = "question_id", nullable = false)
   private UUID questionId;
 
-  @Column(name = "column_name", nullable = false, length = 500)
+  @Column(name = "column_name", nullable = false, length = 2000)
   private String columnName;
 
   @Column(name = "sheet_link", nullable = false, length = 1000)
