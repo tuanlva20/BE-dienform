@@ -132,14 +132,19 @@ public class ScheduleDistributionService {
       TimeSlot selectedSlot = selectWeightedTimeSlot(timeSlots);
       LocalDateTime executionTime = selectedSlot.getRandomTimeInSlot();
 
-      // EXACT LOGIC FROM API /form/{formId}/fill-request (GoogleFormServiceImpl)
+      // IMPROVED LOGIC: First form executes immediately, subsequent forms have distributed delays
       int delaySeconds;
       if (completedSurvey == 0 && i == 0) {
-        delaySeconds = 36; // First form: minimal delay
+        delaySeconds = 0; // First form: execute immediately
+        executionTime = DateTimeUtil.now(); // Override to current time for immediate execution
+        log.debug("Human-like mode: First form with immediate execution (delay: {} seconds)",
+            delaySeconds);
       } else {
-        delaySeconds = 36 + random.nextInt(364); // 36-399 seconds
+        // Subsequent forms: distributed delays between 2-15 minutes (120-900 seconds)
+        delaySeconds = 120 + random.nextInt(780); // 120-899 seconds (2-15 minutes)
+        log.debug("Human-like mode: Form {} with delay of {} seconds ({} minutes)", i + 1,
+            delaySeconds, delaySeconds / 60);
       }
-      log.debug("Human-like mode: Form {} with delay of {} seconds", i + 1, delaySeconds);
 
       schedule.add(new ScheduledTask(executionTime, delaySeconds, i));
     }
@@ -147,16 +152,17 @@ public class ScheduleDistributionService {
     // Sort by execution time and recalculate delays based on actual execution times
     schedule.sort((a, b) -> a.getExecutionTime().compareTo(b.getExecutionTime()));
 
-    // Recalculate delays based on EXACT LOGIC FROM API /form/{formId}/fill-request
+    // Recalculate delays based on IMPROVED LOGIC
     for (int i = 0; i < schedule.size(); i++) {
       ScheduledTask task = schedule.get(i);
       int newDelaySeconds;
 
-      // EXACT LOGIC FROM API /form/{formId}/fill-request (GoogleFormServiceImpl)
+      // IMPROVED LOGIC: First form executes immediately, subsequent forms have distributed delays
       if (completedSurvey == 0 && i == 0) {
-        newDelaySeconds = 36; // First form: minimal delay
+        newDelaySeconds = 0; // First form: execute immediately
       } else {
-        newDelaySeconds = 36 + random.nextInt(364); // 36-399 seconds
+        // Subsequent forms: distributed delays between 2-15 minutes (120-900 seconds)
+        newDelaySeconds = 120 + random.nextInt(780); // 120-899 seconds (2-15 minutes)
       }
 
       // Create new task with updated delay
@@ -221,35 +227,32 @@ public class ScheduleDistributionService {
     for (int i = 0; i < submissionCount; i++) {
       int delaySeconds;
 
-      // EXACT LOGIC FROM API /form/{formId}/fill-request (GoogleFormServiceImpl)
+      // IMPROVED LOGIC: First form executes immediately, subsequent forms have distributed delays
       if (isHumanLike) {
         if (completedSurvey == 0 && i == 0) {
-          delaySeconds = 36; // First form: minimal delay
+          delaySeconds = 0; // First form: execute immediately
+          currentTime = DateTimeUtil.now(); // Set to current time for immediate execution
+          log.debug("Human-like mode: First form with immediate execution (delay: {} seconds)",
+              delaySeconds);
         } else {
-          delaySeconds = 36 + random.nextInt(364); // 36-399 seconds
+          // Subsequent forms: distributed delays between 2-15 minutes (120-900 seconds)
+          delaySeconds = 120 + random.nextInt(780); // 120-899 seconds (2-15 minutes)
+          currentTime = DateTimeUtil.now().plusSeconds(delaySeconds);
+          log.debug("Human-like mode: Form {} with delay of {} seconds ({} minutes)", i + 1,
+              delaySeconds, delaySeconds / 60);
         }
-        log.debug("Human-like mode: Form {} with delay of {} seconds", i + 1, delaySeconds);
-
-        // Set execution time in the future for human-like behavior
-        currentTime = currentTime.plusSeconds(delaySeconds);
-        log.debug("Human-like task {} scheduled at {} with {} seconds delay", i, currentTime,
-            delaySeconds);
-      } else if (i > 0) {
-        delaySeconds = 1; // Fast mode: 1 second between forms
-        log.debug("Fast mode: 1 second delay between forms");
-
-        // All tasks start immediately at current time (Vietnam timezone)
-        currentTime = DateTimeUtil.now();
-        log.debug("Fast task {} scheduled immediately at {} (delay: {} seconds)", i, currentTime,
-            delaySeconds);
       } else {
-        delaySeconds = 0; // First form: no delay
-        log.debug("Fast mode: First form with no delay");
-
-        // All tasks start immediately at current time (Vietnam timezone)
-        currentTime = DateTimeUtil.now();
-        log.debug("Fast task {} scheduled immediately at {} (delay: {} seconds)", i, currentTime,
-            delaySeconds);
+        // Fast mode: minimal delays
+        if (i == 0) {
+          delaySeconds = 0; // First form: no delay
+          currentTime = DateTimeUtil.now(); // Set to current time for immediate execution
+          log.debug("Fast mode: First form with immediate execution (delay: {} seconds)",
+              delaySeconds);
+        } else {
+          delaySeconds = 1; // Subsequent forms: 1 second between forms
+          currentTime = DateTimeUtil.now().plusSeconds(delaySeconds);
+          log.debug("Fast mode: Form {} with 1 second delay", i + 1);
+        }
       }
 
       schedule.add(new ScheduledTask(currentTime, delaySeconds, i));

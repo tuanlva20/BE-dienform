@@ -446,17 +446,20 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                     final int delaySeconds;
                     if (fillRequest.isHumanLike()) {
                         if (fillRequest.getCompletedSurvey() == 0 && planIndex == 1) {
-                            delaySeconds = 36; // First form: minimal delay
+                            delaySeconds = 0; // First form: execute immediately
                         } else {
-                            delaySeconds = 36 + random.nextInt(364); // 36-399 seconds
+                            // Subsequent forms: distributed delays between 2-15 minutes (120-900
+                            // seconds)
+                            delaySeconds = 120 + random.nextInt(780); // 120-899 seconds (2-15
+                                                                      // minutes)
                         }
-                        log.debug("Human-like mode: Form {} with delay of {} seconds", planIndex,
-                                delaySeconds);
+                        log.debug("Human-like mode: Form {} with delay of {} seconds ({} minutes)",
+                                planIndex, delaySeconds, delaySeconds / 60);
                     } else if (totalProcessed.get() > 0) {
                         delaySeconds = 1; // Fast mode: 1 second between forms
                         log.debug("Fast mode: 1 second delay between forms");
                     } else {
-                        delaySeconds = 0;
+                        delaySeconds = 0; // First form: no delay
                     }
 
                     CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {

@@ -1,6 +1,5 @@
 package com.dienform.tool.dienformtudong.fillrequest.service;
 
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -19,7 +18,6 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import com.dienform.common.util.CopyUtil;
 import com.dienform.common.util.CurrentUserUtil;
-import com.dienform.common.util.DateTimeUtil;
 import com.dienform.tool.dienformtudong.datamapping.dto.request.DataFillRequestDTO;
 import com.dienform.tool.dienformtudong.fillrequest.entity.FillRequest;
 import com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum;
@@ -394,14 +392,15 @@ public class DataFillCampaignService {
         log.info("THREAD ASSIGNED: Task row {} started execution on thread: {} (fillRequest: {})",
             task.getRowIndex(), Thread.currentThread().getName(), fillRequest.getId());
 
-        // Calculate delay using Vietnam timezone
-        long delaySeconds =
-            Math.max(0, Duration.between(DateTimeUtil.now(), task.getExecutionTime()).getSeconds());
+        // Use delay from task configuration (improved logic ensures first form has 0 delay)
+        long delaySeconds = task.getDelaySeconds();
 
         if (delaySeconds > 0) {
           log.info("Waiting {} seconds before executing task for row {} on thread: {}",
               delaySeconds, task.getRowIndex(), Thread.currentThread().getName());
           Thread.sleep(delaySeconds * 1000);
+        } else {
+          log.debug("Task row {} executing immediately without delay", task.getRowIndex());
         }
 
         // Execute form fill with retry mechanism
@@ -496,9 +495,13 @@ public class DataFillCampaignService {
       // Build form submission data
       Map<String, String> formData = buildFormData(originalRequest, questionMap, rowData);
 
-      // Add human-like delay before submission
-      if (task.getDelaySeconds() > 0) {
+      // Add human-like delay before submission (only for subsequent forms, not the first one)
+      if (task.getDelaySeconds() > 0 && task.getRowIndex() > 0) {
+        log.debug("Adding human-like delay of {} seconds before form submission for row {}",
+            task.getDelaySeconds(), task.getRowIndex());
         Thread.sleep(task.getDelaySeconds() * 1000L);
+      } else if (task.getRowIndex() == 0) {
+        log.debug("First form (row 0) - executing immediately without delay");
       }
 
       // Submit form using browser automation
