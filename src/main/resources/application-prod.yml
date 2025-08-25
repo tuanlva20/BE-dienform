@@ -75,7 +75,7 @@ google:
   form:
     # Performance settings optimized for production
     timeout-seconds: 60
-    thread-pool-size: 3
+    thread-pool-size: 2
     max-retries: 2
     retry-delay-ms: 2000
 
@@ -131,7 +131,7 @@ app:
     enabled: true
   async:
     core-pool-size: 2 # Optimized for 2-core server
-    max-pool-size: 4 # Optimized for 2-core server
+    max-pool-size: 3 # Optimized for 2-core server
     queue-capacity: 50 # Reduced queue capacity
     thread-name-prefix: Async-
 
