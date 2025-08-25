@@ -488,6 +488,8 @@ public class QueueManagementService {
               fillRequest.getCompletedSurvey());
 
       // Execute campaign
+      log.info("About to execute campaign for request: {} with {} tasks", fillRequest.getId(),
+          schedule.size());
       dataFillCampaignService
           .executeCampaign(fillRequest, reconstructedRequest, questions, schedule)
           .exceptionally(throwable -> {

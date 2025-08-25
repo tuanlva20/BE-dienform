@@ -1,7 +1,6 @@
 package com.dienform.tool.dienformtudong.fillrequest.service;
 
 import java.time.Duration;
-import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -20,6 +19,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import com.dienform.common.util.CopyUtil;
 import com.dienform.common.util.CurrentUserUtil;
+import com.dienform.common.util.DateTimeUtil;
 import com.dienform.tool.dienformtudong.datamapping.dto.request.DataFillRequestDTO;
 import com.dienform.tool.dienformtudong.fillrequest.entity.FillRequest;
 import com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum;
@@ -89,6 +89,8 @@ public class DataFillCampaignService {
 
     log.info("Starting data fill campaign for request: {} with {} tasks using {} threads",
         fillRequest.getId(), schedule.size(), threadPoolSize);
+    log.info("Campaign details - isHumanLike: {}, startDate: {}, endDate: {}",
+        fillRequest.isHumanLike(), fillRequest.getStartDate(), fillRequest.getEndDate());
 
     // Check if already completed
     if (fillRequest.getCompletedSurvey() >= fillRequest.getSurveyCount()) {
@@ -392,9 +394,9 @@ public class DataFillCampaignService {
         log.info("THREAD ASSIGNED: Task row {} started execution on thread: {} (fillRequest: {})",
             task.getRowIndex(), Thread.currentThread().getName(), fillRequest.getId());
 
-        // Calculate delay
-        long delaySeconds = Math.max(0,
-            Duration.between(LocalDateTime.now(), task.getExecutionTime()).getSeconds());
+        // Calculate delay using Vietnam timezone
+        long delaySeconds =
+            Math.max(0, Duration.between(DateTimeUtil.now(), task.getExecutionTime()).getSeconds());
 
         if (delaySeconds > 0) {
           log.info("Waiting {} seconds before executing task for row {} on thread: {}",

@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
 import org.springframework.stereotype.Service;
+import com.dienform.common.util.DateTimeUtil;
 import lombok.extern.slf4j.Slf4j;
 
 @Service
@@ -237,16 +238,16 @@ public class ScheduleDistributionService {
         delaySeconds = 1; // Fast mode: 1 second between forms
         log.debug("Fast mode: 1 second delay between forms");
 
-        // All tasks start immediately at current time
-        currentTime = LocalDateTime.now();
+        // All tasks start immediately at current time (Vietnam timezone)
+        currentTime = DateTimeUtil.now();
         log.debug("Fast task {} scheduled immediately at {} (delay: {} seconds)", i, currentTime,
             delaySeconds);
       } else {
         delaySeconds = 0; // First form: no delay
         log.debug("Fast mode: First form with no delay");
 
-        // All tasks start immediately at current time
-        currentTime = LocalDateTime.now();
+        // All tasks start immediately at current time (Vietnam timezone)
+        currentTime = DateTimeUtil.now();
         log.debug("Fast task {} scheduled immediately at {} (delay: {} seconds)", i, currentTime,
             delaySeconds);
       }
