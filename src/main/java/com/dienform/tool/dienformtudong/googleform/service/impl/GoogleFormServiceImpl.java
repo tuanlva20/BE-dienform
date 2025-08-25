@@ -1575,6 +1575,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
 
             // OPTIMIZED: Process each question with better error handling
             int processedQuestions = 0;
+            int totalQuestions = selections.size();
 
             for (Map.Entry<Question, QuestionOption> entry : selections.entrySet()) {
                 Question question = entry.getKey();
@@ -1587,15 +1588,20 @@ public class GoogleFormServiceImpl implements GoogleFormService {
 
                 try {
                     long questionStartTime = System.currentTimeMillis();
-                    log.info("Processing question: {} (type: {})", question.getTitle(),
-                            question.getType());
+                    log.info("Processing question {}/{}: {} (type: {})", processedQuestions + 1,
+                            totalQuestions, question.getTitle(), question.getType());
 
                     WebElement questionElement =
                             formFillingHelper.resolveQuestionElement(driver, formUrl, question);
                     long questionFoundTime = System.currentTimeMillis();
 
                     if (questionElement == null) {
-                        log.error("Question not found: {}", question.getTitle());
+                        log.error("Question not found: {} (type: {})", question.getTitle(),
+                                question.getType());
+                        // Log additional debug info
+                        log.debug("Question details - ID: {}, Position: {}, AdditionalData: {}",
+                                question.getId(), question.getPosition(),
+                                question.getAdditionalData());
                         continue;
                     }
 
@@ -1636,7 +1642,8 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                         log.info("Filled question '{}' in {}ms", question.getTitle(),
                                 fillEndTime - fillStartTime);
                     } else {
-                        log.warn("Failed to fill question '{}'", question.getTitle());
+                        log.warn("Failed to fill question '{}' (type: {})", question.getTitle(),
+                                question.getType());
                     }
 
                     // OPTIMIZED: Reduced delay between questions
@@ -1646,19 +1653,43 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                     }
 
                 } catch (Exception e) {
-                    log.error("Error filling question {}: {}", question.getTitle(), e.getMessage());
+                    log.error("Error processing question '{}': {}", question.getTitle(),
+                            e.getMessage(), e);
                 }
             }
 
-            log.info("Successfully processed {}/{} questions", processedQuestions,
-                    selections.size());
+            log.info("Processed {}/{} questions successfully", processedQuestions, totalQuestions);
 
             // OPTIMIZED: Submit form if enabled with shorter timeout
             if (autoSubmitEnabled) {
                 try {
                     log.info("Attempting to submit form");
-                    WebElement submitButton = wait.until(ExpectedConditions.elementToBeClickable(
-                            By.xpath("//div[@role='button' and @aria-label='Submit']")));
+
+                    // Try multiple submit button selectors
+                    WebElement submitButton = null;
+                    String[] submitSelectors = {"//div[@role='button' and @aria-label='Submit']",
+                            "//div[@role='button' and contains(.//span, 'Submit')]",
+                            "//div[@role='button' and contains(.//span, 'Gửi')]",
+                            "//div[@role='button' and contains(@aria-label, 'Submit')]",
+                            "//div[@role='button' and contains(@aria-label, 'Gửi')]",
+                            "//div[@role='button'][last()]" // Last button as fallback
+                    };
+
+                    for (String selector : submitSelectors) {
+                        try {
+                            submitButton = wait.until(
+                                    ExpectedConditions.elementToBeClickable(By.xpath(selector)));
+                            log.info("Found submit button using selector: {}", selector);
+                            break;
+                        } catch (Exception e) {
+                            log.debug("Submit button not found with selector: {}", selector);
+                        }
+                    }
+
+                    if (submitButton == null) {
+                        log.error("No submit button found with any selector");
+                        return false;
+                    }
 
                     if (humanLike) {
                         Thread.sleep(250 + new Random().nextInt(251)); // 250-500ms delay before
@@ -1693,6 +1724,19 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                         } catch (Exception fallbackEx) {
                             log.warn("Could not detect submit button disappearance: {}",
                                     fallbackEx.getMessage());
+
+                            // Additional fallback: Check for success message
+                            try {
+                                WebDriverWait successWait =
+                                        new WebDriverWait(driver, Duration.ofSeconds(10));
+                                successWait.until(ExpectedConditions.presenceOfElementLocated(By
+                                        .xpath("//*[contains(text(), 'Thank you') or contains(text(), 'Cảm ơn') or contains(text(), 'submitted') or contains(text(), 'đã gửi')]")));
+                                log.info("Form submitted successfully - Success message found");
+                                submitConfirmed = true;
+                            } catch (Exception successEx) {
+                                log.warn("Could not detect success message: {}",
+                                        successEx.getMessage());
+                            }
                         }
                     }
 
@@ -1718,8 +1762,8 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                         verifySubmissionSuccess(driver);
                     }
 
-                    return submitConfirmed || true; // Return true even if not confirmed, as form
-                                                    // was clicked
+                    // Only return true if submission was actually confirmed
+                    return submitConfirmed;
                 } catch (Exception e) {
                     log.error("Error submitting form: {}", e.getMessage());
                     return false;

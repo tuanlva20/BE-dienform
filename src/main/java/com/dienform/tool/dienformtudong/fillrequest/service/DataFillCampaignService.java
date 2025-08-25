@@ -506,8 +506,39 @@ public class DataFillCampaignService {
 
       // Submit form using browser automation
       String formUrl = fillRequest.getForm().getEditLink();
-      boolean success = googleFormService.submitFormWithBrowser(fillRequest.getId(),
-          fillRequest.getForm().getId(), formUrl, formData);
+      boolean success = false;
+
+      // Enhanced retry logic with different strategies
+      for (int attempt = 1; attempt <= 3; attempt++) {
+        try {
+          log.info("Form submission attempt {}/3 for request: {}, row: {}", attempt,
+              fillRequest.getId(), task.getRowIndex());
+
+          success = googleFormService.submitFormWithBrowser(fillRequest.getId(),
+              fillRequest.getForm().getId(), formUrl, formData);
+
+          if (success) {
+            log.info("Form submission successful on attempt {} for request: {}, row: {}", attempt,
+                fillRequest.getId(), task.getRowIndex());
+            break;
+          } else {
+            log.warn("Form submission failed on attempt {} for request: {}, row: {}", attempt,
+                fillRequest.getId(), task.getRowIndex());
+
+            // Wait before retry
+            if (attempt < 3) {
+              Thread.sleep(2000 * attempt); // Progressive delay: 2s, 4s
+            }
+          }
+        } catch (Exception e) {
+          log.error("Exception on form submission attempt {} for request: {}, row: {}: {}", attempt,
+              fillRequest.getId(), task.getRowIndex(), e.getMessage());
+
+          if (attempt < 3) {
+            Thread.sleep(2000 * attempt);
+          }
+        }
+      }
 
       if (success) {
         log.info("Form submission successful for request: {}, row: {}", fillRequest.getId(),

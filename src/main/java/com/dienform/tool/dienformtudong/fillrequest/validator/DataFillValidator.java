@@ -522,7 +522,7 @@ public class DataFillValidator {
 
     // Check if question has __other_option__
     // boolean hasOtherOption = options.stream().anyMatch(
-    //     opt -> opt.getValue() != null && "__other_option__".equalsIgnoreCase(opt.getValue()));
+    // opt -> opt.getValue() != null && "__other_option__".equalsIgnoreCase(opt.getValue()));
 
     String[] selectedOptions = main.split("\\|");
     List<Integer> selectedPositions = new ArrayList<>();
