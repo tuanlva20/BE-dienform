@@ -15,7 +15,7 @@ spring:
     open-in-view: false
     show-sql: false # Disable SQL logging in production
     hibernate:
-      ddl-auto: update # Validate schema in production
+      ddl-auto: none # Validate schema in production
     properties:
       hibernate:
         jdbc:

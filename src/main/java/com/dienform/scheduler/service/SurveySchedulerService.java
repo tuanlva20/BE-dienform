@@ -247,9 +247,9 @@ public class SurveySchedulerService {
       DataFillRequestDTO dataFillRequest = convertToDataFillRequest(request, mappings);
 
       // Create schedule distribution
-      List<ScheduleDistributionService.ScheduledTask> schedule =
-          scheduleDistributionService.distributeSchedule(request.getSurveyCount(),
-              request.getStartDate(), request.getEndDate(), request.isHumanLike());
+      List<ScheduleDistributionService.ScheduledTask> schedule = scheduleDistributionService
+          .distributeSchedule(request.getSurveyCount(), request.getStartDate(),
+              request.getEndDate(), request.isHumanLike(), request.getCompletedSurvey());
 
       // Execute campaign
       dataFillCampaignService.executeCampaign(request, dataFillRequest, questions, schedule)

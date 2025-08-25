@@ -443,12 +443,14 @@ public class DataFillCampaignService {
       }
     }, executorService);
 
-    // Add timeout mechanism to prevent hanging tasks (reduced for low-spec machines)
+    // Add timeout mechanism - EXACT LOGIC FROM API /form/{formId}/fill-request
+    // 30 minutes for human-like mode, 5 minutes for fast mode
+    long timeoutSeconds = fillRequest.isHumanLike() ? 1800 : 300;
     CompletableFuture<Boolean> timeoutFuture =
-        future.orTimeout(180, TimeUnit.SECONDS).exceptionally(throwable -> {
+        future.orTimeout(timeoutSeconds, TimeUnit.SECONDS).exceptionally(throwable -> {
           if (throwable instanceof java.util.concurrent.TimeoutException) {
-            log.error("Task for row {} timed out after 180 seconds (fillRequest: {})",
-                task.getRowIndex(), fillRequest.getId());
+            log.error("Task for row {} timed out after {} seconds (fillRequest: {})",
+                task.getRowIndex(), timeoutSeconds, fillRequest.getId());
           } else {
             log.error("Task for row {} failed with exception (fillRequest: {}): {}",
                 task.getRowIndex(), fillRequest.getId(), throwable.getMessage());

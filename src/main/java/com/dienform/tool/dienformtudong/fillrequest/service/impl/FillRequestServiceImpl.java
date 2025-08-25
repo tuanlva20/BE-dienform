@@ -337,8 +337,9 @@ public class FillRequestServiceImpl implements FillRequestService {
     // Step 7: Create schedule distribution
     // Ensure the number of scheduled tasks matches the persisted surveyCount
     int effectiveTaskCount = savedRequest.getSurveyCount();
-    List<ScheduleDistributionService.ScheduledTask> schedule = scheduleDistributionService
-        .distributeSchedule(effectiveTaskCount, startDate, endDate, savedRequest.isHumanLike());
+    List<ScheduleDistributionService.ScheduledTask> schedule =
+        scheduleDistributionService.distributeSchedule(effectiveTaskCount, startDate, endDate,
+            savedRequest.isHumanLike(), savedRequest.getCompletedSurvey());
 
     // Step 8: Store data mapping for campaign execution
     List<FillRequestMapping> mappings = new ArrayList<>();

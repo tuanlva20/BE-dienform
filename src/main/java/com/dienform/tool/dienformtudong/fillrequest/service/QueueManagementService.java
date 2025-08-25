@@ -484,7 +484,8 @@ public class QueueManagementService {
       // Create schedule distribution
       List<ScheduleDistributionService.ScheduledTask> schedule =
           scheduleDistributionService.distributeSchedule(fillRequest.getSurveyCount(),
-              fillRequest.getStartDate(), fillRequest.getEndDate(), fillRequest.isHumanLike());
+              fillRequest.getStartDate(), fillRequest.getEndDate(), fillRequest.isHumanLike(),
+              fillRequest.getCompletedSurvey());
 
       // Execute campaign
       dataFillCampaignService
