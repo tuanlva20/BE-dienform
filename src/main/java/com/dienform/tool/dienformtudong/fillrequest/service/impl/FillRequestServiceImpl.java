@@ -326,6 +326,10 @@ public class FillRequestServiceImpl implements FillRequestService {
         priorityCalculationService.getPriorityLevelDescription(calculatedPriority));
 
     // Step 6: Create AnswerDistribution for "other" options with valueString
+    // Commented out to avoid storing in database - using direct processing instead
+    // The "other" option text will be processed directly in DataFillCampaignService
+    // and passed through localOtherText map during form filling
+    /*
     List<AnswerDistribution> otherDistributions =
         createOtherAnswerDistributions(savedRequest, questions, dataFillRequestDTO, sheetData);
     if (!otherDistributions.isEmpty()) {
@@ -333,6 +337,8 @@ public class FillRequestServiceImpl implements FillRequestService {
       log.info("Created {} AnswerDistribution records for 'other' options with valueString",
           otherDistributions.size());
     }
+    */
+    log.info("Skipping AnswerDistribution creation for 'other' options - using direct processing from DataFillCampaignService");
 
     // Step 7: Create schedule distribution
     // Ensure the number of scheduled tasks matches the persisted surveyCount
@@ -503,9 +509,37 @@ public class FillRequestServiceImpl implements FillRequestService {
               int position = Integer.parseInt(main);
               if (otherOption.getPosition() != null && otherOption.getPosition() == position) {
                 uniqueOtherTexts.add(otherText);
+                log.debug("Added 'other' text '{}' for matching position {}", otherText, position);
+              } else {
+                // If position doesn't match, but this is the only option with text after dash,
+                // and the text doesn't match any predefined option, treat it as "other" text
+                boolean isOptionValue = question.getOptions().stream()
+                    .anyMatch(opt -> opt.getValue() != null && otherText.equals(opt.getValue()));
+
+                if (!isOptionValue) {
+                  uniqueOtherTexts.add(otherText);
+                  log.debug(
+                      "Added 'other' text '{}' for non-matching position {} (text not in predefined options)",
+                      otherText, position);
+                }
               }
             } catch (NumberFormatException e) {
               // Ignore if position is not a valid number
+            }
+          }
+        } else {
+          // Handle case where there's no dash but the value might be for "other" option
+          // This could happen if the value is just the text without position prefix
+          // We'll add it as a potential "other" text if it's not a numeric position
+          if (!valueStr.matches("\\d+") && !valueStr.isEmpty()) {
+            // Check if this question has any option that matches this value
+            boolean isOptionValue = question.getOptions().stream()
+                .anyMatch(opt -> opt.getValue() != null && valueStr.equals(opt.getValue()));
+
+            // If it's not a predefined option value, treat it as "other" text
+            if (!isOptionValue) {
+              uniqueOtherTexts.add(valueStr);
+              log.debug("Added 'other' text '{}' (no dash format)", valueStr);
             }
           }
         }

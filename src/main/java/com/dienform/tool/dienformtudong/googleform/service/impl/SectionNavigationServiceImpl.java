@@ -1,12 +1,16 @@
 package com.dienform.tool.dienformtudong.googleform.service.impl;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import org.openqa.selenium.By;
 import org.openqa.selenium.WebDriver;
 import org.openqa.selenium.WebElement;
@@ -37,6 +41,9 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
 
   private final RequiredQuestionAutofillService requiredQuestionAutofillService;
   private final FormFillingHelper formFillingHelper;
+
+  // Track per-driver temporary Chrome profile directories for cleanup
+  private final Map<WebDriver, Path> driverProfileDirMap = new ConcurrentHashMap<>();
 
   @Value("${google.form.timeout-seconds:30}")
   private int timeoutSeconds;
@@ -181,6 +188,21 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
         try {
           driver.quit();
         } catch (Exception ignore) {
+        }
+        // Cleanup isolated profile dir
+        try {
+          Path profile = driverProfileDirMap.remove(driver);
+          if (profile != null) {
+            Files.walk(profile).sorted(Comparator.reverseOrder()).forEach(p -> {
+              try {
+                Files.deleteIfExists(p);
+              } catch (Exception ignored) {
+              }
+            });
+            log.debug("Removed isolated Chrome profile at {}", profile);
+          }
+        } catch (Exception cleanupEx) {
+          log.debug("Failed cleaning Chrome profile dir: {}", cleanupEx.getMessage());
         }
       }
     }
@@ -399,6 +421,21 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
           driver.quit();
         } catch (Exception ignore) {
         }
+        // Cleanup isolated profile dir
+        try {
+          Path profile = driverProfileDirMap.remove(driver);
+          if (profile != null) {
+            Files.walk(profile).sorted(Comparator.reverseOrder()).forEach(p -> {
+              try {
+                Files.deleteIfExists(p);
+              } catch (Exception ignored) {
+              }
+            });
+            log.debug("Removed isolated Chrome profile at {}", profile);
+          }
+        } catch (Exception cleanupEx) {
+          log.debug("Failed cleaning Chrome profile dir: {}", cleanupEx.getMessage());
+        }
       }
     }
   }
@@ -593,6 +630,21 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
           driver.quit();
         } catch (Exception ignore) {
         }
+        // Cleanup isolated profile dir
+        try {
+          Path profile = driverProfileDirMap.remove(driver);
+          if (profile != null) {
+            Files.walk(profile).sorted(Comparator.reverseOrder()).forEach(p -> {
+              try {
+                Files.deleteIfExists(p);
+              } catch (Exception ignored) {
+              }
+            });
+            log.debug("Removed isolated Chrome profile at {}", profile);
+          }
+        } catch (Exception cleanupEx) {
+          log.debug("Failed cleaning Chrome profile dir: {}", cleanupEx.getMessage());
+        }
       }
     }
   }
@@ -754,12 +806,28 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
           driver.quit();
         } catch (Exception ignore) {
         }
+        // Cleanup isolated profile dir
+        try {
+          Path profile = driverProfileDirMap.remove(driver);
+          if (profile != null) {
+            Files.walk(profile).sorted(Comparator.reverseOrder()).forEach(p -> {
+              try {
+                Files.deleteIfExists(p);
+              } catch (Exception ignored) {
+              }
+            });
+            log.debug("Removed isolated Chrome profile at {}", profile);
+          }
+        } catch (Exception cleanupEx) {
+          log.debug("Failed cleaning Chrome profile dir: {}", cleanupEx.getMessage());
+        }
       }
     }
   }
 
   private WebDriver openBrowser(String formUrl, boolean humanLike) {
     ChromeOptions options = new ChromeOptions();
+    java.nio.file.Path userDataDir = null;
 
     // Essential Chrome options for stability and performance
     options.addArguments("--remote-allow-origins=*");
@@ -808,7 +876,26 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
         java.util.Collections.singletonList("enable-automation"));
     options.setExperimentalOption("useAutomationExtension", false);
 
+    // Isolated Chrome profile per session (already creating dir below)
+    try {
+      userDataDir = java.nio.file.Files.createTempDirectory("df-chrome-");
+      options.addArguments("--user-data-dir=" + userDataDir.toAbsolutePath());
+      options.addArguments("--profile-directory=Default");
+      options.addArguments("--incognito");
+      options.addArguments("--disable-background-networking");
+      options.addArguments("--dns-prefetch-disable");
+      options.addArguments("--aggressive-cache-discard");
+      options.addArguments("--disable-cache");
+      options.addArguments("--disable-application-cache");
+      log.debug("Created isolated Chrome user-data-dir at {}", userDataDir);
+    } catch (Exception e) {
+      log.warn("Failed to create isolated Chrome profile directory: {}", e.getMessage());
+    }
+
     WebDriver driver = new ChromeDriver(options);
+    if (userDataDir != null) {
+      driverProfileDirMap.put(driver, userDataDir);
+    }
 
     // Set viewport size after driver creation for headless mode
     if (headless) {

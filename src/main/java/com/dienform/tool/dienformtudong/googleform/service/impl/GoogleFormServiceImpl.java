@@ -5,12 +5,15 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
@@ -30,11 +33,14 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import org.openqa.selenium.By;
+import org.openqa.selenium.ElementClickInterceptedException;
 import org.openqa.selenium.JavascriptExecutor;
+import org.openqa.selenium.StaleElementReferenceException;
 import org.openqa.selenium.WebDriver;
 import org.openqa.selenium.WebElement;
 import org.openqa.selenium.chrome.ChromeDriver;
 import org.openqa.selenium.chrome.ChromeOptions;
+import org.openqa.selenium.interactions.Actions;
 import org.openqa.selenium.support.ui.ExpectedConditions;
 import org.openqa.selenium.support.ui.WebDriverWait;
 import org.springframework.beans.factory.annotation.Value;
@@ -66,6 +72,7 @@ import com.dienform.tool.dienformtudong.googleform.util.GoogleFormParser.Extract
 import com.dienform.tool.dienformtudong.googleform.util.TestDataEnum;
 import com.dienform.tool.dienformtudong.question.entity.Question;
 import com.dienform.tool.dienformtudong.question.entity.QuestionOption;
+import com.dienform.tool.dienformtudong.question.repository.QuestionOptionRepository;
 import com.dienform.tool.dienformtudong.question.repository.QuestionRepository;
 import com.dienform.tool.dienformtudong.surveyexecution.entity.SesstionExecution;
 import com.dienform.tool.dienformtudong.surveyexecution.repository.SessionExecutionRepository;
@@ -116,6 +123,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
 
     private final ComboboxHandler comboboxHandler;
     private final QuestionRepository questionRepository;
+    private final QuestionOptionRepository optionRepository;
     private final GridQuestionHandler gridQuestionHandler;
     private final FormFillingHelper formFillingHelper;
 
@@ -160,6 +168,9 @@ public class GoogleFormServiceImpl implements GoogleFormService {
 
     // Track active WebDriver instances per fill request to guarantee shutdown
     private final Map<UUID, Set<WebDriver>> activeDriversByFillRequest = new ConcurrentHashMap<>();
+
+    // Track per-driver temporary Chrome profile directories for cleanup
+    private final Map<WebDriver, Path> driverProfileDirMap = new ConcurrentHashMap<>();
 
     // Pool of user-provided 'Other' texts per fillRequest and question
     private final Map<UUID, Map<UUID, Queue<String>>> otherTextPoolsByFillRequest =
@@ -715,26 +726,102 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                 }
 
                 String raw = entry.getValue() == null ? "" : entry.getValue().trim();
+                // Parse input with special handling:
+                // - If raw is numeric (e.g., "2"), map to DB option by position (1-based)
+                // - If raw matches "__other_option__-note" or "<index>-note", treat as Other with
+                // note
+                // - Otherwise use the full raw string as label/value (don't split on '-')
+
+                String mainToken = raw;
+                String note = null;
+
                 int dashIdx = raw.lastIndexOf('-');
-                String main = dashIdx > 0 ? raw.substring(0, dashIdx).trim() : raw;
-                String other = dashIdx > 0 ? raw.substring(dashIdx + 1).trim() : null;
-                if (other != null && !other.isEmpty()) {
-                    localOtherText.put(qid, other);
+                if (dashIdx > 0) {
+                    String left = raw.substring(0, dashIdx).trim();
+                    String right = raw.substring(dashIdx + 1).trim();
+                    if (!right.isEmpty() && (left.matches("\\d+")
+                            || "__other_option__".equalsIgnoreCase(left))) {
+                        mainToken = left;
+                        note = right;
+                    }
                 }
 
-                QuestionOption option = new QuestionOption();
-                // Always set value to the resolved main token so data-value matching works
-                option.setValue(main);
-                // Preserve raw text for '__other_option__-text' so helper can extract and fill
-                if ("__other_option__".equalsIgnoreCase(main) && other != null
-                        && !other.isEmpty()) {
-                    option.setText(raw);
-                } else {
-                    option.setText(main);
+                QuestionOption resolved = null;
+                // Case 1: numeric index → resolve by position from DB (1-based index)
+                if (mainToken.matches("\\d+")) {
+                    try {
+                        int idx = Integer.parseInt(mainToken);
+                        List<QuestionOption> options =
+                                optionRepository.findByQuestionIdOrderByPosition(question.getId());
+                        if (idx >= 1 && idx <= options.size()) {
+                            resolved = options.get(idx - 1);
+                        } else {
+                            log.warn("Index {} out of range for question {} options (size={})", idx,
+                                    question.getId(), options.size());
+                        }
+                        // If note present and the resolved option represents 'Other', attach note
+                        if (note != null && !note.isEmpty() && resolved != null
+                                && "__other_option__"
+                                        .equalsIgnoreCase(String.valueOf(resolved.getValue()))) {
+                            localOtherText.put(qid, note);
+                            log.debug(
+                                    "Added 'other' text '{}' to localOtherText for resolved option in question {}",
+                                    note, qid);
+                        }
+                    } catch (Exception ex) {
+                        log.warn("Failed to resolve numeric option index '{}': {}", mainToken,
+                                ex.getMessage());
+                    }
                 }
-                option.setQuestion(question);
 
-                selections.put(question, option);
+                // Case 2: explicit other marker with note
+                if (resolved == null && "__other_option__".equalsIgnoreCase(mainToken)) {
+                    log.debug("Processing explicit other marker with note: '{}' for question {}",
+                            note, qid);
+
+                    // Find the 'Other' option in DB by value
+                    try {
+                        List<QuestionOption> options =
+                                optionRepository.findByQuestionIdOrderByPosition(question.getId());
+                        for (QuestionOption o : options) {
+                            if ("__other_option__".equalsIgnoreCase(String.valueOf(o.getValue()))) {
+                                resolved = o;
+                                break;
+                            }
+                        }
+                    } catch (Exception ignore) {
+                    }
+                    if (note != null && !note.isEmpty()) {
+                        localOtherText.put(qid, note);
+                        log.debug("Added 'other' text '{}' to localOtherText for question {}", note,
+                                qid);
+                    }
+                }
+
+                // Case 3: by exact label/value match (do NOT split on '-')
+                if (resolved == null) {
+                    List<QuestionOption> options =
+                            optionRepository.findByQuestionIdOrderByPosition(question.getId());
+                    for (QuestionOption o : options) {
+                        String ov = o.getValue() == null ? "" : o.getValue().toString();
+                        String ot = o.getText() == null ? "" : o.getText();
+                        if (raw.equals(ov) || raw.equalsIgnoreCase(ov) || raw.equals(ot)
+                                || raw.equalsIgnoreCase(ot)) {
+                            resolved = o;
+                            break;
+                        }
+                    }
+                }
+
+                // Fallback: create minimal option preserving the full raw value (no split)
+                if (resolved == null) {
+                    resolved = new QuestionOption();
+                    resolved.setQuestion(question);
+                    resolved.setText(raw);
+                    resolved.setValue(raw);
+                }
+
+                selections.put(question, resolved);
             }
             // expose per-submission other text map
             dataFillOtherTextByQuestion.set(localOtherText);
@@ -1138,6 +1225,43 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                 log.debug("Failed to handle fatal error: {}", ignore.getMessage());
             }
         }
+    }
+
+    private void scrollIntoView(WebDriver driver, WebElement element) {
+        try {
+            ((JavascriptExecutor) driver).executeScript(
+                    "arguments[0].scrollIntoView({block:'center', inline:'nearest'})", element);
+        } catch (Exception ignore) {
+        }
+    }
+
+    private boolean safeClick(WebDriver driver, WebDriverWait wait, WebElement element) {
+        int attempts = 0;
+        while (attempts < 3) {
+            try {
+                wait.until(ExpectedConditions.elementToBeClickable(element));
+                scrollIntoView(driver, element);
+                new Actions(driver).moveToElement(element).pause(Duration.ofMillis(50)).perform();
+                element.click();
+                return true;
+            } catch (StaleElementReferenceException | ElementClickInterceptedException e) {
+                attempts++;
+                try {
+                    Thread.sleep(200L * attempts);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                }
+            } catch (Exception e) {
+                try {
+                    scrollIntoView(driver, element);
+                    ((JavascriptExecutor) driver).executeScript("arguments[0].click()", element);
+                    return true;
+                } catch (Exception ignored) {
+                    attempts++;
+                }
+            }
+        }
+        return false;
     }
 
     private FormExtractionResult extractFormDataViaHttp(String formUrl) {
@@ -1899,6 +2023,21 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                     log.error("driver.close() also failed: {}", closeException.getMessage());
                 }
             }
+            // Cleanup isolated Chrome profile directory
+            try {
+                Path profile = driverProfileDirMap.remove(driver);
+                if (profile != null) {
+                    Files.walk(profile).sorted(Comparator.reverseOrder()).forEach(p -> {
+                        try {
+                            Files.deleteIfExists(p);
+                        } catch (Exception ignore) {
+                        }
+                    });
+                    log.debug("Removed isolated Chrome profile at {}", profile);
+                }
+            } catch (Exception cleanupEx) {
+                log.debug("Failed to cleanup Chrome profile dir: {}", cleanupEx.getMessage());
+            }
         } catch (Exception e) {
             log.warn("Unexpected error during driver shutdown: {}", e.getMessage());
         }
@@ -2152,6 +2291,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     private WebDriver openBrowser(String formUrl, boolean humanLike) throws InterruptedException {
         // Setup Chrome options with optimized settings
         ChromeOptions options = new ChromeOptions();
+        Path userDataDir = null;
 
         // Essential Chrome options for stability and performance
         options.addArguments("--remote-allow-origins=*");
@@ -2221,12 +2361,33 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                 Collections.singletonList("enable-automation"));
         options.setExperimentalOption("useAutomationExtension", false);
 
+        // Use isolated Chrome profile per session
+        try {
+            userDataDir = Files.createTempDirectory("df-chrome-");
+            options.addArguments("--user-data-dir=" + userDataDir.toAbsolutePath());
+            options.addArguments("--profile-directory=Default");
+            options.addArguments("--incognito");
+            options.addArguments("--disable-background-networking");
+            options.addArguments("--dns-prefetch-disable");
+            options.addArguments("--aggressive-cache-discard");
+            options.addArguments("--disable-cache");
+            options.addArguments("--disable-application-cache");
+            log.debug("Created isolated Chrome user-data-dir at {}", userDataDir);
+        } catch (Exception e) {
+            log.warn("Failed to create isolated Chrome profile directory: {}", e.getMessage());
+        }
+
         // Setup Chrome driver
         WebDriver driver = new ChromeDriver(options);
         log.info("ChromeDriver created successfully");
 
         if (driver == null) {
             throw new RuntimeException("Failed to create ChromeDriver");
+        }
+
+        // Track profile dir for later cleanup
+        if (userDataDir != null) {
+            driverProfileDirMap.put(driver, userDataDir);
         }
 
         // Set viewport size after driver creation for headless mode
@@ -2431,14 +2592,19 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(timeoutSeconds));
 
             // First verify this is the correct question by checking its title
-            String actualQuestionTitle = questionElement
-                    .findElement(By.cssSelector("[role='heading']")).getText().trim();
-            // Get title from the heading text directly, don't rely on aria-label
-            String expectedTitle = actualQuestionTitle;
+            String expectedTitle = "";
+            try {
+                WebElement heading =
+                        questionElement.findElement(By.cssSelector("[role='heading']"));
+                expectedTitle = heading.getText() == null ? "" : heading.getText().trim();
+            } catch (Exception ignore) {
+            }
 
             // Find all checkbox options within the question container
-            List<WebElement> checkboxOptions =
-                    questionElement.findElements(By.cssSelector("[role='checkbox']"));
+            By optionSel = By.cssSelector("[role='checkbox']");
+            wait.until(ExpectedConditions.presenceOfAllElementsLocatedBy(optionSel));
+            wait.until(ExpectedConditions.visibilityOfAllElementsLocatedBy(optionSel));
+            List<WebElement> checkboxOptions = questionElement.findElements(optionSel);
 
             if (checkboxOptions.isEmpty()) {
                 log.warn("No checkbox options found for question '{}' with text: {}", expectedTitle,
@@ -2451,7 +2617,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             // This allows selecting options whose labels contain commas or pipes.
             String fullInput = optionText == null ? "" : optionText.trim();
             if (!fullInput.isEmpty()) {
-                boolean selectedByFullMatch = trySelectCheckboxOptionByExactFullString(wait,
+                boolean selectedByFullMatch = trySelectCheckboxOptionByExactFullString(driver, wait,
                         checkboxOptions, fullInput, expectedTitle);
                 if (selectedByFullMatch) {
                     // Selected by full exact match; do not split further to avoid unintended
@@ -2494,8 +2660,9 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                     String dataValue = checkbox.getAttribute("data-answer-value");
                     if (dataValue != null && (dataValue.trim().equals(token)
                             || dataValue.trim().equalsIgnoreCase(token))) {
-                        wait.until(ExpectedConditions.elementToBeClickable(checkbox));
-                        checkbox.click();
+                        if (!safeClick(driver, wait, checkbox)) {
+                            continue;
+                        }
                         log.info("Checked checkbox option (data-value) '{}' for question '{}'",
                                 token, expectedTitle);
                         if ("__other_option__".equalsIgnoreCase(dataValue)
@@ -2504,6 +2671,9 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                         }
                         matched = true;
                         selectedCount++;
+                        // re-query after click to avoid stale references
+                        wait.until(ExpectedConditions.presenceOfAllElementsLocatedBy(optionSel));
+                        checkboxOptions = questionElement.findElements(optionSel);
                         break;
                     }
                 }
@@ -2515,8 +2685,9 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                     String ariaLabel = checkbox.getAttribute("aria-label");
                     if (ariaLabel != null && (ariaLabel.trim().equals(token)
                             || ariaLabel.trim().equalsIgnoreCase(token))) {
-                        wait.until(ExpectedConditions.elementToBeClickable(checkbox));
-                        checkbox.click();
+                        if (!safeClick(driver, wait, checkbox)) {
+                            continue;
+                        }
                         log.info("Checked checkbox option (aria-label) '{}' for question '{}'",
                                 token, expectedTitle);
                         if ("__other_option__"
@@ -2526,6 +2697,8 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                         }
                         matched = true;
                         selectedCount++;
+                        wait.until(ExpectedConditions.presenceOfAllElementsLocatedBy(optionSel));
+                        checkboxOptions = questionElement.findElements(optionSel);
                         break;
                     }
                 }
@@ -2545,8 +2718,9 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                     }
                     if (!checkboxText.isEmpty() && (checkboxText.equals(token)
                             || checkboxText.equalsIgnoreCase(token))) {
-                        wait.until(ExpectedConditions.elementToBeClickable(checkbox));
-                        checkbox.click();
+                        if (!safeClick(driver, wait, checkbox)) {
+                            continue;
+                        }
                         log.info("Checked checkbox option (text content) '{}' for question '{}'",
                                 token, expectedTitle);
                         if ("__other_option__"
@@ -2557,6 +2731,8 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                         }
                         matched = true;
                         selectedCount++;
+                        wait.until(ExpectedConditions.presenceOfAllElementsLocatedBy(optionSel));
+                        checkboxOptions = questionElement.findElements(optionSel);
                         break;
                     }
                 }
@@ -2660,6 +2836,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             }
 
             WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(10));
+            scrollIntoView(driver, input);
             wait.until(ExpectedConditions.elementToBeClickable(input));
 
             input.click();
@@ -2692,7 +2869,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
      * This supports option labels that contain separators like commas or pipes without breaking
      * existing multi-select behavior.
      */
-    private boolean trySelectCheckboxOptionByExactFullString(WebDriverWait wait,
+    private boolean trySelectCheckboxOptionByExactFullString(WebDriver driver, WebDriverWait wait,
             List<WebElement> checkboxOptions, String fullLabel, String questionTitle) {
         String target = fullLabel.trim();
         for (WebElement checkbox : checkboxOptions) {
@@ -2701,8 +2878,9 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                 String dataValue = checkbox.getAttribute("data-answer-value");
                 if (dataValue != null && (dataValue.trim().equals(target)
                         || dataValue.trim().equalsIgnoreCase(target))) {
-                    wait.until(ExpectedConditions.elementToBeClickable(checkbox));
-                    checkbox.click();
+                    if (!safeClick(driver, wait, checkbox)) {
+                        continue;
+                    }
                     log.info(
                             "Checked checkbox option (full match data-value) '{}' for question '{}'",
                             target, questionTitle);
@@ -2713,8 +2891,9 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                 String ariaLabel = checkbox.getAttribute("aria-label");
                 if (ariaLabel != null && (ariaLabel.trim().equals(target)
                         || ariaLabel.trim().equalsIgnoreCase(target))) {
-                    wait.until(ExpectedConditions.elementToBeClickable(checkbox));
-                    checkbox.click();
+                    if (!safeClick(driver, wait, checkbox)) {
+                        continue;
+                    }
                     log.info(
                             "Checked checkbox option (full match aria-label) '{}' for question '{}'",
                             target, questionTitle);
@@ -2733,8 +2912,9 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                 }
                 if (!checkboxText.isEmpty()
                         && (checkboxText.equals(target) || checkboxText.equalsIgnoreCase(target))) {
-                    wait.until(ExpectedConditions.elementToBeClickable(checkbox));
-                    checkbox.click();
+                    if (!safeClick(driver, wait, checkbox)) {
+                        continue;
+                    }
                     log.info("Checked checkbox option (full match text) '{}' for question '{}'",
                             target, questionTitle);
                     return true;

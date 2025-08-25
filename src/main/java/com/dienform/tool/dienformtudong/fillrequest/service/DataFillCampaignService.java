@@ -667,6 +667,9 @@ public class DataFillCampaignService {
 
           // Check if this is an "other" option with custom text (format: "7-text123")
           if (hasOtherOption && other != null && !other.isEmpty()) {
+            log.debug("Processing potential 'other' option: main='{}', other='{}' for question {}",
+                main, other, question.getId());
+
             // This is likely an "other" option with custom text
             // Check if main part is a number (position) that corresponds to the "other" option
             if (main.matches("\\d+")) {
@@ -682,12 +685,28 @@ public class DataFillCampaignService {
                     && otherOption.getPosition() == position) {
                   // This is indeed an "other" option with custom text
                   log.debug(
-                      "Converting 'other' option with position {} and text '{}' for question {}",
+                      "Converting 'other' option with matching position {} and text '{}' for question {}",
                       position, other, question.getId());
                   return "__other_option__" + "-" + other;
+                } else {
+                  // If position doesn't match, but this is the only option with text after dash,
+                  // and the text doesn't match any predefined option, treat it as "other" text
+                  boolean isOptionValue = getQuestionOptionsSafely(question).stream()
+                      .anyMatch(opt -> opt.getValue() != null && other.equals(opt.getValue()));
+
+                  if (!isOptionValue) {
+                    log.debug(
+                        "Converting 'other' option with non-matching position {} and text '{}' for question {} (text not in predefined options)",
+                        position, other, question.getId());
+                    return "__other_option__" + "-" + other;
+                  } else {
+                    log.debug(
+                        "Text '{}' matches predefined option, not treating as 'other' for question {}",
+                        other, question.getId());
+                  }
                 }
               } catch (NumberFormatException e) {
-                // Ignore if position is not a valid number
+                log.debug("Invalid position number '{}' for question {}", main, question.getId());
               }
             }
           }

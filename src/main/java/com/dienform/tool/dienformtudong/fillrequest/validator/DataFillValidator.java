@@ -459,9 +459,19 @@ public class DataFillValidator {
 
     // Support optional "-<otherText>" suffix; we only validate the left part (indices)
     String raw = value == null ? "" : value.trim();
+    String main = raw;
+    String otherText = null;
+
+    // Only split on dash if left part is numeric or __other_option__
     int dashIdx = raw.lastIndexOf('-');
-    String main = dashIdx > 0 ? raw.substring(0, dashIdx).trim() : raw;
-    String otherText = dashIdx > 0 ? raw.substring(dashIdx + 1).trim() : null;
+    if (dashIdx > 0) {
+      String left = raw.substring(0, dashIdx).trim();
+      String right = raw.substring(dashIdx + 1).trim();
+      if (!right.isEmpty() && (left.matches("\\d+") || "__other_option__".equalsIgnoreCase(left))) {
+        main = left;
+        otherText = right;
+      }
+    }
 
     List<QuestionOption> options = getQuestionOptionsSafely(question).stream()
         .sorted((a, b) -> Integer.compare(a.getPosition(), b.getPosition())).toList();
@@ -513,9 +523,19 @@ public class DataFillValidator {
 
     // Support optional "-<otherText>" suffix; validate left part (indices) with '|' only
     String raw = value == null ? "" : value.trim();
+    String main = raw;
+    String otherText = null;
+
+    // Only split on dash if left part is numeric or __other_option__
     int dashIdx = raw.lastIndexOf('-');
-    String main = dashIdx > 0 ? raw.substring(0, dashIdx).trim() : raw;
-    String otherText = dashIdx > 0 ? raw.substring(dashIdx + 1).trim() : null;
+    if (dashIdx > 0) {
+      String left = raw.substring(0, dashIdx).trim();
+      String right = raw.substring(dashIdx + 1).trim();
+      if (!right.isEmpty() && (left.matches("\\d+") || "__other_option__".equalsIgnoreCase(left))) {
+        main = left;
+        otherText = right;
+      }
+    }
 
     List<QuestionOption> options = getQuestionOptionsSafely(question).stream()
         .sorted((a, b) -> Integer.compare(a.getPosition(), b.getPosition())).toList();
