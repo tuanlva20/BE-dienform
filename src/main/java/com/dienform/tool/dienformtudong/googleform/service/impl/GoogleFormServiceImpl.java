@@ -160,6 +160,18 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     // ConcurrentHashMap<>();
     // private final Map<String, WebElement> questionMappingCache = new ConcurrentHashMap<>();
 
+    @Value("${google.form.fast-timeout-seconds:300}")
+    private long fastTimeoutSeconds;
+
+    @Value("${google.form.human-timeout-seconds:1800}")
+    private long humanTimeoutSeconds;
+
+    @Value("${google.form.heavy-load-threshold:250}")
+    private int heavyLoadThreshold;
+
+    @Value("${google.form.heavy-timeout-multiplier:2.0}")
+    private double heavyTimeoutMultiplier;
+
     // OPTIMIZED: Thread pool for parallel question processing
     private final ExecutorService questionProcessingExecutor = Executors.newFixedThreadPool(5);
 
@@ -524,11 +536,14 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             CompletableFuture<Void> allTasks =
                     CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
             try {
-                // Wait for all tasks with timeout - 30 minutes for human-like mode, 5 minutes for
-                // fast mode
-                long timeoutSeconds = fillRequest.isHumanLike() ? 1800 : 300; // 30 minutes for
-                                                                              // human-like, 5
-                                                                              // minutes for fast
+                // Wait for all tasks with configurable timeout; increase under heavy load
+                long baseTimeoutSeconds =
+                        fillRequest.isHumanLike() ? humanTimeoutSeconds : fastTimeoutSeconds;
+                boolean heavyLoad = futures.size() >= heavyLoadThreshold;
+                long timeoutSeconds = heavyLoad
+                        ? (long) Math
+                                .ceil(baseTimeoutSeconds * Math.max(1.0, heavyTimeoutMultiplier))
+                        : baseTimeoutSeconds;
                 allTasks.get(timeoutSeconds, TimeUnit.SECONDS);
                 log.info("All {} form filling tasks completed successfully for fillRequestId: {}",
                         futures.size(), fillRequestId);

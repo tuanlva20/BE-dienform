@@ -57,6 +57,18 @@ public class DataFillCampaignService {
   @Value("${google.form.thread-pool-size:2}")
   private int threadPoolSize;
 
+  @Value("${google.form.fast-timeout-seconds:300}")
+  private long fastTimeoutSeconds;
+
+  @Value("${google.form.human-timeout-seconds:1800}")
+  private long humanTimeoutSeconds;
+
+  @Value("${google.form.heavy-load-threshold:250}")
+  private int heavyLoadThreshold;
+
+  @Value("${google.form.heavy-timeout-multiplier:2.0}")
+  private double heavyTimeoutMultiplier;
+
   private ExecutorService executorService;
 
   @Autowired
@@ -187,7 +199,7 @@ public class DataFillCampaignService {
         // Monitor thread pool status
         logThreadPoolStatus("After submitting task " + taskIndex);
 
-        scheduleFormFill(fillRequest, originalRequest, questionMap, sheetData, task)
+        scheduleFormFill(fillRequest, originalRequest, questionMap, sheetData, task, totalTasks)
             .thenAccept(success -> {
               int completed = completedTasks.incrementAndGet();
               if (success) {
@@ -381,7 +393,7 @@ public class DataFillCampaignService {
 
   private CompletableFuture<Boolean> scheduleFormFill(FillRequest fillRequest,
       DataFillRequestDTO originalRequest, Map<UUID, Question> questionMap,
-      List<Map<String, Object>> sheetData, ScheduledTask task) {
+      List<Map<String, Object>> sheetData, ScheduledTask task, int totalTasks) {
 
     log.info(
         "Scheduling form fill for task row {} (fillRequest: {}) - Submitting to executor queue",
@@ -444,9 +456,12 @@ public class DataFillCampaignService {
       }
     }, executorService);
 
-    // Add timeout mechanism - EXACT LOGIC FROM API /form/{formId}/fill-request
-    // 30 minutes for human-like mode, 5 minutes for fast mode
-    long timeoutSeconds = fillRequest.isHumanLike() ? 1800 : 300;
+    // Add timeout mechanism - configurable, and increased under heavy load
+    long baseTimeoutSeconds = fillRequest.isHumanLike() ? humanTimeoutSeconds : fastTimeoutSeconds;
+    boolean heavyLoad = totalTasks >= heavyLoadThreshold;
+    long timeoutSeconds =
+        heavyLoad ? (long) Math.ceil(baseTimeoutSeconds * Math.max(1.0, heavyTimeoutMultiplier))
+            : baseTimeoutSeconds;
     CompletableFuture<Boolean> timeoutFuture =
         future.orTimeout(timeoutSeconds, TimeUnit.SECONDS).exceptionally(throwable -> {
           if (throwable instanceof java.util.concurrent.TimeoutException) {
