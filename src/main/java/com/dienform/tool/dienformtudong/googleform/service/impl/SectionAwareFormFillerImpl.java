@@ -67,6 +67,9 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
   @Value("${google.form.auto-submit:true}")
   private boolean autoSubmitEnabled;
 
+  @Value("${google.form.submit-when-visible:false}")
+  private boolean submitWhenVisible;
+
   // Store the current fill request ID for "other" text lookup
   private UUID currentFillRequestId;
 
@@ -354,10 +357,16 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
           // CRITICAL FIX: Improved navigation logic to ensure we reach Submit button
           // Check if Submit button is visible first
           if (isSubmitButtonVisible(driver)) {
-            log.info(
-                "Submit button visible - reached final section, but continuing to process remaining sections");
-            // Don't break here, continue processing remaining sections
-            // The final section handling will be done after the loop
+            if (submitWhenVisible) {
+              log.info("Submit button visible - submitWhenVisible enabled, submitting now");
+              clickSubmitButton(driver, wait, humanLike);
+              return true;
+            } else {
+              log.info(
+                  "Submit button visible - reached final section, but continuing to process remaining sections");
+              // Don't break here, continue processing remaining sections
+              // The final section handling will be done after the loop
+            }
           }
 
           // Check if Next button is visible

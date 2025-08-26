@@ -85,6 +85,7 @@ google:
     headless: true # Enable headless mode in production
     async-enabled: true
     cache-enabled: true
+    submit-when-visible: true
 
     # Advanced settings
     similarity-threshold: 0.8 # Higher threshold for production
