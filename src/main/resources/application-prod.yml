@@ -86,7 +86,7 @@ google:
     async-enabled: true
     cache-enabled: true
     submit-when-visible: true
-    fast-timeout-seconds: 1200
+    fast-timeout-seconds: 12000
     human-timeout-seconds: 5400
     heavy-load-threshold: 250
     heavy-timeout-multiplier: 2.0
