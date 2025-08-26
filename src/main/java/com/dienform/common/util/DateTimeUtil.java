@@ -4,11 +4,13 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Utility class for handling timezone-aware datetime operations Ensures all datetime operations use
  * Vietnam timezone (Asia/Ho_Chi_Minh)
  */
+@Slf4j
 public class DateTimeUtil {
 
   private static final ZoneId VIETNAM_ZONE = ZoneId.of("Asia/Ho_Chi_Minh");
@@ -90,17 +92,16 @@ public class DateTimeUtil {
       // Handle ISO 8601 format with Z suffix (UTC)
       if (isoString.endsWith("Z")) {
         java.time.Instant instant = java.time.Instant.parse(isoString);
-        return LocalDateTime.ofInstant(instant, VIETNAM_ZONE);
+        LocalDateTime result = LocalDateTime.ofInstant(instant, VIETNAM_ZONE);
+        log.debug("Parsed UTC date '{}' to Vietnam time: {}", isoString, result);
+        return result;
       }
 
       // Handle ISO 8601 format without Z suffix - treat as local time in Vietnam timezone
-      try {
-        return LocalDateTime.parse(isoString, DateTimeFormatter.ISO_LOCAL_DATE_TIME);
-      } catch (Exception e2) {
-        // If local parsing fails, try adding Z and parsing as UTC
-        java.time.Instant instant = java.time.Instant.parse(isoString + "Z");
-        return LocalDateTime.ofInstant(instant, VIETNAM_ZONE);
-      }
+      // This ensures consistency between startDate and endDate parsing
+      LocalDateTime result = LocalDateTime.parse(isoString, DateTimeFormatter.ISO_LOCAL_DATE_TIME);
+      log.debug("Parsed local date '{}' as Vietnam time: {}", isoString, result);
+      return result;
 
     } catch (Exception e) {
       throw new IllegalArgumentException("Invalid ISO 8601 datetime format: " + isoString, e);
