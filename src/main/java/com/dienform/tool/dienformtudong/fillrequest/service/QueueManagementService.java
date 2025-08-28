@@ -128,6 +128,7 @@ public class QueueManagementService {
   private final QuestionRepository questionRepository;
   private final GoogleFormService googleFormService;
   private final DataFillCampaignService dataFillCampaignService;
+  private final BatchDataFillCampaignService batchDataFillCampaignService;
   private final ScheduleDistributionService scheduleDistributionService;
   private final GoogleSheetsService googleSheetsService;
   private final FillRequestRealtimeGateway realtimeGateway;
@@ -135,6 +136,12 @@ public class QueueManagementService {
 
   @Value("${google.form.thread-pool-size:5}")
   private int threadPoolSize;
+
+  @Value("${google.form.pool.human.min:1}")
+  private int humanMin;
+
+  @Value("${google.form.pool.fast.min:1}")
+  private int fastMin;
 
   @Value("${queue.max-size:100}")
   private int maxQueueSize;
@@ -329,49 +336,75 @@ public class QueueManagementService {
       log.debug("Queue breakdown: {} non-human requests, {} human requests",
           nonHumanRequests.size(), humanRequests.size());
 
-      // Process up to available capacity
+      // Process up to available capacity with reserved slots for fast and human if pending
       int availableSlots = threadPoolSize - activeRequests.get();
       int processed = 0;
 
-      // First, process non-human requests (higher priority)
+      boolean hasHuman = !humanRequests.isEmpty();
+      boolean hasFast = !nonHumanRequests.isEmpty();
+
+      int reservedForHuman = hasHuman ? Math.max(1, humanMin) : 0;
+      int reservedForFast = hasFast ? Math.max(1, fastMin) : 0;
+
+      int remainingSlots = availableSlots;
+
+      // 1) Start reserved FAST first to ensure fast doesn't wait when pending
+      int fastStarted = 0;
       for (FillRequest request : nonHumanRequests) {
-        if (processed >= availableSlots) {
-          log.debug("Reached capacity limit ({} slots), stopping processing", availableSlots);
+        if (remainingSlots <= 0 || fastStarted >= reservedForFast)
           break;
-        }
-
-        // Check if request can be processed (startDate check)
-        if (request.getStartDate() != null && request.getStartDate().isAfter(DateTimeUtil.now())) {
-          log.debug("Skipping non-human request {} - startDate {} is in the future",
-              request.getId(), DateTimeUtil.formatForLog(request.getStartDate()));
+        if (request.getStartDate() != null && request.getStartDate().isAfter(DateTimeUtil.now()))
           continue;
-        }
-
         if (processQueuedRequest(request)) {
+          fastStarted++;
           processed++;
-          log.info("Started processing non-human queued request: {} ({}/{})", request.getId(),
-              processed, availableSlots);
+          remainingSlots--;
+          log.info(
+              "Started processing reserved FAST request: {} (fast started: {}, remaining slots: {})",
+              request.getId(), fastStarted, remainingSlots);
         }
       }
 
-      // Then, process human requests if there's still capacity
+      // 2) Start reserved HUMAN next to ensure human doesn't wait when pending
+      int humanStarted = 0;
       for (FillRequest request : humanRequests) {
-        if (processed >= availableSlots) {
-          log.debug("Reached capacity limit ({} slots), stopping processing", availableSlots);
+        if (remainingSlots <= 0 || humanStarted >= reservedForHuman)
           break;
-        }
-
-        // Check if request can be processed (startDate check)
-        if (request.getStartDate() != null && request.getStartDate().isAfter(DateTimeUtil.now())) {
-          log.debug("Skipping human request {} - startDate {} is in the future", request.getId(),
-              DateTimeUtil.formatForLog(request.getStartDate()));
+        if (request.getStartDate() != null && request.getStartDate().isAfter(DateTimeUtil.now()))
           continue;
+        if (processQueuedRequest(request)) {
+          humanStarted++;
+          processed++;
+          remainingSlots--;
+          log.info(
+              "Started processing reserved HUMAN request: {} (humans started: {}, remaining slots: {})",
+              request.getId(), humanStarted, remainingSlots);
         }
+      }
 
+      // 3) Fill remaining with non-human then human
+      for (FillRequest request : nonHumanRequests) {
+        if (remainingSlots <= 0)
+          break;
+        if (request.getStatus() == FillRequestStatusEnum.IN_PROCESS)
+          continue;
+        if (request.getStartDate() != null && request.getStartDate().isAfter(DateTimeUtil.now()))
+          continue;
         if (processQueuedRequest(request)) {
           processed++;
-          log.info("Started processing human queued request: {} ({}/{})", request.getId(),
-              processed, availableSlots);
+          remainingSlots--;
+        }
+      }
+      for (FillRequest request : humanRequests) {
+        if (remainingSlots <= 0)
+          break;
+        if (request.getStatus() == FillRequestStatusEnum.IN_PROCESS)
+          continue;
+        if (request.getStartDate() != null && request.getStartDate().isAfter(DateTimeUtil.now()))
+          continue;
+        if (processQueuedRequest(request)) {
+          processed++;
+          remainingSlots--;
         }
       }
 
@@ -481,19 +514,14 @@ public class QueueManagementService {
       // Reconstruct DataFillRequestDTO
       DataFillRequestDTO reconstructedRequest = reconstructDataFillRequest(fillRequest, mappings);
 
-      // Create schedule distribution
-      List<ScheduleDistributionService.ScheduledTask> schedule =
-          scheduleDistributionService.distributeSchedule(fillRequest.getSurveyCount(),
-              fillRequest.getStartDate(), fillRequest.getEndDate(), fillRequest.isHumanLike(),
-              fillRequest.getCompletedSurvey());
-
-      // Execute campaign
-      log.info("About to execute campaign for request: {} with {} tasks", fillRequest.getId(),
-          schedule.size());
-      dataFillCampaignService
-          .executeCampaign(fillRequest, reconstructedRequest, questions, schedule)
+      // Execute campaign using batch processing
+      log.info("About to execute batch campaign for request: {} with {} forms", fillRequest.getId(),
+          fillRequest.getSurveyCount());
+      batchDataFillCampaignService
+          .executeBatchCampaign(fillRequest, reconstructedRequest, questions)
           .exceptionally(throwable -> {
-            log.error("Campaign execution failed for request: {}", fillRequest.getId(), throwable);
+            log.error("Batch campaign execution failed for request: {}", fillRequest.getId(),
+                throwable);
             handleProcessingError(fillRequest, throwable);
             return null;
           });
@@ -533,12 +561,25 @@ public class QueueManagementService {
           log.error("Request {} exceeded max retries, marking as FAILED", fillRequest.getId());
         }
       } else {
-        // Re-queue for retry and update retry count atomically
-        addToQueue(fillRequest);
-        int updated = fillRequestRepository.updateRetryCount(fillRequest.getId(), newRetryCount);
-        if (updated > 0) {
-          log.info("Re-queued request {} for retry (attempt {}/{})", fillRequest.getId(),
-              newRetryCount, fillRequest.getMaxRetries());
+        // Chỉ re-queue nếu status hiện tại là QUEUED
+        FillRequest current =
+            fillRequestRepository.findById(fillRequest.getId()).orElse(fillRequest);
+        if (current.getStatus() == FillRequestStatusEnum.QUEUED) {
+          // Re-queue for retry and update retry count atomically
+          addToQueue(fillRequest);
+          int updated = fillRequestRepository.updateRetryCount(fillRequest.getId(), newRetryCount);
+          if (updated > 0) {
+            log.info("Re-queued request {} for retry (attempt {}/{})", fillRequest.getId(),
+                newRetryCount, fillRequest.getMaxRetries());
+          }
+        } else {
+          // Nếu đã IN_PROCESS thì set FAILED
+          int updated = fillRequestRepository.updateStatusAndRetryCount(fillRequest.getId(),
+              FillRequestStatusEnum.FAILED, newRetryCount);
+          if (updated > 0) {
+            log.error("Request {} failed during processing, marking as FAILED",
+                fillRequest.getId());
+          }
         }
       }
 

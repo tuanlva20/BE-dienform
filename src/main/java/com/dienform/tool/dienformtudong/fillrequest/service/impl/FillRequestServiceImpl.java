@@ -21,6 +21,7 @@ import com.dienform.tool.dienformtudong.answerdistribution.repository.AnswerDist
 import com.dienform.tool.dienformtudong.datamapping.dto.request.DataFillRequestDTO;
 import com.dienform.tool.dienformtudong.datamapping.service.GoogleSheetsService;
 import com.dienform.tool.dienformtudong.fillrequest.dto.request.FillRequestDTO;
+import com.dienform.tool.dienformtudong.fillrequest.dto.response.BatchProgressResponse;
 import com.dienform.tool.dienformtudong.fillrequest.dto.response.FillRequestResponse;
 import com.dienform.tool.dienformtudong.fillrequest.entity.FillRequest;
 import com.dienform.tool.dienformtudong.fillrequest.entity.FillRequestMapping;
@@ -29,6 +30,8 @@ import com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum;
 import com.dienform.tool.dienformtudong.fillrequest.mapper.FillRequestMapper;
 import com.dienform.tool.dienformtudong.fillrequest.repository.FillRequestMappingRepository;
 import com.dienform.tool.dienformtudong.fillrequest.repository.FillRequestRepository;
+import com.dienform.tool.dienformtudong.fillrequest.service.BatchDataFillCampaignService;
+import com.dienform.tool.dienformtudong.fillrequest.service.BatchProcessingService;
 import com.dienform.tool.dienformtudong.fillrequest.service.DataFillCampaignService;
 import com.dienform.tool.dienformtudong.fillrequest.service.FillRequestService;
 import com.dienform.tool.dienformtudong.fillrequest.service.PriorityCalculationService;
@@ -64,6 +67,7 @@ public class FillRequestServiceImpl implements FillRequestService {
   private final ScheduleDistributionService scheduleDistributionService;
   private final GoogleSheetsService googleSheetsService;
   private final DataFillCampaignService dataFillCampaignService;
+  private final BatchDataFillCampaignService batchDataFillCampaignService;
   private final ApplicationEventPublisher eventPublisher;
   private final com.dienform.realtime.FillRequestRealtimeGateway realtimeGateway;
   private final com.dienform.common.util.CurrentUserUtil currentUserUtil;
@@ -330,24 +334,16 @@ public class FillRequestServiceImpl implements FillRequestService {
     // The "other" option text will be processed directly in DataFillCampaignService
     // and passed through localOtherText map during form filling
     /*
-    List<AnswerDistribution> otherDistributions =
-        createOtherAnswerDistributions(savedRequest, questions, dataFillRequestDTO, sheetData);
-    if (!otherDistributions.isEmpty()) {
-      distributionRepository.saveAll(otherDistributions);
-      log.info("Created {} AnswerDistribution records for 'other' options with valueString",
-          otherDistributions.size());
-    }
-    */
-    log.info("Skipping AnswerDistribution creation for 'other' options - using direct processing from DataFillCampaignService");
+     * List<AnswerDistribution> otherDistributions = createOtherAnswerDistributions(savedRequest,
+     * questions, dataFillRequestDTO, sheetData); if (!otherDistributions.isEmpty()) {
+     * distributionRepository.saveAll(otherDistributions);
+     * log.info("Created {} AnswerDistribution records for 'other' options with valueString",
+     * otherDistributions.size()); }
+     */
+    log.info(
+        "Skipping AnswerDistribution creation for 'other' options - using direct processing from DataFillCampaignService");
 
-    // Step 7: Create schedule distribution
-    // Ensure the number of scheduled tasks matches the persisted surveyCount
-    int effectiveTaskCount = savedRequest.getSurveyCount();
-    List<ScheduleDistributionService.ScheduledTask> schedule =
-        scheduleDistributionService.distributeSchedule(effectiveTaskCount, startDate, endDate,
-            savedRequest.isHumanLike(), savedRequest.getCompletedSurvey());
-
-    // Step 8: Store data mapping for campaign execution
+    // Step 7: Store data mapping for campaign execution
     List<FillRequestMapping> mappings = new ArrayList<>();
     for (var mapping : dataFillRequestDTO.getMappings()) {
       String rawQuestionId = mapping.getQuestionId();
@@ -363,20 +359,55 @@ public class FillRequestServiceImpl implements FillRequestService {
     }
     fillRequestMappingRepository.saveAll(mappings);
 
-    log.info("Created data fill request with ID: {} and {} scheduled tasks with {} mappings",
-        savedRequest.getId(), schedule.size(), mappings.size());
+    log.info("Created data fill request with ID: {} with {} mappings", savedRequest.getId(),
+        mappings.size());
 
-    // Step 9: Always add to queue for proper scheduling
+    // Step 8: Add to queue for proper scheduling
     // This ensures consistent queue management and prevents race conditions
     log.info("Adding data fill request {} to queue for proper scheduling", savedRequest.getId());
 
     // The request is already in QUEUED status, so we just need to ensure it's properly queued
     // The scheduler will pick it up when there's capacity and it's time to start
+    // Batch processing will be handled by BatchDataFillCampaignService when the request is
+    // processed
 
     return fillRequestMapper.toReponse(savedRequest);
   }
 
+  @Override
+  public BatchProgressResponse getBatchProgress(UUID requestId) {
+    try {
+      // Check if batch processing is enabled
+      boolean batchProcessingEnabled = batchDataFillCampaignService.isBatchProcessingEnabled();
 
+      if (!batchProcessingEnabled) {
+        return BatchProgressResponse.builder().batchProcessingEnabled(false)
+            .status("BATCH_PROCESSING_DISABLED").message("Batch processing is not enabled").build();
+      }
+
+      // Get batch progress from BatchDataFillCampaignService
+      BatchProcessingService.BatchProgress progress =
+          batchDataFillCampaignService.getBatchProgress(requestId);
+
+      if (progress == null) {
+        return BatchProgressResponse.builder().batchProcessingEnabled(true)
+            .status("NO_BATCH_SCHEDULE").message("No batch schedule found for this request")
+            .build();
+      }
+
+      return BatchProgressResponse.builder().currentBatch(progress.getCurrentBatch())
+          .totalBatches(progress.getTotalBatches()).batchSize(progress.getBatchSize())
+          .estimatedCompletionDate(progress.getEstimatedCompletionDate())
+          .adjustedForTimeConstraint(progress.isAdjustedForTimeConstraint())
+          .batchProcessingEnabled(true).status("BATCH_IN_PROGRESS")
+          .message("Batch processing in progress").build();
+
+    } catch (Exception e) {
+      log.error("Error getting batch progress for request {}: {}", requestId, e.getMessage(), e);
+      return BatchProgressResponse.builder().batchProcessingEnabled(true).status("ERROR")
+          .message("Error retrieving batch progress: " + e.getMessage()).build();
+    }
+  }
 
   /**
    * Calculate priority for a fill request based on business logic

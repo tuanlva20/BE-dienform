@@ -28,6 +28,7 @@ spring:
     password: ${DATABASE_PASSWORD:admin@}
     driver-class-name: com.mysql.cj.jdbc.Driver
     hikari:
+      connection-init-sql: "SET SESSION time_zone = '+07:00'"
       maximum-pool-size: 15
       minimum-idle: 8
       connection-timeout: 30000
@@ -73,20 +74,53 @@ google:
   api:
     key: ${GOOGLE_API_KEY:AIzaSyBCFk8JZ8OYLVEjs92cSLfcccyFH7VyeU0}
   form:
-    # Performance settings optimized for production
-    timeout-seconds: 60
-    thread-pool-size: 2
-    max-retries: 2
-    retry-delay-ms: 2000
+    # Performance settings optimized for 2-core production server
+    timeout-seconds: 60 # Increased for production stability
+    thread-pool-size: 4 # Optimized for 2 cores (1 human + 3 fast)
+    max-retries: 2 # Reduced from 3 to save memory
+    retry-delay-ms: 2000 # Increased from 1000ms
+    per-request:
+      max-inflight: 2
 
     # Feature flags for production
     auto-submit: true
     headless: true # Enable headless mode in production
     async-enabled: true
     cache-enabled: true
+    submit-when-visible: true
+
+    # Adaptive timeout settings
+    adaptive-timeout:
+      base-form-timeout: 300 # 5 phút cho mỗi form
+      max-form-timeout: 1800 # 30 phút tối đa cho mỗi form
+      queue-wait-multiplier: 60 # 1 phút/queue position
+
+    # Circuit breaker settings
+    circuit-breaker:
+      max-failures: 3 # Skip form sau 3 lần fail
+      timeout-seconds: 60 # Reset circuit breaker sau 1 phút
+      skip-failed-forms: true # Bỏ qua form lỗi
+
+    # Legacy timeout settings (for backward compatibility)
+    fast-timeout-seconds: 300 # 5 phút cho fast mode
+    human-timeout-seconds: 600 # 10 phút cho human-like
+    heavy-load-threshold: 25 # Reduced threshold for 2-core server
+    heavy-timeout-multiplier: 1.5 # Reduced multiplier for memory efficiency
 
     # Advanced settings
-    similarity-threshold: 0.8 # Higher threshold for production
+    similarity-threshold: 0.7
+
+    # Batch processing settings
+    batch-size: 25 # Reduced for 2-core server
+    enable-batch-processing: true
+
+    # Adaptive thread pool settings
+    pool:
+      rebalance-ms: 5000 # Less frequent rebalancing to save CPU
+      human:
+        min: 1 # Minimum 1 human thread
+      fast:
+        min: 3 # Minimum 3 fast threads for parallel processing
   # Google OAuth Configuration
   oauth:
     client-id: 576659994866-msfjs05kr5mqtk8nsli7hmmrid9qlc3t.apps.googleusercontent.com
@@ -131,9 +165,11 @@ app:
     enabled: true
   async:
     core-pool-size: 2 # Optimized for 2-core server
-    max-pool-size: 3 # Optimized for 2-core server
+    max-pool-size: 4 # Optimized for 2-core server
     queue-capacity: 50 # Reduced queue capacity
     thread-name-prefix: Async-
+  request-limiter:
+    max-concurrent: 2
 
 facebook:
   app:

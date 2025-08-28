@@ -67,6 +67,9 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
   @Value("${google.form.auto-submit:true}")
   private boolean autoSubmitEnabled;
 
+  @Value("${google.form.submit-when-visible:false}")
+  private boolean submitWhenVisible;
+
   // Store the current fill request ID for "other" text lookup
   private UUID currentFillRequestId;
 
@@ -354,10 +357,16 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
           // CRITICAL FIX: Improved navigation logic to ensure we reach Submit button
           // Check if Submit button is visible first
           if (isSubmitButtonVisible(driver)) {
-            log.info(
-                "Submit button visible - reached final section, but continuing to process remaining sections");
-            // Don't break here, continue processing remaining sections
-            // The final section handling will be done after the loop
+            if (submitWhenVisible) {
+              log.info("Submit button visible - submitWhenVisible enabled, submitting now");
+              clickSubmitButton(driver, wait, humanLike);
+              return true;
+            } else {
+              log.info(
+                  "Submit button visible - reached final section, but continuing to process remaining sections");
+              // Don't break here, continue processing remaining sections
+              // The final section handling will be done after the loop
+            }
           }
 
           // Check if Next button is visible
@@ -1488,13 +1497,45 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
       String currentUrl = driver.getCurrentUrl();
       log.info("Current URL after navigation: {}", currentUrl);
 
-      // Wait for form to be present
+      // Wait for form to be present with a retry; fail fast if not found to avoid long timeouts
       WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(10));
+      boolean formPresent = false;
       try {
         wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("form")));
+        formPresent = true;
         log.info("Form element found on page");
       } catch (Exception e) {
-        log.warn("Form element not found, but continuing anyway: {}", e.getMessage());
+        log.warn("Form element not found after first wait: {}. Retrying once...", e.getMessage());
+        try {
+          // Simple retry: small pause then try again (also helps if dynamic content loads slower)
+          Thread.sleep(2000);
+        } catch (InterruptedException ie) {
+          Thread.currentThread().interrupt();
+        }
+        try {
+          wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("form")));
+          formPresent = true;
+          log.info("Form element found on retry");
+        } catch (Exception e2) {
+          log.error("Form element still not found after retry: {}", e2.getMessage());
+        }
+      }
+
+      if (!formPresent) {
+        // Additional heuristic: detect captcha/blocked page indicators
+        try {
+          String pageText = driver.findElement(By.tagName("body")).getText().toLowerCase();
+          if (pageText.contains("captcha") || pageText.contains("tạm thời")
+              || pageText.contains("too many") || pageText.contains("quota")) {
+            log.error("Detected potential rate limit/captcha page - aborting this run early");
+          }
+        } catch (Exception ignore) {
+        }
+        try {
+          driver.quit();
+        } catch (Exception ignore) {
+        }
+        throw new RuntimeException("Form did not load correctly - aborting to avoid 300s timeout");
       }
 
       log.info("Browser opened successfully");

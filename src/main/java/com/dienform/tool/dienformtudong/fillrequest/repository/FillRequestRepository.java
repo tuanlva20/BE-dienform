@@ -88,6 +88,12 @@ public interface FillRequestRepository extends JpaRepository<FillRequest, UUID> 
         long countByStatus(FillRequestStatusEnum status);
 
         /**
+         * Count requests by status and human-like flag
+         */
+        @Query("SELECT COUNT(fr) FROM FillRequest fr WHERE fr.status = ?1 AND fr.humanLike = ?2")
+        long countByStatusAndHumanLike(FillRequestStatusEnum status, boolean humanLike);
+
+        /**
          * Find all requests by status
          */
         @EntityGraph(attributePaths = {"form"})
@@ -110,6 +116,14 @@ public interface FillRequestRepository extends JpaRepository<FillRequest, UUID> 
         int incrementCompletedSurveyAtomic(UUID id);
 
         /**
+         * Atomic increment failed survey counter
+         */
+        @Modifying(flushAutomatically = true, clearAutomatically = true)
+        @Transactional
+        @Query("UPDATE FillRequest fr SET fr.failedSurvey = fr.failedSurvey + 1, fr.updatedAt = NOW() WHERE fr.id = ?1")
+        int incrementFailedSurvey(UUID id);
+
+        /**
          * Fetch a FillRequest with PESSIMISTIC_WRITE lock for safe concurrent increments.
          */
         @Lock(LockModeType.PESSIMISTIC_WRITE)
@@ -121,6 +135,16 @@ public interface FillRequestRepository extends JpaRepository<FillRequest, UUID> 
         @Query("UPDATE FillRequest fr SET fr.status = ?2 WHERE fr.id = ?1")
         int updateStatus(UUID id,
                         com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum status);
+
+        /**
+         * Atomic compare-and-set for status transition to avoid race conditions when multiple
+         * schedulers/workers try to take the same request. Returns 1 if the row was updated.
+         */
+        @Modifying(flushAutomatically = true, clearAutomatically = true)
+        @Transactional
+        @Query("UPDATE FillRequest fr SET fr.status = ?3, fr.updatedAt = NOW() WHERE fr.id = ?1 AND fr.status = ?2")
+        int compareAndSetStatus(UUID id, FillRequestStatusEnum expected,
+                        FillRequestStatusEnum newStatus);
 
         /**
          * Atomic update retry count to avoid optimistic locking conflicts

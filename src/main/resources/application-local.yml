@@ -1,18 +1,34 @@
+# Local development environment configurations
 server:
   port: 2412
 
 spring:
+  jackson:
+    time-zone: Asia/Ho_Chi_Minh
+    date-format: yyyy-MM-dd HH:mm:ss
+    deserialization:
+      fail-on-unknown-properties: false
+    serialization:
+      write-dates-as-timestamps: false
+      write-date-timestamps-as-nanoseconds: false
   jpa:
     open-in-view: false
-    show-sql: true
+    show-sql: false # Enable SQL logging in development
     hibernate:
-      ddl-auto: update
+      ddl-auto: none # Auto update schema in development
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: Asia/Ho_Chi_Minh
+        connection:
+          timezone: Asia/Ho_Chi_Minh
   datasource:
-    url: jdbc:mysql://localhost:3306/fill_form?useSSL=false&serverTimezone=Asia/Ho_Chi_Minh
+    url: jdbc:mysql://localhost:3306/fill_form?serverTimezone=Asia/Ho_Chi_Minh
     username: fillform
     password: admin@
     driver-class-name: com.mysql.cj.jdbc.Driver
     hikari:
+      connection-init-sql: "SET SESSION time_zone = '+07:00'"
       maximum-pool-size: 15
       minimum-idle: 8
       connection-timeout: 30000
@@ -31,7 +47,7 @@ spring:
       "[mail.smtp.auth]": true
       "[mail.smtp.starttls.enable]": true
 
-# Local logging configuration
+# Development logging configuration
 logging:
   level:
     com.dienform: DEBUG
@@ -51,41 +67,73 @@ security:
     max-requests-per-minute: 200 # Higher limit for development
     max-requests-per-hour: 2000
 
-# Google Form optimization settings
+# Google Form settings for development
 google:
   api:
     key: AIzaSyBCFk8JZ8OYLVEjs92cSLfcccyFH7VyeU0
   form:
     # Performance settings optimized for 2-core server
     timeout-seconds: 30 # Reduced for 2-core server
-    thread-pool-size: 3 # Increased to allow parallel processing
+    thread-pool-size: 4 # Increased to allow parallel processing
     max-retries: 2 # Reduced from 3
     retry-delay-ms: 2000 # Increased from 1000ms
+    per-request:
+      max-inflight: 2 #Điều chỉnh số form được submit executor mỗi fill-request
 
     # Feature flags
     auto-submit: true # Set to false for local debugging
-    headless: false # Set to false for local debugging
+    headless: true # Set to false for local debugging
     async-enabled: true
     cache-enabled: true
+    submit-when-visible: true
+
+    # Adaptive timeout settings
+    adaptive-timeout:
+      base-form-timeout: 300 # 5 phút cho mỗi form
+      max-form-timeout: 1800 # 30 phút tối đa cho mỗi form
+      queue-wait-multiplier: 60 # 1 phút/queue position
+
+    # Circuit breaker settings
+    circuit-breaker:
+      max-failures: 3 # Skip form sau 3 lần fail
+      timeout-seconds: 60 # Reset circuit breaker sau 1 phút
+      skip-failed-forms: true # Bỏ qua form lỗi
+
+    # Legacy timeout settings (for backward compatibility)
+    fast-timeout-seconds: 300 # 5 phút cho fast mode
+    human-timeout-seconds: 600 # 10 phút cho human-like
+    heavy-load-threshold: 25 # Reduced threshold for 2-core server
+    heavy-timeout-multiplier: 1.5 # Reduced multiplier for memory efficiency
 
     # Advanced settings
     similarity-threshold: 0.7
+
+    # Batch processing settings
+    batch-size: 25 # Reduced for 2-core server
+    enable-batch-processing: true
+
+    # Adaptive thread pool settings
+    pool:
+      rebalance-ms: 5000 # Less frequent rebalancing to save CPU
+      human:
+        min: 1 # Minimum 1 human thread
+      fast:
+        min: 1 # Minimum 1
   # Google OAuth Configuration
   oauth:
     client-id: 576659994866-msfjs05kr5mqtk8nsli7hmmrid9qlc3t.apps.googleusercontent.com
 
 # Queue Management Configuration
 queue:
-  max-size: 20 # Increased for better parallel processing
-  check-interval: 30000 # 30 seconds - optimized for parallel processing
-  max-retries: 2 # Reduced from 3
-  retry-delay: 10000 # 10 seconds - increased for 2-core
+  max-size: 100 # Increased for better parallel processing
+  check-interval: 10000 # 10 seconds - optimized for parallel processing
+  max-retries: 3 # Increased for reliability
+  retry-delay: 5000 # 5 seconds - reduced for faster retry
 
 # Campaign Scheduler Configuration
 campaign:
   scheduler:
-    fixed-rate: 60000 # Check every 1 minute (60000ms) - optimized for parallel processing
-    enabled: true
+    fixed-rate: 15000 # 15 seconds
 
 # JWT Configuration for production
 jwt:
@@ -103,6 +151,8 @@ app:
     max-pool-size: 4 # Optimized for 2-core server
     queue-capacity: 50 # Reduced queue capacity
     thread-name-prefix: Async-
+  request-limiter:
+    max-concurrent: 2
 
 realtime:
   socket:
@@ -128,9 +178,9 @@ ai:
     enabled: true
     provider: gemini
     queue:
-      max-size: 50
+      max-size: 20
       max-concurrent: 2
-      processing-interval: 5000
+      processing-interval: 3000 # 3 seconds
       max-retries: 3
       retry-delay: 10000
     gemini:
@@ -146,3 +196,13 @@ ai:
       max-questions-per-form: 1000
       min-sample-count: 1
       max-instruction-length: 1000
+
+# SEPAY Payment Configuration
+sepay:
+  secret-key: ${SEPAY_SECRET_KEY:your-sepay-secret-key}
+  qr-base-url: ${SEPAY_QR_BASE_URL:https://api.sepay.vn/qr}
+  api-url: ${SEPAY_API_URL:https://api.sepay.vn}
+  webhook-url: ${SEPAY_WEBHOOK_URL:https://your-domain.com/api/payments/sepay/webhook}
+  order-expiration-minutes: 15
+  webhook-retry-minutes: 5
+  max-retry-attempts: 3

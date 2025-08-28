@@ -1,15 +1,17 @@
 package com.dienform.scheduler.service;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 import com.dienform.common.util.DateTimeUtil;
 import com.dienform.config.CampaignSchedulerConfig.CampaignSchedulerProperties;
+import com.dienform.tool.dienformtudong.answerdistribution.entity.AnswerDistribution;
+import com.dienform.tool.dienformtudong.answerdistribution.repository.AnswerDistributionRepository;
 import com.dienform.tool.dienformtudong.datamapping.dto.request.ColumnMapping;
 import com.dienform.tool.dienformtudong.datamapping.dto.request.DataFillRequestDTO;
 import com.dienform.tool.dienformtudong.fillrequest.entity.FillRequest;
@@ -17,6 +19,7 @@ import com.dienform.tool.dienformtudong.fillrequest.entity.FillRequestMapping;
 import com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum;
 import com.dienform.tool.dienformtudong.fillrequest.repository.FillRequestMappingRepository;
 import com.dienform.tool.dienformtudong.fillrequest.repository.FillRequestRepository;
+import com.dienform.tool.dienformtudong.fillrequest.service.BatchDataFillCampaignService;
 import com.dienform.tool.dienformtudong.fillrequest.service.DataFillCampaignService;
 import com.dienform.tool.dienformtudong.fillrequest.service.QueueManagementService;
 import com.dienform.tool.dienformtudong.fillrequest.service.ScheduleDistributionService;
@@ -41,22 +44,24 @@ public class SurveySchedulerService {
 
   private final FillRequestRepository fillRequestRepository;
   private final FillRequestMappingRepository fillRequestMappingRepository;
+  private final AnswerDistributionRepository answerDistributionRepository;
   private final FormRepository formRepository;
   private final QuestionRepository questionRepository;
   private final CampaignSchedulerProperties schedulerConfig;
   private final GoogleFormServiceImpl googleFormServiceImpl;
   private final DataFillCampaignService dataFillCampaignService;
+  private final BatchDataFillCampaignService batchDataFillCampaignService;
   private final ScheduleDistributionService scheduleDistributionService;
   private final com.dienform.realtime.FillRequestRealtimeGateway realtimeGateway;
   private final com.dienform.common.util.CurrentUserUtil currentUserUtil;
   private final QueueManagementService queueManagementService;
+  private final com.dienform.tool.dienformtudong.fillrequest.service.FillRequestCounterService fillRequestCounterService;
 
   /**
    * Scheduled task that checks for QUEUED campaigns and starts them when scheduled Rate is
    * configurable via application properties
    */
   @Scheduled(fixedRateString = "${campaign.scheduler.fixed-rate:30000}")
-  @Transactional
   public void checkQueuedCampaigns() {
     if (!schedulerConfig.isEnabled()) {
       return;
@@ -90,7 +95,6 @@ public class SurveySchedulerService {
    * handle immediate processing
    */
   @Scheduled(fixedRate = 30000) // 30 seconds - increased for better coordination
-  @Transactional
   public void processQueuedRequests() {
     if (!schedulerConfig.isEnabled()) {
       return;
@@ -141,6 +145,14 @@ public class SurveySchedulerService {
         break;
       }
 
+      // Try to atomically take the request: QUEUED -> IN_PROCESS
+      boolean taken = fillRequestCounterService.compareAndSetStatus(request.getId(),
+          FillRequestStatusEnum.QUEUED, FillRequestStatusEnum.IN_PROCESS);
+      if (!taken) {
+        log.debug("Request {} already taken by another worker", request.getId());
+        continue;
+      }
+
       if (processQueuedRequest(request)) {
         processed++;
         log.info("SurveySchedulerService: Started processing QUEUED request: {} ({}/{})",
@@ -184,7 +196,15 @@ public class SurveySchedulerService {
         return;
       }
 
-      // Start the campaign
+      // Atomically take the campaign: QUEUED -> IN_PROCESS
+      boolean taken = fillRequestCounterService.compareAndSetStatus(campaign.getId(),
+          FillRequestStatusEnum.QUEUED, FillRequestStatusEnum.IN_PROCESS);
+      if (!taken) {
+        log.info("Campaign {} already taken by another worker", campaign.getId());
+        return;
+      }
+
+      // Start the campaign (already IN_PROCESS)
       if (processQueuedRequest(campaign)) {
         log.info("Successfully started campaign: {}", campaign.getId());
       } else {
@@ -246,15 +266,11 @@ public class SurveySchedulerService {
       // Convert mappings to DataFillRequestDTO
       DataFillRequestDTO dataFillRequest = convertToDataFillRequest(request, mappings);
 
-      // Create schedule distribution
-      List<ScheduleDistributionService.ScheduledTask> schedule = scheduleDistributionService
-          .distributeSchedule(request.getSurveyCount(), request.getStartDate(),
-              request.getEndDate(), request.isHumanLike(), request.getCompletedSurvey());
-
-      // Execute campaign
-      dataFillCampaignService.executeCampaign(request, dataFillRequest, questions, schedule)
+      // Execute campaign using batch processing
+      batchDataFillCampaignService.executeBatchCampaign(request, dataFillRequest, questions)
           .exceptionally(throwable -> {
-            log.error("Campaign execution failed for request: {}", request.getId(), throwable);
+            log.error("Batch campaign execution failed for request: {}", request.getId(),
+                throwable);
             return null;
           });
 
@@ -267,14 +283,30 @@ public class SurveySchedulerService {
   }
 
   /**
-   * Process regular fill request
+   * Process regular fill request with same logic as data fill request
    */
   private boolean processRegularFillRequest(FillRequest request) {
     try {
       log.info("Processing regular fill request: {}", request.getId());
 
-      // Use GoogleFormService to process the request
-      googleFormServiceImpl.fillForm(request.getId());
+      // Get form and questions
+      Form form = request.getForm();
+      List<Question> questions = questionRepository.findByForm(form);
+      if (questions.isEmpty()) {
+        log.error("No questions found for form: {}", form.getId());
+        return false;
+      }
+
+      // Convert regular fill request to DataFillRequestDTO for consistent processing
+      DataFillRequestDTO dataFillRequest = convertRegularToDataFillRequest(request);
+
+      // Execute campaign using DataFillCampaignService with adaptive timeout and circuit breaker
+      dataFillCampaignService.executeRegularCampaign(request, questions)
+          .exceptionally(throwable -> {
+            log.error("Regular campaign execution failed for request: {}", request.getId(),
+                throwable);
+            return null;
+          });
 
       return true;
 
@@ -305,6 +337,43 @@ public class SurveySchedulerService {
     dataFillRequest.setMappings(columnMappings);
     dataFillRequest.setSheetLink(mappings.get(0).getSheetLink()); // All mappings have same sheet
                                                                   // link
+    dataFillRequest.setFormName(request.getForm().getName());
+    dataFillRequest.setPricePerSurvey(request.getPricePerSurvey());
+
+    return dataFillRequest;
+  }
+
+  /**
+   * Convert regular fill request to DataFillRequestDTO for consistent processing
+   */
+  private DataFillRequestDTO convertRegularToDataFillRequest(FillRequest request) {
+    // For regular fill requests, we need to create mappings based on answer distributions
+    List<ColumnMapping> columnMappings = new ArrayList<>();
+
+    // Get answer distributions for this request
+    List<AnswerDistribution> distributions =
+        answerDistributionRepository.findByFillRequestId(request.getId());
+
+    // Create mappings based on answer distributions
+    for (AnswerDistribution distribution : distributions) {
+      ColumnMapping columnMapping = new ColumnMapping();
+      columnMapping.setQuestionId(distribution.getQuestion().getId().toString());
+
+      // For regular fill requests, we use a special column name format
+      // that indicates this is a distribution-based mapping
+      columnMapping.setColumnName("DISTRIBUTION_" + distribution.getQuestion().getId());
+
+      columnMappings.add(columnMapping);
+    }
+
+    DataFillRequestDTO dataFillRequest = new DataFillRequestDTO();
+    dataFillRequest.setFormId(request.getForm().getId().toString());
+    dataFillRequest.setSubmissionCount(request.getSurveyCount());
+    dataFillRequest.setStartDate(request.getStartDate());
+    dataFillRequest.setEndDate(request.getEndDate());
+    dataFillRequest.setIsHumanLike(request.isHumanLike());
+    dataFillRequest.setMappings(columnMappings);
+    dataFillRequest.setSheetLink("REGULAR_FILL_REQUEST"); // Special identifier for regular requests
     dataFillRequest.setFormName(request.getForm().getName());
     dataFillRequest.setPricePerSurvey(request.getPricePerSurvey());
 

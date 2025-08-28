@@ -11,7 +11,8 @@ public enum FillRequestStatusEnum {
   public boolean canTransitionTo(FillRequestStatusEnum newStatus) {
     return switch (this) {
       case QUEUED -> newStatus == IN_PROCESS || newStatus == FAILED;
-      case IN_PROCESS -> newStatus == COMPLETED || newStatus == FAILED || newStatus == IN_PROCESS;
+      case IN_PROCESS -> newStatus == COMPLETED || newStatus == FAILED; // ← KHÔNG cho phép về
+                                                                        // QUEUED
       case COMPLETED -> false; // Terminal state - cannot change
       case FAILED -> newStatus == QUEUED; // Can retry from FAILED
     };

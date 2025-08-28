@@ -12,6 +12,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import com.dienform.tool.dienformtudong.datamapping.dto.request.DataFillRequestDTO;
 import com.dienform.tool.dienformtudong.fillrequest.dto.request.FillRequestDTO;
+import com.dienform.tool.dienformtudong.fillrequest.dto.response.BatchProgressResponse;
 import com.dienform.tool.dienformtudong.fillrequest.dto.response.FillRequestResponse;
 import com.dienform.tool.dienformtudong.fillrequest.service.FillRequestService;
 import jakarta.validation.Valid;
@@ -61,5 +62,17 @@ public class FillRequestController {
     public ResponseEntity<Void> deleteFillRequest(@PathVariable UUID requestId) {
         fillRequestService.deleteFillRequest(requestId);
         return ResponseEntity.noContent().build();
+    }
+
+    @GetMapping("/fill-request/{requestId}/batch-progress")
+    public ResponseEntity<BatchProgressResponse> getBatchProgress(@PathVariable UUID requestId) {
+        try {
+            BatchProgressResponse response = fillRequestService.getBatchProgress(requestId);
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            log.error("Error getting batch progress for fill request {}: {}", requestId,
+                    e.getMessage(), e);
+            throw e;
+        }
     }
 }

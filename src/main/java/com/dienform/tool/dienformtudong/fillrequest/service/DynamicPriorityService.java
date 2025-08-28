@@ -40,6 +40,9 @@ public class DynamicPriorityService {
     @Autowired
     private PriorityCalculationService priorityCalculationService;
 
+    @Autowired
+    private jakarta.persistence.EntityManager entityManager;
+
     /**
      * Scheduled task to update priorities of queued requests every 5 minutes Ensures older requests
      * get higher priority to prevent starvation
@@ -48,6 +51,9 @@ public class DynamicPriorityService {
     @Transactional
     public void updateQueuedRequestPriorities() {
         try {
+            // Clear Hibernate cache to ensure fresh entity metadata
+            entityManager.clear();
+
             List<FillRequest> queuedRequests =
                     fillRequestRepository.findByStatus(FillRequestStatusEnum.QUEUED);
 

@@ -1,7 +1,6 @@
 package com.dienform.tool.dienformtudong.fillrequest.service;
 
 import java.util.UUID;
-import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.retry.annotation.Backoff;
 import org.springframework.retry.annotation.Retryable;
 import org.springframework.stereotype.Service;
@@ -10,6 +9,7 @@ import org.springframework.transaction.annotation.Transactional;
 import com.dienform.common.util.CurrentUserUtil;
 import com.dienform.realtime.FillRequestRealtimeGateway;
 import com.dienform.tool.dienformtudong.exception.ResourceNotFoundException;
+import com.dienform.tool.dienformtudong.fillrequest.entity.FillRequest;
 import com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum;
 import com.dienform.tool.dienformtudong.fillrequest.repository.FillRequestRepository;
 import jakarta.persistence.EntityManager;
@@ -42,7 +42,7 @@ public class FillRequestCounterService {
    */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
   @Retryable(value = {Exception.class}, maxAttempts = 3,
-      backoff = @Backoff(delay = 100, multiplier = 1.5, maxDelay = 500))
+      backoff = @Backoff(delay = 50, multiplier = 1.5, maxDelay = 200))
   public boolean incrementCompletedSurvey(UUID fillRequestId) {
     try {
       log.debug("Incrementing completedSurvey for fillRequest: {}", fillRequestId);
@@ -84,42 +84,116 @@ public class FillRequestCounterService {
   }
 
   /**
-   * Update status using optimistic locking to prevent deadlocks
+   * Simple atomic increment of failedSurvey counter. Used when a form submission fails or times
+   * out.
    */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
-  @Retryable(value = {ObjectOptimisticLockingFailureException.class}, maxAttempts = 3,
-      backoff = @Backoff(delay = 200, multiplier = 1.5, maxDelay = 1000))
+  @Retryable(value = {Exception.class}, maxAttempts = 3,
+      backoff = @Backoff(delay = 50, multiplier = 1.5, maxDelay = 200))
+  public void incrementFailedSurvey(UUID fillRequestId) {
+    try {
+      log.debug("Incrementing failedSurvey for fillRequest: {}", fillRequestId);
+      int updated = fillRequestRepository.incrementFailedSurvey(fillRequestId);
+
+      if (updated > 0) {
+        log.debug("Successfully incremented failedSurvey for fillRequest: {}", fillRequestId);
+      } else {
+        log.warn("No rows updated for failedSurvey increment: {}", fillRequestId);
+      }
+    } catch (Exception e) {
+      log.warn("Failed to increment failedSurvey for fillRequest: {} - {}", fillRequestId,
+          e.getMessage());
+      throw e;
+    }
+  }
+
+
+
+  /**
+   * Get failed survey count for a fill request
+   */
+  public int getFailedSurveyCount(UUID fillRequestId) {
+    try {
+      FillRequest fillRequest = fillRequestRepository.findById(fillRequestId).orElseThrow(
+          () -> new ResourceNotFoundException("FillRequest not found: " + fillRequestId));
+
+      return fillRequest.getFailedSurvey();
+    } catch (Exception e) {
+      log.error("Failed to get failed survey count for {}: {}", fillRequestId, e.getMessage());
+      return 0;
+    }
+  }
+
+  /**
+   * Get success rate for a fill request
+   */
+  public double getSuccessRate(UUID fillRequestId) {
+    try {
+      FillRequest fillRequest = fillRequestRepository.findById(fillRequestId).orElseThrow(
+          () -> new ResourceNotFoundException("FillRequest not found: " + fillRequestId));
+
+      int total = fillRequest.getCompletedSurvey() + fillRequest.getFailedSurvey();
+      if (total == 0) {
+        return 0.0;
+      }
+
+      return (double) fillRequest.getCompletedSurvey() / total * 100.0;
+    } catch (Exception e) {
+      log.error("Failed to get success rate for {}: {}", fillRequestId, e.getMessage());
+      return 0.0;
+    }
+  }
+
+  /**
+   * Update status using atomic update to prevent locking conflicts
+   */
+  @Transactional(propagation = Propagation.REQUIRES_NEW)
+  @Retryable(value = {Exception.class}, maxAttempts = 3,
+      backoff = @Backoff(delay = 100, multiplier = 1.5, maxDelay = 500))
   public boolean updateStatus(UUID fillRequestId, FillRequestStatusEnum newStatus) {
     try {
       log.debug("Updating status for fillRequest: {} to {}", fillRequestId, newStatus);
 
-      // Get current fill request with optimistic locking
-      var fillRequest = fillRequestRepository.findById(fillRequestId).orElseThrow(
-          () -> new ResourceNotFoundException("Fill Request not found with id: " + fillRequestId));
+      // Use atomic update to avoid optimistic locking conflicts
+      int updated = fillRequestRepository.updateStatus(fillRequestId, newStatus);
 
-      // Check if transition is valid
-      if (!fillRequest.getStatus().canTransitionTo(newStatus)) {
-        log.warn("Invalid status transition from {} to {} for fillRequest: {}",
-            fillRequest.getStatus(), newStatus, fillRequestId);
+      if (updated > 0) {
+        log.debug("Successfully updated status for fillRequest: {} to {}", fillRequestId,
+            newStatus);
+
+        // Emit status update
+        emitStatusUpdate(fillRequestId, newStatus);
+        return true;
+      } else {
+        log.warn("No rows updated for fillRequest: {} status: {}", fillRequestId, newStatus);
         return false;
       }
 
-      // Update status
-      fillRequest.setStatus(newStatus);
-      fillRequestRepository.save(fillRequest); // Version will be automatically incremented
-
-      log.debug("Successfully updated status for fillRequest: {} to {}", fillRequestId, newStatus);
-
-      // Emit status update
-      emitStatusUpdate(fillRequestId, newStatus);
-      return true;
-
-    } catch (ObjectOptimisticLockingFailureException e) {
-      log.warn("Optimistic lock failed for fillRequest: {}, retrying...", fillRequestId);
-      throw e; // Trigger retry
     } catch (Exception e) {
       log.error("Failed to update status for fillRequest: {} - {}", fillRequestId, e.getMessage(),
           e);
+      throw e;
+    }
+  }
+
+  /**
+   * Compare-and-set status: update status only if current equals expected.
+   */
+  @Transactional(propagation = Propagation.REQUIRES_NEW)
+  @Retryable(value = {Exception.class}, maxAttempts = 3,
+      backoff = @Backoff(delay = 100, multiplier = 1.5, maxDelay = 500))
+  public boolean compareAndSetStatus(UUID fillRequestId, FillRequestStatusEnum expected,
+      FillRequestStatusEnum newStatus) {
+    try {
+      int updated = fillRequestRepository.compareAndSetStatus(fillRequestId, expected, newStatus);
+      if (updated > 0) {
+        emitStatusUpdate(fillRequestId, newStatus);
+        return true;
+      }
+      return false;
+    } catch (Exception e) {
+      log.error("Failed CAS status for {} from {} to {} - {}", fillRequestId, expected, newStatus,
+          e.getMessage(), e);
       throw e;
     }
   }
@@ -216,11 +290,17 @@ public class FillRequestCounterService {
           newStatus =
               com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.COMPLETED
                   .name();
-          fillRequest.setStatus(
+
+          // Use atomic update to avoid optimistic locking conflicts
+          int updated = fillRequestRepository.updateStatus(fillRequestId,
               com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.COMPLETED);
-          fillRequestRepository.save(fillRequest);
-          log.info("Updated status to COMPLETED for fillRequest: {} (progress: {}/{})",
-              fillRequestId, fillRequest.getCompletedSurvey(), fillRequest.getSurveyCount());
+
+          if (updated > 0) {
+            log.info("Updated status to COMPLETED for fillRequest: {} (progress: {}/{})",
+                fillRequestId, fillRequest.getCompletedSurvey(), fillRequest.getSurveyCount());
+          } else {
+            log.warn("Failed to update status to COMPLETED for fillRequest: {}", fillRequestId);
+          }
         }
 
         com.dienform.realtime.dto.FillRequestUpdateEvent event =
