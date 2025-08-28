@@ -8,13 +8,14 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import com.dienform.common.util.CopyUtil;
 import com.dienform.common.util.CurrentUserUtil;
@@ -69,7 +70,10 @@ public class DataFillCampaignService {
   @Value("${google.form.heavy-timeout-multiplier:2.0}")
   private double heavyTimeoutMultiplier;
 
-  private ExecutorService executorService;
+  @Value("${google.form.per-request.max-inflight:2}")
+  private int perRequestMaxInflight;
+
+  // Using ThreadPoolManager instead of local executorService
 
   @Autowired
   private com.dienform.realtime.FillRequestRealtimeGateway realtimeGateway;
@@ -77,18 +81,92 @@ public class DataFillCampaignService {
   @Autowired
   private CurrentUserUtil currentUserUtil;
 
+  @Autowired
+  private ThreadPoolManager threadPoolManager;
+
+  @Autowired
+  private ScheduleDistributionService scheduleDistributionService;
+
+  @Autowired
+  private ThreadPoolMonitorService threadPoolMonitorService;
+
+  @Autowired
+  private AdaptiveTimeoutService adaptiveTimeoutService;
+
+  // Scheduler for delayed task submission
+  private ScheduledExecutorService taskScheduler;
+
   @PostConstruct
   public void init() {
-    log.info("DataFillCampaignService: Initializing executor service with thread pool size: {}",
-        threadPoolSize);
-    executorService = Executors.newFixedThreadPool(threadPoolSize);
-    log.info("DataFillCampaignService: Executor service initialized successfully with {} threads",
-        threadPoolSize);
+    log.info("DataFillCampaignService: Using ThreadPoolManager for separate human/fast executors");
+    // Initialize task scheduler for delayed submissions
+    taskScheduler = Executors.newScheduledThreadPool(1);
+    log.info("DataFillCampaignService: Task scheduler initialized for delayed submissions");
   }
 
   @PreDestroy
   public void cleanup() {
-    shutdownExecutorService();
+    // ThreadPoolManager handles its own cleanup
+    if (taskScheduler != null) {
+      taskScheduler.shutdown();
+      try {
+        if (!taskScheduler.awaitTermination(60, TimeUnit.SECONDS)) {
+          taskScheduler.shutdownNow();
+        }
+      } catch (InterruptedException e) {
+        taskScheduler.shutdownNow();
+        Thread.currentThread().interrupt();
+      }
+    }
+    log.info("DataFillCampaignService: Cleanup completed");
+  }
+
+  /**
+   * Execute data fill campaign based on schedule (legacy method for backward compatibility)
+   */
+  public CompletableFuture<Void> executeCampaign(FillRequest fillRequest,
+      DataFillRequestDTO originalRequest, List<Question> questions) {
+
+    // Create schedule using existing logic
+    List<ScheduleDistributionService.ScheduledTask> schedule = scheduleDistributionService
+        .distributeSchedule(fillRequest.getSurveyCount(), fillRequest.getStartDate(),
+            fillRequest.getEndDate(), fillRequest.isHumanLike(), fillRequest.getCompletedSurvey());
+
+    return executeCampaign(fillRequest, originalRequest, questions, schedule);
+  }
+
+  /**
+   * Execute regular fill request with same adaptive timeout and circuit breaker logic
+   */
+  public CompletableFuture<Void> executeRegularCampaign(FillRequest fillRequest,
+      List<Question> questions) {
+
+    log.info(
+        "Starting regular campaign execution for fillRequest: {} with {} forms (human-like: {})",
+        fillRequest.getId(), fillRequest.getSurveyCount(), fillRequest.isHumanLike());
+
+    // Create schedule distribution for regular fill request
+    List<ScheduleDistributionService.ScheduledTask> schedule = scheduleDistributionService
+        .distributeSchedule(fillRequest.getSurveyCount(), fillRequest.getStartDate(),
+            fillRequest.getEndDate(), fillRequest.isHumanLike(), fillRequest.getCompletedSurvey());
+
+    return executeRegularCampaignCore(fillRequest, questions, schedule);
+  }
+
+  /**
+   * Execute batch tasks (for batch processing)
+   */
+  public CompletableFuture<Void> executeBatchTasks(FillRequest fillRequest,
+      DataFillRequestDTO originalRequest, List<Question> questions,
+      List<ScheduleDistributionService.ScheduledTask> batchTasks, ExecutorService executor) {
+
+    log.info("Executing batch tasks for fillRequest: {} with {} tasks", fillRequest.getId(),
+        batchTasks.size());
+
+    // Use the same logic as executeCampaign but with provided tasks and executor
+    // Extract the core execution logic from executeCampaign method
+    // Note: No @Transactional here to avoid connection leaks with async operations
+    return executeCampaignCore(fillRequest, originalRequest, questions, batchTasks, executor);
   }
 
   /**
@@ -97,8 +175,206 @@ public class DataFillCampaignService {
   public CompletableFuture<Void> executeCampaign(FillRequest fillRequest,
       DataFillRequestDTO originalRequest, List<Question> questions, List<ScheduledTask> schedule) {
 
-    log.info("Starting data fill campaign for request: {} with {} tasks using {} threads",
-        fillRequest.getId(), schedule.size(), threadPoolSize);
+    ExecutorService executor = threadPoolManager.getExecutor(fillRequest.isHumanLike());
+    return executeCampaignCore(fillRequest, originalRequest, questions, schedule, executor);
+  }
+
+  /**
+   * Emit progress update in a separate transaction
+   */
+  @Transactional(propagation = Propagation.REQUIRES_NEW)
+  public void emitProgressUpdateInTransaction(UUID fillRequestId) {
+    com.dienform.tool.dienformtudong.fillrequest.entity.FillRequest current =
+        fillRequestRepository.findById(fillRequestId).orElse(null);
+    if (current != null && current.getForm() != null) {
+      // Only emit if there's meaningful progress (completedSurvey > 0)
+      if (current.getCompletedSurvey() > 0) {
+        com.dienform.realtime.dto.FillRequestUpdateEvent evt =
+            com.dienform.realtime.dto.FillRequestUpdateEvent.builder()
+                .formId(current.getForm().getId().toString()).requestId(current.getId().toString())
+                .status(current.getStatus() == null
+                    ? com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.IN_PROCESS
+                        .name()
+                    : current.getStatus().name())
+                .completedSurvey(current.getCompletedSurvey()).surveyCount(current.getSurveyCount())
+                .updatedAt(java.time.Instant.now().toString()).build();
+
+        // Emit to form room only (avoid duplicate user-specific emissions)
+        realtimeGateway.emitUpdate(current.getForm().getId().toString(), evt);
+
+        log.debug("Emitted progress update for fillRequest: {} - {}/{}", fillRequestId,
+            current.getCompletedSurvey(), current.getSurveyCount());
+      }
+    }
+  }
+
+  /**
+   * Increment failed survey count in a separate transaction
+   */
+  @Transactional(propagation = Propagation.REQUIRES_NEW)
+  public void incrementFailedSurveyInTransaction(UUID fillRequestId) {
+    fillRequestCounterService.incrementFailedSurvey(fillRequestId);
+  }
+
+  @Transactional(propagation = Propagation.REQUIRES_NEW)
+  protected void updateFillRequestStatus(FillRequest fillRequest, FillRequestStatusEnum newStatus) {
+    try {
+      // Use optimistic locking service for status updates
+      boolean success = fillRequestCounterService.updateStatus(fillRequest.getId(), newStatus);
+
+      if (success) {
+        log.info("Updated fill request {} status to: {}", fillRequest.getId(), newStatus.name());
+      } else {
+        // Increment failed survey count in database
+        incrementFailedSurveyCount(fillRequest.getId());
+        log.warn("Failed to update fill request {} status to: {}", fillRequest.getId(),
+            newStatus.name());
+      }
+    } catch (Exception e) {
+      log.error("Failed to update fill request status: {}", fillRequest.getId(), e);
+    }
+  }
+
+  /**
+   * Execute regular campaign core logic with adaptive timeout and circuit breaker
+   */
+  private CompletableFuture<Void> executeRegularCampaignCore(FillRequest fillRequest,
+      List<Question> questions, List<ScheduleDistributionService.ScheduledTask> schedule) {
+
+    ExecutorService executor = threadPoolManager.getExecutor(fillRequest.isHumanLike());
+
+    log.info(
+        "Starting regular fill campaign for request: {} with {} tasks using {} executor (humanLike: {})",
+        fillRequest.getId(), schedule.size(),
+        fillRequest.isHumanLike() ? "human-like" : "fast-mode", fillRequest.isHumanLike());
+
+    // Check if already completed
+    if (fillRequest.getCompletedSurvey() >= fillRequest.getSurveyCount()) {
+      log.info("Regular fill request {} is already completed ({}), updating status to COMPLETED",
+          fillRequest.getId(), fillRequest.getCompletedSurvey());
+      updateFillRequestStatus(fillRequest, FillRequestStatusEnum.COMPLETED);
+      return CompletableFuture.completedFuture(null);
+    }
+
+    // Calculate remaining surveys to complete
+    int remainingSurveys = fillRequest.getSurveyCount() - fillRequest.getCompletedSurvey();
+    log.info("Regular fill request {} has {} completed, needs {} more surveys to complete",
+        fillRequest.getId(), fillRequest.getCompletedSurvey(), remainingSurveys);
+
+    // Adjust schedule to only process remaining surveys
+    List<ScheduledTask> remainingSchedule =
+        schedule.subList(0, Math.min(remainingSurveys, schedule.size()));
+    log.info("Adjusted schedule to {} tasks for remaining surveys", remainingSchedule.size());
+
+    // Set initial status to IN_PROCESS
+    updateFillRequestStatus(fillRequest, FillRequestStatusEnum.IN_PROCESS);
+
+    CompletableFuture<Void> executionFuture = new CompletableFuture<>();
+
+    try {
+      // Initialize data needed for form filling
+      Map<UUID, Question> questionMap = new HashMap<>();
+      for (Question q : questions) {
+        questionMap.put(q.getId(), q);
+      }
+
+      // Process tasks with per-request windowed submission to avoid monopolizing the queue
+      List<CompletableFuture<Boolean>> futures = new ArrayList<>();
+      int totalTasks = remainingSchedule.size();
+
+      java.util.concurrent.atomic.AtomicInteger nextIndex =
+          new java.util.concurrent.atomic.AtomicInteger(0);
+      java.util.concurrent.atomic.AtomicInteger inFlight =
+          new java.util.concurrent.atomic.AtomicInteger(0);
+
+      Runnable submitNext = new Runnable() {
+        @Override
+        public void run() {
+          int maxInflight = Math.max(1, perRequestMaxInflight);
+          while (inFlight.get() < maxInflight) {
+            int idx = nextIndex.getAndIncrement();
+            if (idx >= remainingSchedule.size()) {
+              return;
+            }
+
+            ScheduledTask task = remainingSchedule.get(idx);
+            inFlight.incrementAndGet();
+
+            CompletableFuture<Boolean> f =
+                scheduleFormFill(fillRequest, null, questionMap, null, task, totalTasks, executor)
+                    .whenComplete((ok, ex) -> {
+                      inFlight.decrementAndGet();
+                      // Submit next task for this fill when one completes
+                      this.run();
+                    });
+            futures.add(f);
+          }
+        }
+      };
+
+      // Kick off initial window
+      submitNext.run();
+
+      // Wait for all tasks to complete
+      CompletableFuture<Void> allFutures =
+          CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
+
+      allFutures.thenAccept(v -> {
+        // Count results
+        int completed = 0;
+        int failed = 0;
+
+        for (CompletableFuture<Boolean> future : futures) {
+          try {
+            Boolean result = future.get();
+            if (result != null && result) {
+              completed++;
+            } else {
+              failed++;
+            }
+          } catch (Exception e) {
+            log.error("Error getting task result: {}", e.getMessage());
+            failed++;
+          }
+        }
+
+        log.info("Regular campaign completed for request: {} - {} successful, {} failed",
+            fillRequest.getId(), completed, failed);
+
+        // Update final status
+        if (completed > 0) {
+          updateFillRequestStatus(fillRequest, FillRequestStatusEnum.COMPLETED);
+        } else {
+          updateFillRequestStatus(fillRequest, FillRequestStatusEnum.FAILED);
+        }
+
+        executionFuture.complete(null);
+      }).exceptionally(throwable -> {
+        log.error("Regular campaign failed for request: {}", fillRequest.getId(), throwable);
+        updateFillRequestStatus(fillRequest, FillRequestStatusEnum.FAILED);
+        executionFuture.completeExceptionally(throwable);
+        return null;
+      });
+
+    } catch (Exception e) {
+      log.error("Error in regular campaign execution: {}", fillRequest.getId(), e);
+      updateFillRequestStatus(fillRequest, FillRequestStatusEnum.FAILED);
+      executionFuture.completeExceptionally(e);
+    }
+
+    return executionFuture;
+  }
+
+  /**
+   * Core execution logic extracted from executeCampaign for reuse
+   */
+  private CompletableFuture<Void> executeCampaignCore(FillRequest fillRequest,
+      DataFillRequestDTO originalRequest, List<Question> questions,
+      List<ScheduleDistributionService.ScheduledTask> schedule, ExecutorService executor) {
+    log.info(
+        "Starting data fill campaign for request: {} with {} tasks using {} executor (humanLike: {})",
+        fillRequest.getId(), schedule.size(),
+        fillRequest.isHumanLike() ? "human-like" : "fast-mode", fillRequest.isHumanLike());
     log.info("Campaign details - isHumanLike: {}, startDate: {}, endDate: {}",
         fillRequest.isHumanLike(), fillRequest.getStartDate(), fillRequest.getEndDate());
 
@@ -168,111 +444,115 @@ public class DataFillCampaignService {
       AtomicInteger submittedTasks = new AtomicInteger(0);
       int totalTasks = remainingSchedule.size();
 
-      log.info("TASK EXECUTION PLAN: Total {} tasks will be processed with {} threads", totalTasks,
-          threadPoolSize);
-      log.info(
-          "EXPECTED FLOW: First {} tasks start immediately, remaining tasks queue and wait for thread availability",
-          Math.min(totalTasks, threadPoolSize));
+      log.info("TASK EXECUTION PLAN: Total {} tasks will be processed with {} executor", totalTasks,
+          fillRequest.isHumanLike() ? "human-like" : "fast-mode");
+      log.info("EXPECTED FLOW: Tasks will be distributed across {} executor pool",
+          fillRequest.isHumanLike() ? "human-like" : "fast-mode");
 
-      // Execute each task
-      log.info("Submitting {} tasks to executor service for fillRequest: {} (thread pool size: {})",
-          remainingSchedule.size(), fillRequest.getId(), threadPoolSize);
+      // Windowed delayed submission with per-request cap
+      log.info("Scheduling {} tasks with delayed submission for fillRequest: {}",
+          remainingSchedule.size(), fillRequest.getId());
 
-      for (int i = 0; i < remainingSchedule.size(); i++) {
-        ScheduledTask task = remainingSchedule.get(i);
-        final int taskIndex = i + 1;
-        int submitted = submittedTasks.incrementAndGet();
-        log.info("Submitting task {}/{} (row {}) for fillRequest: {} - SUBMITTED: {}/{}", taskIndex,
-            remainingSchedule.size(), task.getRowIndex(), fillRequest.getId(), submitted,
-            totalTasks);
+      java.util.concurrent.atomic.AtomicInteger nextIdx =
+          new java.util.concurrent.atomic.AtomicInteger(0);
+      java.util.concurrent.atomic.AtomicInteger inFlightTasks =
+          new java.util.concurrent.atomic.AtomicInteger(0);
 
-        // Add small delay between task submissions for low-spec machines
-        if (i > 0) {
-          try {
-            Thread.sleep(500); // 500ms delay between submissions
-          } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            log.warn("Task submission delay interrupted for fillRequest: {}", fillRequest.getId());
+      java.util.function.Consumer<Integer> scheduleOne = new java.util.function.Consumer<>() {
+        @Override
+        public void accept(Integer ignored) {
+          int maxInflight = Math.max(1, perRequestMaxInflight);
+          while (inFlightTasks.get() < maxInflight) {
+            int i = nextIdx.getAndIncrement();
+            if (i >= remainingSchedule.size())
+              return;
+            ScheduledTask task = remainingSchedule.get(i);
+            final int taskIndex = i + 1;
+
+            long submissionDelayMs = task.getDelaySeconds() * 1000L;
+            inFlightTasks.incrementAndGet();
+
+            taskScheduler.schedule(() -> {
+              int submitted = submittedTasks.incrementAndGet();
+              log.info(
+                  "Submitting delayed task {}/{} (row {}) for fillRequest: {} - SUBMITTED: {}/{}",
+                  taskIndex, remainingSchedule.size(), task.getRowIndex(), fillRequest.getId(),
+                  submitted, totalTasks);
+
+              logThreadPoolStatus("After submitting delayed task " + taskIndex);
+
+              scheduleFormFillWithoutDelay(fillRequest, originalRequest, questionMap, sheetData,
+                  task, totalTasks, executor).whenComplete((success, ex) -> {
+                    int completed = completedTasks.incrementAndGet();
+                    inFlightTasks.decrementAndGet();
+                    if (Boolean.TRUE.equals(success)) {
+                      successfulTasks.incrementAndGet();
+                      if (successfulTasks.get() == 1) {
+                        updateFillRequestStatus(fillRequest, FillRequestStatusEnum.IN_PROCESS);
+                      }
+                    } else {
+                      incrementFailedSurveyCount(fillRequest.getId());
+                      try {
+                        fillRequestCounterService.incrementFailedSurvey(fillRequest.getId());
+                      } catch (Exception ignore) {
+                      }
+                    }
+
+                    if (completed == totalTasks) {
+                      log.info("All tasks completed for campaign {}. Successful: {}/{}",
+                          fillRequest.getId(), successfulTasks.get(), totalTasks);
+
+                      FillRequest fresh =
+                          fillRequestRepository.findById(fillRequest.getId()).orElse(null);
+                      if (fresh == null) {
+                        updateFillRequestStatus(fillRequest, FillRequestStatusEnum.FAILED);
+                        executionFuture.complete(null);
+                        return;
+                      }
+
+                      FillRequestStatusEnum finalStatus;
+                      if (fresh.getCompletedSurvey() >= fresh.getSurveyCount()) {
+                        finalStatus = FillRequestStatusEnum.COMPLETED;
+                      } else if (successfulTasks.get() == 0 && completed == totalTasks) {
+                        finalStatus = FillRequestStatusEnum.FAILED;
+                      } else {
+                        incrementFailedSurveyCount(fillRequest.getId());
+                        finalStatus = FillRequestStatusEnum.IN_PROCESS;
+                      }
+
+                      updateFillRequestStatus(fillRequest, finalStatus);
+                      try {
+                        com.dienform.realtime.dto.FillRequestUpdateEvent evt =
+                            com.dienform.realtime.dto.FillRequestUpdateEvent.builder()
+                                .formId(fresh.getForm().getId().toString())
+                                .requestId(fresh.getId().toString()).status(finalStatus.name())
+                                .completedSurvey(fresh.getCompletedSurvey())
+                                .surveyCount(fresh.getSurveyCount())
+                                .updatedAt(java.time.Instant.now().toString()).build();
+                        String userId = null;
+                        try {
+                          userId = currentUserUtil.getCurrentUserIdIfPresent().map(UUID::toString)
+                              .orElse(null);
+                        } catch (Exception ignore) {
+                        }
+                        realtimeGateway.emitUpdateWithUser(fresh.getForm().getId().toString(), evt,
+                            userId);
+                      } catch (Exception ignore) {
+                      }
+
+                      executionFuture.complete(null);
+                    } else {
+                      // Submit next task in window
+                      this.accept(null);
+                    }
+                  });
+            }, submissionDelayMs, TimeUnit.MILLISECONDS);
           }
         }
+      };
 
-        // Monitor thread pool status
-        logThreadPoolStatus("After submitting task " + taskIndex);
-
-        scheduleFormFill(fillRequest, originalRequest, questionMap, sheetData, task, totalTasks)
-            .thenAccept(success -> {
-              int completed = completedTasks.incrementAndGet();
-              if (success) {
-                successfulTasks.incrementAndGet();
-                log.info("Task completed successfully: {}/{} for fillRequest: {}", completed,
-                    totalTasks, fillRequest.getId());
-              } else {
-                log.warn("Task failed: {}/{} for fillRequest: {}", completed, totalTasks,
-                    fillRequest.getId());
-              }
-
-              // Check if all tasks are complete
-              if (completed == totalTasks) {
-                log.info("All tasks completed for campaign {}. Successful: {}/{}",
-                    fillRequest.getId(), successfulTasks.get(), totalTasks);
-
-                // Decide final status based on persisted completedSurvey to ensure accuracy
-                FillRequest fresh =
-                    fillRequestRepository.findById(fillRequest.getId()).orElse(null);
-                if (fresh == null) {
-                  updateFillRequestStatus(fillRequest, FillRequestStatusEnum.FAILED);
-                  executionFuture.complete(null);
-                  return;
-                }
-
-                FillRequestStatusEnum finalStatus;
-                if (fresh.getCompletedSurvey() >= fresh.getSurveyCount()
-                    && successfulTasks.get() == totalTasks) {
-                  finalStatus = FillRequestStatusEnum.COMPLETED;
-                } else if (successfulTasks.get() == 0 || successfulTasks.get() < totalTasks) {
-                  finalStatus = FillRequestStatusEnum.IN_PROCESS;
-                } else {
-                  // Not all persisted yet, keep IN_PROCESS; caller may check later
-                  finalStatus = FillRequestStatusEnum.IN_PROCESS;
-                }
-
-                updateFillRequestStatus(fillRequest, finalStatus);
-                try {
-                  com.dienform.realtime.dto.FillRequestUpdateEvent evt =
-                      com.dienform.realtime.dto.FillRequestUpdateEvent.builder()
-                          .formId(fresh.getForm().getId().toString())
-                          .requestId(fresh.getId().toString()).status(finalStatus.name())
-                          .completedSurvey(fresh.getCompletedSurvey())
-                          .surveyCount(fresh.getSurveyCount())
-                          .updatedAt(java.time.Instant.now().toString()).build();
-
-                  // Get current user ID if available
-                  String userId = null;
-                  try {
-                    userId = currentUserUtil.getCurrentUserIdIfPresent().map(UUID::toString)
-                        .orElse(null);
-                  } catch (Exception ignore) {
-                    log.debug("Failed to get current user ID: {}", ignore.getMessage());
-                  }
-
-                  // Use centralized emit method with deduplication
-                  realtimeGateway.emitUpdateWithUser(fresh.getForm().getId().toString(), evt,
-                      userId);
-                } catch (Exception ignore) {
-                  log.debug("Failed to emit final status update: {}", ignore.getMessage());
-                }
-
-                executionFuture.complete(null);
-              }
-            }).exceptionally(throwable -> {
-              log.error("Task execution failed", throwable);
-              if (completedTasks.incrementAndGet() == totalTasks) {
-                updateFillRequestStatus(fillRequest, FillRequestStatusEnum.FAILED);
-                executionFuture.complete(null);
-              }
-              return null;
-            });
-      }
+      // Kick off initial window for delayed submissions
+      scheduleOne.accept(null);
 
       // Validate all tasks were submitted
       int finalSubmittedCount = submittedTasks.get();
@@ -281,34 +561,30 @@ public class DataFillCampaignService {
             "CRITICAL: Only {}/{} tasks were submitted! Missing tasks detected for fillRequest: {}",
             finalSubmittedCount, totalTasks, fillRequest.getId());
       } else {
+        // Increment failed survey count in database
+        incrementFailedSurveyCount(fillRequest.getId());
         log.info("SUCCESS: All {}/{} tasks submitted to executor queue for fillRequest: {}",
             finalSubmittedCount, totalTasks, fillRequest.getId());
       }
 
     } catch (Exception e) {
       log.error("Failed to initialize campaign: {}", fillRequest.getId(), e);
-      updateFillRequestStatus(fillRequest, FillRequestStatusEnum.QUEUED);
+
+      // Chỉ set QUEUED nếu chưa bắt đầu xử lý
+      FillRequest current = fillRequestRepository.findById(fillRequest.getId()).orElse(fillRequest);
+      if (current.getStatus() == FillRequestStatusEnum.QUEUED) {
+        updateFillRequestStatus(fillRequest, FillRequestStatusEnum.QUEUED);
+      } else {
+        // Increment failed survey count in database
+        incrementFailedSurveyCount(fillRequest.getId());
+        // Nếu đã IN_PROCESS thì set FAILED thay vì QUEUED
+        updateFillRequestStatus(fillRequest, FillRequestStatusEnum.FAILED);
+      }
+
       executionFuture.complete(null);
     }
 
     return executionFuture;
-  }
-
-  @Transactional
-  protected void updateFillRequestStatus(FillRequest fillRequest, FillRequestStatusEnum newStatus) {
-    try {
-      // Use optimistic locking service for status updates
-      boolean success = fillRequestCounterService.updateStatus(fillRequest.getId(), newStatus);
-
-      if (success) {
-        log.info("Updated fill request {} status to: {}", fillRequest.getId(), newStatus.name());
-      } else {
-        log.warn("Failed to update fill request {} status to: {}", fillRequest.getId(),
-            newStatus.name());
-      }
-    } catch (Exception e) {
-      log.error("Failed to update fill request status: {}", fillRequest.getId(), e);
-    }
   }
 
   /**
@@ -343,57 +619,29 @@ public class DataFillCampaignService {
     }
   }
 
+  // ThreadPoolManager handles executor shutdown
+
   /**
    * Emit progress update to both form room and user-specific room
    */
   private void emitProgressUpdate(UUID fillRequestId) {
     try {
-      com.dienform.tool.dienformtudong.fillrequest.entity.FillRequest current =
-          fillRequestRepository.findById(fillRequestId).orElse(null);
-      if (current != null && current.getForm() != null) {
-        // Only emit if there's meaningful progress (completedSurvey > 0)
-        if (current.getCompletedSurvey() > 0) {
-          com.dienform.realtime.dto.FillRequestUpdateEvent evt =
-              com.dienform.realtime.dto.FillRequestUpdateEvent.builder()
-                  .formId(current.getForm().getId().toString())
-                  .requestId(current.getId().toString())
-                  .status(current.getStatus() == null
-                      ? com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum.IN_PROCESS
-                          .name()
-                      : current.getStatus().name())
-                  .completedSurvey(current.getCompletedSurvey())
-                  .surveyCount(current.getSurveyCount())
-                  .updatedAt(java.time.Instant.now().toString()).build();
-
-          // Emit to form room only (avoid duplicate user-specific emissions)
-          realtimeGateway.emitUpdate(current.getForm().getId().toString(), evt);
-
-          log.debug("Emitted progress update for fillRequest: {} - {}/{}", fillRequestId,
-              current.getCompletedSurvey(), current.getSurveyCount());
-        }
-      }
+      emitProgressUpdateInTransaction(fillRequestId);
     } catch (Exception e) {
       log.warn("Failed to emit progress update: {}", e.getMessage());
     }
   }
 
-  private void shutdownExecutorService() {
-    if (executorService != null) {
-      executorService.shutdown();
-      try {
-        if (!executorService.awaitTermination(60, TimeUnit.SECONDS)) {
-          executorService.shutdownNow();
-        }
-      } catch (InterruptedException e) {
-        executorService.shutdownNow();
-        Thread.currentThread().interrupt();
-      }
-    }
-  }
-
+  /**
+   * Schedule form fill with delay (legacy method - kept for backward compatibility)
+   */
   private CompletableFuture<Boolean> scheduleFormFill(FillRequest fillRequest,
       DataFillRequestDTO originalRequest, Map<UUID, Question> questionMap,
-      List<Map<String, Object>> sheetData, ScheduledTask task, int totalTasks) {
+      List<Map<String, Object>> sheetData, ScheduledTask task, int totalTasks,
+      ExecutorService executor) {
+
+    // Use SmartTimeoutService to calculate optimal timeout
+    long timeoutSeconds = calculateOptimalTimeout(fillRequest, totalTasks);
 
     log.info(
         "Scheduling form fill for task row {} (fillRequest: {}) - Submitting to executor queue",
@@ -412,6 +660,8 @@ public class DataFillCampaignService {
               delaySeconds, task.getRowIndex(), Thread.currentThread().getName());
           Thread.sleep(delaySeconds * 1000);
         } else {
+          // Increment failed survey count in database
+          incrementFailedSurveyCount(fillRequest.getId());
           log.debug("Task row {} executing immediately without delay", task.getRowIndex());
         }
 
@@ -454,46 +704,183 @@ public class DataFillCampaignService {
         log.error("Error in scheduled form fill: {}", e.getMessage(), e);
         return false;
       }
-    }, executorService);
+    }, executor);
 
-    // Add timeout mechanism - configurable, and increased under heavy load
-    long baseTimeoutSeconds = fillRequest.isHumanLike() ? humanTimeoutSeconds : fastTimeoutSeconds;
-    boolean heavyLoad = totalTasks >= heavyLoadThreshold;
-    long timeoutSeconds =
-        heavyLoad ? (long) Math.ceil(baseTimeoutSeconds * Math.max(1.0, heavyTimeoutMultiplier))
-            : baseTimeoutSeconds;
     CompletableFuture<Boolean> timeoutFuture =
         future.orTimeout(timeoutSeconds, TimeUnit.SECONDS).exceptionally(throwable -> {
           if (throwable instanceof java.util.concurrent.TimeoutException) {
-            log.error("Task for row {} timed out after {} seconds (fillRequest: {})",
-                task.getRowIndex(), timeoutSeconds, fillRequest.getId());
+            // Record timeout event for monitoring
+            threadPoolMonitorService.recordTimeout(fillRequest.getId().toString(), totalTasks, 0,
+                fillRequest.isHumanLike());
+            log.error(
+                "Task for row {} timed out after {} seconds (fillRequest: {}, totalTasks: {}, isHuman: {})",
+                task.getRowIndex(), timeoutSeconds, fillRequest.getId(), totalTasks,
+                fillRequest.isHumanLike());
           } else {
+            // Increment failed survey count in database
+            incrementFailedSurveyCount(fillRequest.getId());
             log.error("Task for row {} failed with exception (fillRequest: {}): {}",
                 task.getRowIndex(), fillRequest.getId(), throwable.getMessage());
           }
           return false;
         });
 
-    log.debug("Scheduled task for row {} with timeout protection (fillRequest: {})",
-        task.getRowIndex(), fillRequest.getId());
+    log.debug("Scheduled task for row {} with smart timeout protection ({}s) (fillRequest: {})",
+        task.getRowIndex(), timeoutSeconds, fillRequest.getId());
 
     return timeoutFuture;
+  }
+
+  /**
+   * Schedule form fill WITHOUT delay (new method for delayed submission)
+   */
+  private CompletableFuture<Boolean> scheduleFormFillWithoutDelay(FillRequest fillRequest,
+      DataFillRequestDTO originalRequest, Map<UUID, Question> questionMap,
+      List<Map<String, Object>> sheetData, ScheduledTask task, int totalTasks,
+      ExecutorService executor) {
+
+    // Use SmartTimeoutService to calculate optimal timeout
+    long timeoutSeconds = calculateOptimalTimeout(fillRequest, totalTasks);
+
+    log.info(
+        "Scheduling form fill WITHOUT delay for task row {} (fillRequest: {}) - Submitting to executor queue",
+        task.getRowIndex(), fillRequest.getId());
+
+    CompletableFuture<Boolean> future = CompletableFuture.supplyAsync(() -> {
+      try {
+        log.info("THREAD ASSIGNED: Task row {} started execution on thread: {} (fillRequest: {})",
+            task.getRowIndex(), Thread.currentThread().getName(), fillRequest.getId());
+
+        // NO DELAY - task was already delayed by scheduler before submission
+        log.debug("Task row {} executing immediately (delay already applied by scheduler)",
+            task.getRowIndex());
+
+        // Execute form fill with retry mechanism
+        int maxRetries = 3;
+        int retryCount = 0;
+        boolean success = false;
+
+        while (retryCount < maxRetries && !success) {
+          try {
+            success = executeFormFillWithoutDelay(fillRequest, originalRequest, questionMap,
+                sheetData, task);
+            if (!success) {
+              retryCount++;
+              if (retryCount < maxRetries) {
+                log.warn("Form fill attempt {} failed for row {}. Retrying in 5 seconds...",
+                    retryCount, task.getRowIndex());
+                Thread.sleep(5000); // Wait 5 seconds before retry
+              }
+            }
+          } catch (Exception e) {
+            log.error("Error in form fill attempt {} for row {}: {}", retryCount + 1,
+                task.getRowIndex(), e.getMessage());
+            retryCount++;
+            if (retryCount < maxRetries) {
+              Thread.sleep(5000);
+            }
+          }
+        }
+
+        if (!success) {
+          log.error("All form fill attempts failed for row {}", task.getRowIndex());
+        }
+
+        log.info(
+            "THREAD RELEASED: Task row {} finished execution on thread: {} (success: {}, fillRequest: {})",
+            task.getRowIndex(), Thread.currentThread().getName(), success, fillRequest.getId());
+
+        return success;
+      } catch (Exception e) {
+        log.error("Error in scheduled form fill: {}", e.getMessage(), e);
+        return false;
+      }
+    }, executor);
+
+    CompletableFuture<Boolean> timeoutFuture =
+        future.orTimeout(timeoutSeconds, TimeUnit.SECONDS).exceptionally(throwable -> {
+          if (throwable instanceof java.util.concurrent.TimeoutException) {
+            // Record timeout event for monitoring
+            threadPoolMonitorService.recordTimeout(fillRequest.getId().toString(), totalTasks, 0,
+                fillRequest.isHumanLike());
+            log.error(
+                "Task for row {} timed out after {} seconds (fillRequest: {}, totalTasks: {}, isHuman: {})",
+                task.getRowIndex(), timeoutSeconds, fillRequest.getId(), totalTasks,
+                fillRequest.isHumanLike());
+          } else {
+            // Increment failed survey count in database
+            incrementFailedSurveyCount(fillRequest.getId());
+            log.error("Task for row {} failed with exception (fillRequest: {}): {}",
+                task.getRowIndex(), fillRequest.getId(), throwable.getMessage());
+          }
+          return false;
+        });
+
+    log.debug("Scheduled task for row {} with smart timeout protection ({}s) (fillRequest: {})",
+        task.getRowIndex(), timeoutSeconds, fillRequest.getId());
+
+    return timeoutFuture;
+  }
+
+  /**
+   * Calculate optimal timeout using AdaptiveTimeoutService
+   */
+  private long calculateOptimalTimeout(FillRequest fillRequest, int totalTasks) {
+    // Get current queue size and thread pool size
+    int currentQueueSize = getCurrentQueueSize();
+    int threadPoolSize = getThreadPoolSize();
+
+    // Use adaptive timeout calculation
+    return adaptiveTimeoutService.calculateFormTimeout(totalTasks, currentQueueSize,
+        threadPoolSize);
+  }
+
+  /**
+   * Get current queue size
+   */
+  private int getCurrentQueueSize() {
+    try {
+      ExecutorService executor = threadPoolManager.getExecutor(false); // fast mode executor
+      if (executor instanceof java.util.concurrent.ThreadPoolExecutor) {
+        java.util.concurrent.ThreadPoolExecutor tpe =
+            (java.util.concurrent.ThreadPoolExecutor) executor;
+        return tpe.getQueue().size();
+      }
+    } catch (Exception e) {
+      log.warn("Could not get queue size: {}", e.getMessage());
+    }
+    return 0;
+  }
+
+  /**
+   * Get thread pool size
+   */
+  private int getThreadPoolSize() {
+    return threadPoolSize;
+  }
+
+  /**
+   * Helper method to increment failed survey count
+   */
+  private void incrementFailedSurveyCount(UUID fillRequestId) {
+    try {
+      incrementFailedSurveyInTransaction(fillRequestId);
+      log.info("Incremented failed survey count for request: {}", fillRequestId);
+    } catch (Exception e) {
+      log.error("Failed to increment failed survey count for request: {}: {}", fillRequestId,
+          e.getMessage());
+    }
   }
 
   /**
    * Log thread pool status for debugging
    */
   private void logThreadPoolStatus(String context) {
-    if (executorService instanceof ThreadPoolExecutor) {
-      ThreadPoolExecutor threadPool = (ThreadPoolExecutor) executorService;
-      log.debug("THREAD POOL STATUS [{}]: Active={}, Pool={}, Queue={}, Completed={}", context,
-          threadPool.getActiveCount(), threadPool.getPoolSize(), threadPool.getQueue().size(),
-          threadPool.getCompletedTaskCount());
-    }
+    threadPoolManager.logThreadPoolStatus(context);
   }
 
   /**
-   * Execute actual form filling with data from sheet row
+   * Execute actual form filling with data from sheet row (WITH delay)
    */
   private boolean executeFormFill(FillRequest fillRequest, DataFillRequestDTO originalRequest,
       Map<UUID, Question> questionMap, List<Map<String, Object>> sheetData, ScheduledTask task) {
@@ -502,13 +889,19 @@ public class DataFillCampaignService {
         task.getRowIndex());
 
     try {
-      // Get data for this row (wrap if not enough rows)
-      int actualRowIndex = task.getRowIndex() % sheetData.size();
+      // Get data for this row (use absolute row index, fail if out of range)
+      int actualRowIndex = task.getRowIndex();
+      if (actualRowIndex < 0 || actualRowIndex >= sheetData.size()) {
+        log.error("Row index {} out of sheet range {}. Task failed.", actualRowIndex,
+            sheetData.size());
+        return false;
+      }
       Map<String, Object> rowData = sheetData.get(actualRowIndex);
-      log.info("Using data from row {} (wrapped from row {})", actualRowIndex, task.getRowIndex());
+      log.info("Using data from row {} (absolute row index)", actualRowIndex);
 
       // Build form submission data
-      Map<String, String> formData = buildFormData(originalRequest, questionMap, rowData);
+      Map<String, String> formData =
+          buildFormData(originalRequest, questionMap, rowData, fillRequest);
 
       // Add human-like delay before submission (only for subsequent forms, not the first one)
       if (task.getDelaySeconds() > 0 && task.getRowIndex() > 0) {
@@ -537,6 +930,8 @@ public class DataFillCampaignService {
                 fillRequest.getId(), task.getRowIndex());
             break;
           } else {
+            // Increment failed survey count in database
+            incrementFailedSurveyCount(fillRequest.getId());
             log.warn("Form submission failed on attempt {} for request: {}, row: {}", attempt,
                 fillRequest.getId(), task.getRowIndex());
 
@@ -574,8 +969,116 @@ public class DataFillCampaignService {
               e.getMessage());
         }
       } else {
+        // Increment failed survey count in database
+        incrementFailedSurveyCount(fillRequest.getId());
         log.error("Form submission failed for request: {}, row: {}", fillRequest.getId(),
             task.getRowIndex());
+
+        // Increment failed survey count in database
+        incrementFailedSurveyCount(fillRequest.getId());
+      }
+
+      return success;
+
+    } catch (Exception e) {
+      log.error("Error executing form fill for request: {}, row: {}", fillRequest.getId(),
+          task.getRowIndex(), e);
+      return false;
+    }
+  }
+
+  /**
+   * Execute actual form filling with data from sheet row (WITHOUT delay)
+   */
+  private boolean executeFormFillWithoutDelay(FillRequest fillRequest,
+      DataFillRequestDTO originalRequest, Map<UUID, Question> questionMap,
+      List<Map<String, Object>> sheetData, ScheduledTask task) {
+
+    log.info("Executing form fill WITHOUT delay for request: {}, row: {}", fillRequest.getId(),
+        task.getRowIndex());
+
+    try {
+      // Get data for this row (use absolute row index, fail if out of range)
+      int actualRowIndex = task.getRowIndex();
+      if (actualRowIndex < 0 || actualRowIndex >= sheetData.size()) {
+        log.error("Row index {} out of sheet range {}. Task failed.", actualRowIndex,
+            sheetData.size());
+        return false;
+      }
+      Map<String, Object> rowData = sheetData.get(actualRowIndex);
+      log.info("Using data from row {} (absolute row index)", actualRowIndex);
+
+      // Build form submission data
+      Map<String, String> formData =
+          buildFormData(originalRequest, questionMap, rowData, fillRequest);
+
+      // NO DELAY - delay was already applied by scheduler before submission
+      log.debug("No delay needed - task was already delayed by scheduler before submission");
+
+      // Submit form using browser automation
+      String formUrl = fillRequest.getForm().getEditLink();
+      boolean success = false;
+
+      // Enhanced retry logic with different strategies
+      for (int attempt = 1; attempt <= 3; attempt++) {
+        try {
+          log.info("Form submission attempt {}/3 for request: {}, row: {}", attempt,
+              fillRequest.getId(), task.getRowIndex());
+
+          success = googleFormService.submitFormWithBrowser(fillRequest.getId(),
+              fillRequest.getForm().getId(), formUrl, formData);
+
+          if (success) {
+            log.info("Form submission successful on attempt {} for request: {}, row: {}", attempt,
+                fillRequest.getId(), task.getRowIndex());
+            break;
+          } else {
+            // Increment failed survey count in database
+            incrementFailedSurveyCount(fillRequest.getId());
+            log.warn("Form submission failed on attempt {} for request: {}, row: {}", attempt,
+                fillRequest.getId(), task.getRowIndex());
+
+            // Wait before retry
+            if (attempt < 3) {
+              Thread.sleep(2000 * attempt); // Progressive delay: 2s, 4s
+            }
+          }
+        } catch (Exception e) {
+          log.error("Exception on form submission attempt {} for request: {}, row: {}: {}", attempt,
+              fillRequest.getId(), task.getRowIndex(), e.getMessage());
+
+          if (attempt < 3) {
+            Thread.sleep(2000 * attempt);
+          }
+        }
+      }
+
+      if (success) {
+        log.info("Form submission successful for request: {}, row: {}", fillRequest.getId(),
+            task.getRowIndex());
+        try {
+          // Use simple atomic increment - this was working fine before
+          boolean incrementSuccess =
+              fillRequestCounterService.incrementCompletedSurvey(fillRequest.getId());
+          if (!incrementSuccess) {
+            log.warn(
+                "Failed to increment completedSurvey for {} after retries (may have reached limit)",
+                fillRequest.getId());
+          }
+          // Emit progress update after successful increment
+          emitProgressUpdate(fillRequest.getId());
+        } catch (Exception e) {
+          log.error("Failed to increment completedSurvey for {}: {}", fillRequest.getId(),
+              e.getMessage());
+        }
+      } else {
+        // Increment failed survey count in database
+        incrementFailedSurveyCount(fillRequest.getId());
+        log.error("Form submission failed for request: {}, row: {}", fillRequest.getId(),
+            task.getRowIndex());
+
+        // Increment failed survey count in database
+        incrementFailedSurveyCount(fillRequest.getId());
       }
 
       return success;
@@ -591,7 +1094,7 @@ public class DataFillCampaignService {
    * Build form data from sheet row based on mappings
    */
   private Map<String, String> buildFormData(DataFillRequestDTO originalRequest,
-      Map<UUID, Question> questionMap, Map<String, Object> rowData) {
+      Map<UUID, Question> questionMap, Map<String, Object> rowData, FillRequest fillRequest) {
 
     Map<String, String> formData = new java.util.HashMap<>();
 
@@ -624,8 +1127,8 @@ public class DataFillCampaignService {
       }
 
       // Convert value based on question type
-      String convertedValue =
-          convertValueBasedOnQuestionType(value.toString(), question, explicitRowLabel, columnName);
+      String convertedValue = convertValueBasedOnQuestionType(value.toString(), question,
+          explicitRowLabel, columnName, fillRequest);
       if (convertedValue != null) {
         // For grid questions, accumulate multiple rows into a single entry using ';'
         String type = question.getType() == null ? "" : question.getType().toLowerCase();
@@ -634,9 +1137,13 @@ public class DataFillCampaignService {
           if (existing != null && !existing.isBlank()) {
             formData.put(baseQuestionId, existing + ";" + convertedValue);
           } else {
+            // Increment failed survey count in database
+            incrementFailedSurveyCount(fillRequest.getId());
             formData.put(baseQuestionId, convertedValue);
           }
         } else {
+          // Increment failed survey count in database
+          incrementFailedSurveyCount(fillRequest.getId());
           formData.put(baseQuestionId, convertedValue);
         }
       }
@@ -649,7 +1156,7 @@ public class DataFillCampaignService {
    * Convert value based on question type
    */
   private String convertValueBasedOnQuestionType(String value, Question question,
-      String explicitRowLabel, String columnName) {
+      String explicitRowLabel, String columnName, FillRequest fillRequest) {
     try {
       switch (question.getType().toLowerCase()) {
         case "text":
@@ -704,6 +1211,8 @@ public class DataFillCampaignService {
                       position, other, question.getId());
                   return "__other_option__" + "-" + other;
                 } else {
+                  // Increment failed survey count in database
+                  incrementFailedSurveyCount(fillRequest.getId());
                   // If position doesn't match, but this is the only option with text after dash,
                   // and the text doesn't match any predefined option, treat it as "other" text
                   boolean isOptionValue = getQuestionOptionsSafely(question).stream()
@@ -715,6 +1224,8 @@ public class DataFillCampaignService {
                         position, other, question.getId());
                     return "__other_option__" + "-" + other;
                   } else {
+                    // Increment failed survey count in database
+                    incrementFailedSurveyCount(fillRequest.getId());
                     log.debug(
                         "Text '{}' matches predefined option, not treating as 'other' for question {}",
                         other, question.getId());
@@ -791,9 +1302,13 @@ public class DataFillCampaignService {
               if (pos >= 1 && pos <= columns.size()) {
                 mapped.add(columns.get(pos - 1).getValue());
               } else {
+                // Increment failed survey count in database
+                incrementFailedSurveyCount(fillRequest.getId());
                 mapped.add(t);
               }
             } else {
+              // Increment failed survey count in database
+              incrementFailedSurveyCount(fillRequest.getId());
               mapped.add(t);
             }
           }

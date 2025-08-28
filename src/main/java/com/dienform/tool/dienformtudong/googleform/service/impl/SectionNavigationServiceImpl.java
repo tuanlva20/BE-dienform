@@ -54,6 +54,14 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
   @Value("${google.form.auto-submit:true}")
   private boolean autoSubmitEnabled;
 
+  // Enable lightweight branch capture only for read/create flow
+  @Value("${google.form.branch-capture.enabled:true}")
+  private boolean branchCaptureEnabled;
+
+  // Limit number of radio options to probe for branching
+  @Value("${google.form.branch-capture.max-options:4}")
+  private int branchCaptureMaxOptions;
+
   @Override
   public List<String> captureSectionHtmls(String formUrl) {
     WebDriver driver = null;
@@ -747,6 +755,25 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
           log.info("Section {} has no questions, proceeding directly to Next button", i);
         }
 
+        // Optional: probe one-level branching in current section using only role/aria selectors
+        if (branchCaptureEnabled) {
+          try {
+            log.info("Attempting branch capture for section {}", currentSectionIndex);
+            List<String> branchHtmls = tryOneLevelBranchCapture(driver, wait, currentSectionIndex);
+            if (branchHtmls != null && !branchHtmls.isEmpty()) {
+              htmls.addAll(branchHtmls);
+              log.info("Added {} branch HTMLs to capture result", branchHtmls.size());
+            } else {
+              log.info("No branch HTMLs captured for section {}", currentSectionIndex);
+            }
+          } catch (Exception e) {
+            log.warn("Branch capture failed for section {}: {}", currentSectionIndex,
+                e.getMessage());
+          }
+        } else {
+          log.debug("Branch capture disabled by configuration");
+        }
+
         // Click Next with enhanced retry logic and section change detection
         boolean sectionChanged =
             clickNextWithSectionChangeDetection(driver, wait, i, currentSectionIndex);
@@ -822,6 +849,180 @@ public class SectionNavigationServiceImpl implements SectionNavigationService {
           log.debug("Failed cleaning Chrome profile dir: {}", cleanupEx.getMessage());
         }
       }
+    }
+  }
+
+  /**
+   * Probe the first required radio group (or first radio group) to detect branching without using
+   * dynamic classes. For each of up to N options, if Next becomes available and clicking it leads
+   * to a different section, capture that section's HTML and navigate back. This is only used during
+   * form creation/reading, not during filling.
+   */
+  private List<String> tryOneLevelBranchCapture(WebDriver driver, WebDriverWait wait,
+      int currentSectionIndex) {
+    List<String> extras = new ArrayList<>();
+    try {
+      log.info("Starting branch capture for section {}", currentSectionIndex);
+      // Build a simple signature of current section to detect change
+      String originalSignature = getCurrentSectionIdentifier(driver);
+
+      // Remember current URL to be able to return
+      String originalUrl = driver.getCurrentUrl();
+
+      // Determine likely branching question title (radiogroup nearest to Next: choose last group)
+      String branchingTitle = null;
+      try {
+        List<WebElement> allGroups = driver.findElements(By.cssSelector("[role='radiogroup']"));
+        if (!allGroups.isEmpty()) {
+          WebElement nearestGroup = allGroups.get(allGroups.size() - 1);
+          branchingTitle = extractQuestionTitleFromChild(nearestGroup);
+          log.info("Heuristic branching question title: {}", branchingTitle);
+        }
+      } catch (Exception ignore) {
+      }
+
+      final String branchingTitleFinal = branchingTitle;
+
+      // Helper to refetch radios freshly from DOM (prefer container resolved by title)
+      java.util.function.Supplier<List<WebElement>> fetchRadios = () -> {
+        try {
+          if (branchingTitleFinal != null && !branchingTitleFinal.isBlank()) {
+            WebElement container = findQuestionContainerByTitle(driver, branchingTitleFinal);
+            if (container != null) {
+              List<WebElement> radios = container.findElements(By.cssSelector("[role='radio']"));
+              if (!radios.isEmpty())
+                return radios;
+            }
+          }
+        } catch (Exception ignore) {
+        }
+        // Fallbacks
+        List<WebElement> groups =
+            driver.findElements(By.cssSelector("[role='radiogroup'][aria-required='true']"));
+        if (groups.isEmpty()) {
+          groups = driver.findElements(By.cssSelector("[role='radiogroup']"));
+        }
+        if (groups.isEmpty())
+          return java.util.Collections.emptyList();
+        WebElement chosen = groups.get(groups.size() - 1);
+        return chosen.findElements(By.cssSelector("[role='radio']"));
+      };
+
+      List<WebElement> initRadios = fetchRadios.get();
+      if (initRadios.isEmpty())
+        return extras;
+      log.info("Found {} radio options to probe for branching", initRadios.size());
+      int limit = Math.max(0, Math.min(branchCaptureMaxOptions, initRadios.size()));
+      log.info("Will probe up to {} options (limited by config)", limit);
+
+      for (int idx = 0; idx < limit; idx++) {
+        log.info("Probing option {} of {}", idx + 1, limit);
+        // Ensure we are on original page and DOM is fresh for each attempt
+        if (idx > 0) {
+          driver.navigate().to(originalUrl);
+          wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("form")));
+          log.info("Returned to original section for option {}", idx + 1);
+        }
+
+        String beforeSig = getCurrentSectionIdentifier(driver);
+
+        List<WebElement> radios = fetchRadios.get();
+        if (radios.size() <= idx)
+          break;
+        WebElement radio = radios.get(idx);
+        log.info("Attempting to click radio option {}: '{}'", idx + 1,
+            radio.getAttribute("aria-label") != null ? radio.getAttribute("aria-label")
+                : "unknown");
+
+        try {
+          wait.until(ExpectedConditions.elementToBeClickable(radio)).click();
+          log.info("Successfully clicked radio option {}", idx + 1);
+        } catch (Exception clickIgnore) {
+          log.warn("Failed to click radio option {}: {}", idx + 1, clickIgnore.getMessage());
+          continue;
+        }
+
+        // Verify selection
+        try {
+          String checked = radio.getAttribute("aria-checked");
+          log.info("Radio option {} aria-checked: {}", idx + 1, checked);
+          if (!"true".equals(checked)) {
+            try {
+              radio.click();
+            } catch (Exception ignore) {
+            }
+            log.info("Re-clicked radio option {} to ensure selection", idx + 1);
+          }
+        } catch (Exception ignore) {
+        }
+
+        // If Next not ready, skip this choice
+        try {
+          if (!requiredQuestionAutofillService.isNextButtonReady(driver)) {
+            log.info("Next button not ready after selecting option {}, skipping", idx + 1);
+            continue;
+          }
+        } catch (Exception ignore) {
+          log.warn("Error checking Next button readiness for option {}: {}", idx + 1,
+              ignore.getMessage());
+          continue;
+        }
+        log.info("Next button ready after selecting option {}", idx + 1);
+
+        boolean changed =
+            clickNextWithSectionChangeDetection(driver, wait, idx + 1, currentSectionIndex);
+        if (!changed) {
+          log.warn("Failed to change section after selecting option {}, returning to original",
+              idx + 1);
+          driver.navigate().to(originalUrl);
+          wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("form")));
+          continue;
+        }
+
+        extras.add(driver.getPageSource());
+        log.info("Successfully captured branch section HTML for option {}", idx + 1);
+
+        // Return to original for next option
+        driver.navigate().to(originalUrl);
+        wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("form")));
+
+        String afterBack = getCurrentSectionIdentifier(driver);
+        if (!originalSignature.equals(afterBack) || !beforeSig.equals(afterBack)) {
+          log.warn(
+              "Section signature changed unexpectedly after returning from option {}, stopping",
+              idx + 1);
+          break;
+        }
+        log.info("Successfully returned to original section after option {}", idx + 1);
+      }
+      log.info("Branch capture completed, captured {} additional sections", extras.size());
+    } catch (Exception e) {
+      log.warn("tryOneLevelBranchCapture error: {}", e.getMessage(), e);
+    }
+    return extras;
+  }
+
+  // Find question container by its heading title (exact match after normalization)
+  private WebElement findQuestionContainerByTitle(WebDriver driver, String title) {
+    try {
+      if (title == null || title.isBlank())
+        return null;
+      String x = "//div[@role='listitem'][.//div[@role='heading' and normalize-space()=\""
+          + title.replace("\"", "\\\"") + "\"]]";
+      return driver.findElement(By.xpath(x));
+    } catch (Exception e) {
+      return null;
+    }
+  }
+
+  // Extract question title from any child element inside a question container
+  private String extractQuestionTitleFromChild(WebElement child) {
+    try {
+      WebElement container = child.findElement(By.xpath("ancestor::div[@role='listitem']"));
+      WebElement heading = container.findElement(By.cssSelector("[role='heading']"));
+      return heading.getText().replace("*", "").trim();
+    } catch (Exception e) {
+      return null;
     }
   }
 

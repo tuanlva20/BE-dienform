@@ -3,6 +3,7 @@ package com.dienform.tool.dienformtudong.fillrequest.service;
 import java.util.UUID;
 import com.dienform.tool.dienformtudong.datamapping.dto.request.DataFillRequestDTO;
 import com.dienform.tool.dienformtudong.fillrequest.dto.request.FillRequestDTO;
+import com.dienform.tool.dienformtudong.fillrequest.dto.response.BatchProgressResponse;
 import com.dienform.tool.dienformtudong.fillrequest.dto.response.FillRequestResponse;
 
 public interface FillRequestService {
@@ -13,4 +14,6 @@ public interface FillRequestService {
     void deleteFillRequest(UUID id);
 
     FillRequestResponse createDataFillRequest(DataFillRequestDTO dataFillRequestDTO);
+
+    BatchProgressResponse getBatchProgress(UUID requestId);
 }

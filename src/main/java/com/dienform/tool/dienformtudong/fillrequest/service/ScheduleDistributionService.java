@@ -1,5 +1,6 @@
 package com.dienform.tool.dienformtudong.fillrequest.service;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
@@ -19,6 +20,13 @@ public class ScheduleDistributionService {
     private final int delaySeconds;
     private final int rowIndex;
 
+    // Jackson constructor
+    public ScheduledTask() {
+      this.executionTime = null;
+      this.delaySeconds = 0;
+      this.rowIndex = 0;
+    }
+
     public ScheduledTask(LocalDateTime executionTime, int delaySeconds, int rowIndex) {
       this.executionTime = executionTime;
       this.delaySeconds = delaySeconds;
@@ -35,6 +43,31 @@ public class ScheduleDistributionService {
 
     public int getRowIndex() {
       return rowIndex;
+    }
+  }
+
+  public static class BatchScheduleInfo {
+    private final List<ScheduledTask> tasks;
+    private final LocalDateTime estimatedCompletionDate;
+    private final boolean adjustedForTimeConstraint;
+
+    public BatchScheduleInfo(List<ScheduledTask> tasks, LocalDateTime estimatedCompletionDate,
+        boolean adjustedForTimeConstraint) {
+      this.tasks = tasks;
+      this.estimatedCompletionDate = estimatedCompletionDate;
+      this.adjustedForTimeConstraint = adjustedForTimeConstraint;
+    }
+
+    public List<ScheduledTask> getTasks() {
+      return tasks;
+    }
+
+    public LocalDateTime getEstimatedCompletionDate() {
+      return estimatedCompletionDate;
+    }
+
+    public boolean isAdjustedForTimeConstraint() {
+      return adjustedForTimeConstraint;
     }
   }
   /**
@@ -110,10 +143,54 @@ public class ScheduleDistributionService {
     if (isHumanLike) {
       schedule = createHumanLikeSchedule(submissionCount, startZoned, endZoned, completedSurvey);
     } else {
-      schedule = createFastSchedule(submissionCount, startZoned, endZoned);
+      schedule = createFastSchedule(submissionCount, startZoned, endZoned, completedSurvey);
     }
 
     return schedule;
+  }
+
+  /**
+   * Distribute form filling tasks with batch processing and smart delay adjustment
+   * 
+   * @param submissionCount Total number of forms to fill
+   * @param startDate Start date/time
+   * @param endDate End date/time (can be null)
+   * @param isHumanLike Whether to use human-like delays
+   * @param completedSurvey Number of completed surveys
+   * @param batchSize Size of each batch
+   * @return BatchScheduleInfo containing tasks and estimated completion
+   */
+  public BatchScheduleInfo distributeScheduleWithBatching(int submissionCount,
+      LocalDateTime startDate, LocalDateTime endDate, boolean isHumanLike, int completedSurvey,
+      int batchSize) {
+
+    log.info("Creating batch schedule for {} forms with batch size {}", submissionCount, batchSize);
+
+    // Calculate estimated completion with original delays
+    LocalDateTime estimatedCompletion = calculateEstimatedCompletion(submissionCount, startDate,
+        endDate, isHumanLike, completedSurvey);
+
+    boolean adjustedForTimeConstraint = false;
+
+    // Check if we need to adjust delays for time constraint
+    if (endDate != null && estimatedCompletion.isAfter(endDate)) {
+      log.warn(
+          "Estimated completion {} exceeds end date {}. Adjusting delays to fit within time constraint.",
+          estimatedCompletion, endDate);
+
+      // Recalculate with adjusted delays
+      estimatedCompletion = calculateEstimatedCompletionWithAdjustedDelays(submissionCount,
+          startDate, endDate, isHumanLike, completedSurvey);
+      adjustedForTimeConstraint = true;
+
+      log.info("Adjusted estimated completion: {}", estimatedCompletion);
+    }
+
+    // Create schedule (will be split into batches later)
+    List<ScheduledTask> allTasks =
+        distributeSchedule(submissionCount, startDate, endDate, isHumanLike, completedSurvey);
+
+    return new BatchScheduleInfo(allTasks, estimatedCompletion, adjustedForTimeConstraint);
   }
 
   /**
@@ -146,7 +223,7 @@ public class ScheduleDistributionService {
             delaySeconds, delaySeconds / 60);
       }
 
-      schedule.add(new ScheduledTask(executionTime, delaySeconds, i));
+      schedule.add(new ScheduledTask(executionTime, delaySeconds, completedSurvey + i));
     }
 
     // Sort by execution time and recalculate delays based on actual execution times
@@ -177,7 +254,7 @@ public class ScheduleDistributionService {
    * Create fast schedule for non-human-like filling
    */
   private List<ScheduledTask> createFastSchedule(int submissionCount, ZonedDateTime start,
-      ZonedDateTime end) {
+      ZonedDateTime end, int completedSurvey) {
     List<ScheduledTask> schedule = new ArrayList<>();
 
     long totalSeconds = java.time.Duration.between(start, end).getSeconds();
@@ -197,7 +274,7 @@ public class ScheduleDistributionService {
         delaySeconds = 0; // First form: no delay
       }
 
-      schedule.add(new ScheduledTask(currentTime, delaySeconds, i));
+      schedule.add(new ScheduledTask(currentTime, delaySeconds, completedSurvey + i));
 
       // Add interval for next task
       long interval = intervalSeconds;
@@ -255,7 +332,7 @@ public class ScheduleDistributionService {
         }
       }
 
-      schedule.add(new ScheduledTask(currentTime, delaySeconds, i));
+      schedule.add(new ScheduledTask(currentTime, delaySeconds, completedSurvey + i));
     }
 
     log.info("Created {} immediate execution tasks starting at {}", schedule.size(), startDate);
@@ -336,5 +413,84 @@ public class ScheduleDistributionService {
 
     // Fallback to last slot
     return slots.get(slots.size() - 1);
+  }
+
+  /**
+   * Calculate estimated completion date based on delays
+   */
+  private LocalDateTime calculateEstimatedCompletion(int submissionCount, LocalDateTime startDate,
+      LocalDateTime endDate, boolean isHumanLike, int completedSurvey) {
+
+    LocalDateTime currentTime = startDate;
+
+    for (int i = 0; i < submissionCount; i++) {
+      int delaySeconds;
+
+      if (isHumanLike) {
+        if (completedSurvey == 0 && i == 0) {
+          delaySeconds = 0;
+        } else {
+          delaySeconds = 120 + random.nextInt(780); // 2-15 minutes
+        }
+      } else {
+        if (i == 0) {
+          delaySeconds = 0;
+        } else {
+          delaySeconds = 1; // 1 second
+        }
+      }
+
+      currentTime = currentTime.plusSeconds(delaySeconds);
+    }
+
+    return currentTime;
+  }
+
+  /**
+   * Calculate estimated completion with adjusted delays to fit within time constraint
+   */
+  private LocalDateTime calculateEstimatedCompletionWithAdjustedDelays(int submissionCount,
+      LocalDateTime startDate, LocalDateTime endDate, boolean isHumanLike, int completedSurvey) {
+
+    if (endDate == null) {
+      return calculateEstimatedCompletion(submissionCount, startDate, endDate, isHumanLike,
+          completedSurvey);
+    }
+
+    Duration availableTime = Duration.between(startDate, endDate);
+    long availableSeconds = availableTime.getSeconds();
+
+    if (availableSeconds <= 0) {
+      log.warn("No time available between start and end date. Using original schedule.");
+      return calculateEstimatedCompletion(submissionCount, startDate, endDate, isHumanLike,
+          completedSurvey);
+    }
+
+    // Calculate adjusted delay per form
+    long adjustedDelaySeconds;
+    if (isHumanLike) {
+      // Reserve some time for actual form filling (assume 2 minutes per form)
+      long formFillingTime = submissionCount * 120; // 2 minutes per form
+      long availableForDelays = Math.max(0, availableSeconds - formFillingTime);
+      adjustedDelaySeconds = availableForDelays / Math.max(1, submissionCount - 1);
+
+      // Ensure minimum delay of 30 seconds for human-like
+      adjustedDelaySeconds = Math.max(30, adjustedDelaySeconds);
+
+      log.info("Adjusted human-like delay: {} seconds (original: 120-900 seconds)",
+          adjustedDelaySeconds);
+    } else {
+      // For fast mode, keep 1 second delay
+      adjustedDelaySeconds = 1;
+    }
+
+    LocalDateTime currentTime = startDate;
+    for (int i = 0; i < submissionCount; i++) {
+      if (i > 0) {
+        currentTime = currentTime.plusSeconds(adjustedDelaySeconds);
+      }
+    }
+
+    return currentTime;
   }
 }

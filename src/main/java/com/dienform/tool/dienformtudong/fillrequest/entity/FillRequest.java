@@ -33,6 +33,7 @@ import lombok.NoArgsConstructor;
 @AllArgsConstructor
 @Entity
 @org.hibernate.annotations.DynamicUpdate
+@org.hibernate.annotations.DynamicInsert
 @Table(name = "fill_request")
 @EqualsAndHashCode(callSuper = true)
 public class FillRequest extends AuditEntity {
@@ -43,6 +44,10 @@ public class FillRequest extends AuditEntity {
     @Builder.Default
     @Column(name = "completed_survey", nullable = false)
     private int completedSurvey = 0;
+
+    @Builder.Default
+    @Column(name = "failed_survey", nullable = false)
+    private int failedSurvey = 0;
 
     @Column(name = "price_per_survey", nullable = false)
     private BigDecimal pricePerSurvey;
@@ -58,6 +63,9 @@ public class FillRequest extends AuditEntity {
 
     @Column(name = "end_date")
     private LocalDateTime endDate;
+
+    @Column(name = "estimated_completion_date")
+    private LocalDateTime estimatedCompletionDate;
 
     @Enumerated(EnumType.STRING)
     @Column(name = "status", nullable = false)
