@@ -18,7 +18,6 @@ import com.dienform.tool.dienformtudong.datamapping.dto.response.DataFillRequest
 import com.dienform.tool.dienformtudong.datamapping.dto.response.DataMappingResponse;
 import com.dienform.tool.dienformtudong.datamapping.dto.response.SheetAccessibilityInfo;
 import com.dienform.tool.dienformtudong.datamapping.service.GoogleSheetsService;
-import com.dienform.tool.dienformtudong.datamapping.service.SimilarityService;
 import com.dienform.tool.dienformtudong.datamapping.util.DataMappingUtil;
 import com.dienform.tool.dienformtudong.datamapping.validator.DataFillRequestValidator;
 import com.dienform.tool.dienformtudong.question.dto.response.QuestionResponse;
@@ -55,8 +54,7 @@ public class DataMappingController {
   @Autowired
   private GoogleSheetsService googleSheetsService;
 
-  @Autowired
-  private SimilarityService similarityService;
+
 
   @Autowired
   private DataFillRequestValidator dataFillRequestValidator;
@@ -204,39 +202,48 @@ public class DataMappingController {
       List<String> rawSheetColumns, List<String> formattedSheetColumns) {
     List<AutoMapping> mappings = new ArrayList<>();
 
-    // Minimum confidence threshold for auto mapping
-    final double MIN_CONFIDENCE = 0.6;
+    // Build a quick lookup of normalized header -> index
+    // Normalization: trim + lowercase
+    java.util.Map<String, Integer> headerIndexByName = new java.util.HashMap<>();
+    for (int i = 0; i < rawSheetColumns.size(); i++) {
+      String header = rawSheetColumns.get(i);
+      if (header != null) {
+        headerIndexByName.put(header.trim().toLowerCase(), i);
+      }
+    }
 
-    for (QuestionResponse question : formQuestions) {
-      String bestFormattedMatch = null;
-      double bestConfidence = 0.0;
-      int bestMatchIndex = -1;
+    for (int qIndex = 0; qIndex < formQuestions.size(); qIndex++) {
+      QuestionResponse question = formQuestions.get(qIndex);
 
-      // Find the best matching column for this question using raw column names
-      for (int i = 0; i < rawSheetColumns.size(); i++) {
-        String rawColumn = rawSheetColumns.get(i);
+      String normalizedTitle =
+          question.getTitle() == null ? null : question.getTitle().trim().toLowerCase();
+      String normalizedDescription =
+          question.getDescription() == null ? null : question.getDescription().trim().toLowerCase();
 
-        // Calculate similarity using the cleaned question title and raw column name
-        double confidence = similarityService.calculateSimilarity(question.getTitle(), rawColumn);
+      Integer matchIndex = null;
+      double confidence = 0.0;
 
-        // Also check against question description if available
-        if (question.getDescription() != null && !question.getDescription().trim().isEmpty()) {
-          double descriptionConfidence =
-              similarityService.calculateSimilarity(question.getDescription(), rawColumn);
-          confidence = Math.max(confidence, descriptionConfidence);
-        }
-
-        if (confidence > bestConfidence && confidence >= MIN_CONFIDENCE) {
-          bestConfidence = confidence;
-          bestMatchIndex = i;
-          bestFormattedMatch = formattedSheetColumns.get(i); // Use formatted column for display
+      // 1) Prefer exact header-name match by title
+      if (normalizedTitle != null && headerIndexByName.containsKey(normalizedTitle)) {
+        matchIndex = headerIndexByName.get(normalizedTitle);
+        confidence = 1.0; // exact name match
+      } else if (normalizedDescription != null
+          && headerIndexByName.containsKey(normalizedDescription)) {
+        // 2) If title not found, try exact match by description
+        matchIndex = headerIndexByName.get(normalizedDescription);
+        confidence = 0.9;
+      } else {
+        // 3) Fallback to positional mapping: question i -> column i (if present)
+        if (qIndex < formattedSheetColumns.size()) {
+          matchIndex = qIndex;
+          confidence = 0.5;
         }
       }
 
-      // Only add mapping if confidence is above threshold
-      if (bestFormattedMatch != null && bestMatchIndex >= 0) {
+      if (matchIndex != null) {
+        String displayColumn = formattedSheetColumns.get(matchIndex);
         mappings.add(new AutoMapping(question.getId().toString(), question.getTitle(),
-            bestFormattedMatch, bestConfidence));
+            displayColumn, confidence));
       }
     }
 
