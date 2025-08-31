@@ -42,7 +42,7 @@ public class PaymentOrder extends AuditEntity {
   private BigDecimal actualAmount;
 
   @Enumerated(EnumType.STRING)
-  @Column(name = "status", nullable = false)
+  @Column(name = "status", nullable = false, length = 25)
   private PaymentStatus status;
 
   @Column(name = "order_id", unique = true, nullable = false)

@@ -15,7 +15,7 @@ spring:
     open-in-view: false
     show-sql: false # Enable SQL logging in development
     hibernate:
-      ddl-auto: none # Auto update schema in development
+      ddl-auto: update # Auto update schema in development
     properties:
       hibernate:
         jdbc:
@@ -199,10 +199,10 @@ ai:
 
 # SEPAY Payment Configuration
 sepay:
-  secret-key: ${SEPAY_SECRET_KEY:your-sepay-secret-key}
-  qr-base-url: ${SEPAY_QR_BASE_URL:https://api.sepay.vn/qr}
+  secret-key: ${SEPAY_SECRET_KEY:msfjs05kr5mqtk8nsli7hmmrid9qlc3t}
+  qr-base-url: ${SEPAY_QR_BASE_URL:https://qr.sepay.vn/img}
   api-url: ${SEPAY_API_URL:https://api.sepay.vn}
-  webhook-url: ${SEPAY_WEBHOOK_URL:https://your-domain.com/api/payments/sepay/webhook}
+  webhook-url: ${SEPAY_WEBHOOK_URL:http://localhost:2412/api/payments/sepay/webhook}
   order-expiration-minutes: 15
   webhook-retry-minutes: 5
   max-retry-attempts: 3

@@ -41,6 +41,8 @@ import com.dienform.tool.dienformtudong.fillrequest.validator.DataFillValidator;
 import com.dienform.tool.dienformtudong.form.entity.Form;
 import com.dienform.tool.dienformtudong.form.repository.FormRepository;
 import com.dienform.tool.dienformtudong.googleform.service.GoogleFormService;
+import com.dienform.tool.dienformtudong.payment.service.PaymentRealtimeService;
+import com.dienform.tool.dienformtudong.payment.service.UserBalanceService;
 import com.dienform.tool.dienformtudong.question.entity.Question;
 import com.dienform.tool.dienformtudong.question.entity.QuestionOption;
 import com.dienform.tool.dienformtudong.question.repository.QuestionOptionRepository;
@@ -73,6 +75,8 @@ public class FillRequestServiceImpl implements FillRequestService {
   private final com.dienform.common.util.CurrentUserUtil currentUserUtil;
   private final QueueManagementService queueManagementService;
   private final PriorityCalculationService priorityCalculationService;
+  private final UserBalanceService userBalanceService;
+  private final PaymentRealtimeService paymentRealtimeService;
 
   @PersistenceContext
   private EntityManager entityManager;
@@ -120,6 +124,19 @@ public class FillRequestServiceImpl implements FillRequestService {
                 .multiply(BigDecimal.valueOf(fillRequestDTO.getSurveyCount())))
             .humanLike(Boolean.TRUE.equals(fillRequestDTO.getIsHumanLike())).startDate(startDate)
             .endDate(endDate).status(FillRequestStatusEnum.QUEUED).priority(0).build();
+
+    // Deduct user balance before persisting fully, within same transaction
+    BigDecimal totalPrice = fillRequest.getTotalPrice();
+    String currentUserId = currentUserUtil.requireCurrentUserId().toString();
+    try {
+      userBalanceService.deductBalance(currentUserId, totalPrice);
+      // Emit realtime balance update
+      paymentRealtimeService.emitBalanceUpdate(currentUserId);
+    } catch (Exception e) {
+      log.error("Balance deduction failed for user {} amount {}: {}", currentUserId, totalPrice,
+          e.getMessage());
+      throw new BadRequestException("Số dư không đủ hoặc không thể trừ tiền");
+    }
 
     FillRequest savedRequest = fillRequestRepository.save(fillRequest);
     log.info("Fill request saved with ID: {}", savedRequest.getId());
@@ -317,6 +334,18 @@ public class FillRequestServiceImpl implements FillRequestService {
             .multiply(BigDecimal.valueOf(requestedSubmissionCount)))
         .humanLike(Boolean.TRUE.equals(dataFillRequestDTO.getIsHumanLike())).startDate(startDate)
         .endDate(endDate).status(FillRequestStatusEnum.QUEUED).priority(0).build();
+
+    // Deduct user balance within same transaction
+    BigDecimal totalPrice = fillRequest.getTotalPrice();
+    String currentUserId = currentUserUtil.requireCurrentUserId().toString();
+    try {
+      userBalanceService.deductBalance(currentUserId, totalPrice);
+      paymentRealtimeService.emitBalanceUpdate(currentUserId);
+    } catch (Exception e) {
+      log.error("Data fill - Balance deduction failed for user {} amount {}: {}", currentUserId,
+          totalPrice, e.getMessage());
+      throw new BadRequestException("Số dư không đủ hoặc không thể trừ tiền");
+    }
 
     FillRequest savedRequest = fillRequestRepository.save(fillRequest);
 

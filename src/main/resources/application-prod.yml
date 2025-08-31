@@ -199,3 +199,13 @@ ai:
       max-questions-per-form: 1000
       min-sample-count: 1
       max-instruction-length: 1000
+
+# SEPAY Payment Configuration
+sepay:
+  secret-key: ${SEPAY_SECRET_KEY:your-sepay-secret-key}
+  qr-base-url: ${SEPAY_QR_BASE_URL:https://qr.sepay.vn/img}
+  api-url: ${SEPAY_API_URL:https://api.sepay.vn}
+  webhook-url: ${SEPAY_WEBHOOK_URL:https://160.25.72.91:2412/api/payments/sepay/webhook}
+  order-expiration-minutes: 15
+  webhook-retry-minutes: 5
+  max-retry-attempts: 3

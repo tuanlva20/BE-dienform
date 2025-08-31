@@ -5,5 +5,6 @@ public enum PaymentStatus {
   COMPLETED, // Thanh toán thành công
   FAILED, // Thanh toán thất bại
   EXPIRED, // Hết hạn
-  MISMATCH // Số tiền không khớp
+  MISMATCH, // Số tiền không khớp (thiếu)
+  OVERPAYMENT // Số tiền vượt quá (có thể là tấn công)
 }

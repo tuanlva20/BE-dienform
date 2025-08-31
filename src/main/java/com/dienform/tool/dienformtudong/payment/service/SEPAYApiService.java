@@ -32,7 +32,7 @@ public class SEPAYApiService {
       String url = sepayApiUrl + "/transaction/status/" + orderId;
 
       HttpHeaders headers = new HttpHeaders();
-      headers.set("Authorization", "Bearer " + sepaySecretKey);
+      headers.set("Authorization", "Apikey " + sepaySecretKey);
       headers.set("Content-Type", "application/json");
 
       HttpEntity<String> entity = new HttpEntity<>(headers);
