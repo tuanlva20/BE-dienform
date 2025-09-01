@@ -12,9 +12,13 @@ import java.util.stream.Collectors;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import com.dienform.common.entity.ReportPaymentOrder;
+import com.dienform.common.entity.User;
 // Transaction event imports removed - no longer needed
 import com.dienform.common.exception.BadRequestException;
 import com.dienform.common.exception.ResourceNotFoundException;
+import com.dienform.common.repository.ReportPaymentOrderRepository;
+import com.dienform.common.repository.UserRepository;
 import com.dienform.common.util.DateTimeUtil;
 import com.dienform.tool.dienformtudong.answerdistribution.entity.AnswerDistribution;
 import com.dienform.tool.dienformtudong.answerdistribution.repository.AnswerDistributionRepository;
@@ -77,6 +81,8 @@ public class FillRequestServiceImpl implements FillRequestService {
   private final PriorityCalculationService priorityCalculationService;
   private final UserBalanceService userBalanceService;
   private final PaymentRealtimeService paymentRealtimeService;
+  private final ReportPaymentOrderRepository paymentOrderRepository;
+  private final UserRepository userRepository;
 
   @PersistenceContext
   private EntityManager entityManager;
@@ -125,13 +131,34 @@ public class FillRequestServiceImpl implements FillRequestService {
             .humanLike(Boolean.TRUE.equals(fillRequestDTO.getIsHumanLike())).startDate(startDate)
             .endDate(endDate).status(FillRequestStatusEnum.QUEUED).priority(0).build();
 
-    // Deduct user balance before persisting fully, within same transaction
+    // Deduct user balance and create withdrawal payment order within same transaction
     BigDecimal totalPrice = fillRequest.getTotalPrice();
     String currentUserId = currentUserUtil.requireCurrentUserId().toString();
     try {
+      // Get user for payment order creation
+      User user = userRepository.findById(UUID.fromString(currentUserId))
+          .orElseThrow(() -> new ResourceNotFoundException("User", "id", currentUserId));
+
+      // Deduct balance first
       userBalanceService.deductBalance(currentUserId, totalPrice);
+
+      // Create withdrawal payment order to track spending
+      ReportPaymentOrder withdrawalOrder = ReportPaymentOrder.builder().user(user)
+          .amount(totalPrice).paymentType(ReportPaymentOrder.PaymentType.WITHDRAWAL)
+          .status(ReportPaymentOrder.PaymentStatus.COMPLETED)
+          .description("Chi phí điền form - " + form.getName() + " ("
+              + fillRequestDTO.getSurveyCount() + " surveys)")
+          .transactionId("WITHDRAWAL_" + System.currentTimeMillis()).isPromotional(false)
+          .isReported(false).build();
+
+      paymentOrderRepository.save(withdrawalOrder);
+
       // Emit realtime balance update
       paymentRealtimeService.emitBalanceUpdate(currentUserId);
+
+      log.info("Created withdrawal payment order: {} for fill request amount: {}",
+          withdrawalOrder.getId(), totalPrice);
+
     } catch (Exception e) {
       log.error("Balance deduction failed for user {} amount {}: {}", currentUserId, totalPrice,
           e.getMessage());
@@ -339,8 +366,29 @@ public class FillRequestServiceImpl implements FillRequestService {
     BigDecimal totalPrice = fillRequest.getTotalPrice();
     String currentUserId = currentUserUtil.requireCurrentUserId().toString();
     try {
+      // Get user for payment order creation
+      User user = userRepository.findById(UUID.fromString(currentUserId))
+          .orElseThrow(() -> new ResourceNotFoundException("User", "id", currentUserId));
+
+      // Deduct balance first
       userBalanceService.deductBalance(currentUserId, totalPrice);
+
+      // Create withdrawal payment order to track spending
+      ReportPaymentOrder withdrawalOrder = ReportPaymentOrder.builder().user(user)
+          .amount(totalPrice).paymentType(ReportPaymentOrder.PaymentType.WITHDRAWAL)
+          .status(ReportPaymentOrder.PaymentStatus.COMPLETED)
+          .description("Chi phí điền form dữ liệu - " + form.getName() + " ("
+              + requestedSubmissionCount + " submissions)")
+          .transactionId("WITHDRAWAL_DATA_" + System.currentTimeMillis()).isPromotional(false)
+          .isReported(false).build();
+
+      paymentOrderRepository.save(withdrawalOrder);
+
       paymentRealtimeService.emitBalanceUpdate(currentUserId);
+
+      log.info("Created withdrawal payment order: {} for data fill request amount: {}",
+          withdrawalOrder.getId(), totalPrice);
+
     } catch (Exception e) {
       log.error("Data fill - Balance deduction failed for user {} amount {}: {}", currentUserId,
           totalPrice, e.getMessage());

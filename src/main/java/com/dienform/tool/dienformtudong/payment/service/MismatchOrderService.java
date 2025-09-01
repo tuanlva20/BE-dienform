@@ -36,7 +36,7 @@ public class MismatchOrderService {
   private final UserBalanceService userBalanceService;
   private final PaymentRealtimeService paymentRealtimeService;
 
-  private final PaymentOrderRepository paymentOrderRepository;
+  private final com.dienform.tool.dienformtudong.payment.repository.PaymentOrderRepository paymentOrderRepository;
 
   /**
    * Process underpayment order by adding actual amount to user balance This ensures user receives

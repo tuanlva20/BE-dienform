@@ -14,7 +14,6 @@ import com.dienform.common.model.ResponseModel;
 import com.dienform.common.util.CurrentUserUtil;
 import com.dienform.tool.dienformtudong.payment.entity.PaymentOrder;
 import com.dienform.tool.dienformtudong.payment.enums.PaymentStatus;
-import com.dienform.tool.dienformtudong.payment.repository.PaymentOrderRepository;
 import com.dienform.tool.dienformtudong.payment.service.MismatchOrderService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -26,7 +25,7 @@ import lombok.extern.slf4j.Slf4j;
 public class MismatchOrderController {
 
   private final MismatchOrderService mismatchOrderService;
-  private final PaymentOrderRepository paymentOrderRepository;
+  private final com.dienform.tool.dienformtudong.payment.repository.PaymentOrderRepository paymentOrderRepository;
   private final CurrentUserUtil currentUserUtil;
 
   /**

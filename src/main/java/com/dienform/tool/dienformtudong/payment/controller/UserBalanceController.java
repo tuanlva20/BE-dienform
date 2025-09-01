@@ -14,7 +14,6 @@ import com.dienform.common.model.ResponseModel;
 import com.dienform.common.util.CurrentUserUtil;
 import com.dienform.tool.dienformtudong.payment.entity.PaymentOrder;
 import com.dienform.tool.dienformtudong.payment.enums.PaymentStatus;
-import com.dienform.tool.dienformtudong.payment.repository.PaymentOrderRepository;
 import com.dienform.tool.dienformtudong.payment.service.PaymentRealtimeService;
 import com.dienform.tool.dienformtudong.payment.service.UserBalanceService;
 import com.dienform.tool.dienformtudong.payment.service.UserBalanceService.BalanceInfo;
@@ -30,7 +29,7 @@ public class UserBalanceController {
   private final UserBalanceService userBalanceService;
   private final PaymentRealtimeService paymentRealtimeService;
   private final CurrentUserUtil currentUserUtil;
-  private final PaymentOrderRepository paymentOrderRepository;
+  private final com.dienform.tool.dienformtudong.payment.repository.PaymentOrderRepository paymentOrderRepository;
 
   @GetMapping
   public ResponseEntity<ResponseModel<BigDecimal>> getBalance() {

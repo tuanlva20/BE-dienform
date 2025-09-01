@@ -14,7 +14,6 @@ import com.dienform.common.model.ResponseModel;
 import com.dienform.common.util.CurrentUserUtil;
 import com.dienform.tool.dienformtudong.payment.entity.PaymentOrder;
 import com.dienform.tool.dienformtudong.payment.enums.PaymentStatus;
-import com.dienform.tool.dienformtudong.payment.repository.PaymentOrderRepository;
 import com.dienform.tool.dienformtudong.payment.service.OverpaymentOrderService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -26,7 +25,7 @@ import lombok.extern.slf4j.Slf4j;
 public class OverpaymentOrderController {
 
   private final OverpaymentOrderService overpaymentOrderService;
-  private final PaymentOrderRepository paymentOrderRepository;
+  private final com.dienform.tool.dienformtudong.payment.repository.PaymentOrderRepository paymentOrderRepository;
   private final CurrentUserUtil currentUserUtil;
 
   /**
@@ -40,8 +39,9 @@ public class OverpaymentOrderController {
       List<PaymentOrder> overpaymentOrders =
           paymentOrderRepository.findByUserIdAndStatus(userId, PaymentStatus.OVERPAYMENT);
 
-      List<OverpaymentOrderService.OverpaymentDetails> overpaymentDetails = overpaymentOrders.stream()
-          .map(overpaymentOrderService::getOverpaymentDetails).collect(Collectors.toList());
+      List<OverpaymentOrderService.OverpaymentDetails> overpaymentDetails =
+          overpaymentOrders.stream().map(overpaymentOrderService::getOverpaymentDetails)
+              .collect(Collectors.toList());
 
       return ResponseEntity.ok(ResponseModel.success(overpaymentDetails, HttpStatus.OK));
     } catch (Exception e) {
@@ -74,7 +74,8 @@ public class OverpaymentOrderController {
             .body(ResponseModel.error("Order is not an overpayment order", HttpStatus.BAD_REQUEST));
       }
 
-      OverpaymentOrderService.OverpaymentDetails details = overpaymentOrderService.getOverpaymentDetails(order);
+      OverpaymentOrderService.OverpaymentDetails details =
+          overpaymentOrderService.getOverpaymentDetails(order);
       return ResponseEntity.ok(ResponseModel.success(details, HttpStatus.OK));
     } catch (Exception e) {
       log.error("Error getting overpayment order details for order: {}", orderId, e);
@@ -103,28 +104,20 @@ public class OverpaymentOrderController {
 
       BigDecimal totalExcess = totalActual.subtract(totalExpected);
 
-      long highRiskCount = overpaymentOrders.stream()
-          .filter(order -> overpaymentOrderService.getOverpaymentDetails(order).getSecurityRiskLevel().equals("HIGH"))
-          .count();
+      long highRiskCount = overpaymentOrders.stream().filter(order -> overpaymentOrderService
+          .getOverpaymentDetails(order).getSecurityRiskLevel().equals("HIGH")).count();
 
-      long mediumRiskCount = overpaymentOrders.stream()
-          .filter(order -> overpaymentOrderService.getOverpaymentDetails(order).getSecurityRiskLevel().equals("MEDIUM"))
-          .count();
+      long mediumRiskCount = overpaymentOrders.stream().filter(order -> overpaymentOrderService
+          .getOverpaymentDetails(order).getSecurityRiskLevel().equals("MEDIUM")).count();
 
-      long lowRiskCount = overpaymentOrders.stream()
-          .filter(order -> overpaymentOrderService.getOverpaymentDetails(order).getSecurityRiskLevel().equals("LOW"))
-          .count();
+      long lowRiskCount = overpaymentOrders.stream().filter(order -> overpaymentOrderService
+          .getOverpaymentDetails(order).getSecurityRiskLevel().equals("LOW")).count();
 
-      Map<String, Object> summary = Map.of(
-          "totalOverpaymentOrders", overpaymentOrders.size(),
-          "totalExpectedAmount", totalExpected,
-          "totalActualAmount", totalActual,
-          "totalExcessAmount", totalExcess,
-          "highRiskCount", highRiskCount,
-          "mediumRiskCount", mediumRiskCount,
-          "lowRiskCount", lowRiskCount,
-          "securityRiskLevel", determineOverallRiskLevel(highRiskCount, mediumRiskCount, lowRiskCount)
-      );
+      Map<String, Object> summary = Map.of("totalOverpaymentOrders", overpaymentOrders.size(),
+          "totalExpectedAmount", totalExpected, "totalActualAmount", totalActual,
+          "totalExcessAmount", totalExcess, "highRiskCount", highRiskCount, "mediumRiskCount",
+          mediumRiskCount, "lowRiskCount", lowRiskCount, "securityRiskLevel",
+          determineOverallRiskLevel(highRiskCount, mediumRiskCount, lowRiskCount));
 
       return ResponseEntity.ok(ResponseModel.success(summary, HttpStatus.OK));
     } catch (Exception e) {
@@ -137,7 +130,8 @@ public class OverpaymentOrderController {
   /**
    * Determine overall security risk level
    */
-  private String determineOverallRiskLevel(long highRiskCount, long mediumRiskCount, long lowRiskCount) {
+  private String determineOverallRiskLevel(long highRiskCount, long mediumRiskCount,
+      long lowRiskCount) {
     if (highRiskCount > 0) {
       return "HIGH";
     } else if (mediumRiskCount > 0) {

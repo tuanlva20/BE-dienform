@@ -21,7 +21,6 @@ import com.dienform.tool.dienformtudong.payment.dto.response.SEPAYOrderResponse;
 import com.dienform.tool.dienformtudong.payment.dto.response.SEPAYPaymentStatus;
 import com.dienform.tool.dienformtudong.payment.entity.PaymentOrder;
 import com.dienform.tool.dienformtudong.payment.enums.PaymentStatus;
-import com.dienform.tool.dienformtudong.payment.repository.PaymentOrderRepository;
 import com.dienform.tool.dienformtudong.payment.service.MismatchOrderService;
 import com.dienform.tool.dienformtudong.payment.service.OverpaymentOrderService;
 import com.dienform.tool.dienformtudong.payment.service.PaymentRealtimeService;
@@ -36,7 +35,7 @@ import lombok.extern.slf4j.Slf4j;
 @Slf4j
 public class SEPAYPaymentServiceImpl implements SEPAYPaymentService {
 
-  private final PaymentOrderRepository paymentOrderRepository;
+  private final com.dienform.tool.dienformtudong.payment.repository.PaymentOrderRepository paymentOrderRepository;
   private final PaymentRealtimeService paymentRealtimeService;
   private final UserBalanceService userBalanceService;
   private final SEPAYApiService sepayApiService;
@@ -260,7 +259,8 @@ public class SEPAYPaymentServiceImpl implements SEPAYPaymentService {
       // Check if it's overpayment (potential security risk)
       if (webhook.getActualAmount().compareTo(order.getAmount()) > 0) {
         // Process as overpayment - potential security risk
-        log.warn("OVERPAYMENT DETECTED for order: {}. Expected: {}, Actual: {}. Potential security risk!",
+        log.warn(
+            "OVERPAYMENT DETECTED for order: {}. Expected: {}, Actual: {}. Potential security risk!",
             order.getOrderId(), order.getAmount(), webhook.getActualAmount());
         overpaymentOrderService.processOverpaymentOrder(order, webhook.getActualAmount());
       } else {
@@ -315,12 +315,14 @@ public class SEPAYPaymentServiceImpl implements SEPAYPaymentService {
             // Check if it's overpayment (potential security risk)
             if (status.getActualAmount().compareTo(order.getAmount()) > 0) {
               // Process as overpayment - potential security risk
-              log.warn("OVERPAYMENT detected via API for order: {}. Expected: {}, Actual: {}. Potential security risk!",
+              log.warn(
+                  "OVERPAYMENT detected via API for order: {}. Expected: {}, Actual: {}. Potential security risk!",
                   order.getOrderId(), order.getAmount(), status.getActualAmount());
               overpaymentOrderService.processOverpaymentOrder(order, status.getActualAmount());
             } else {
               // Process as underpayment - normal mismatch
-              log.warn("Amount mismatch (underpayment) detected via API for order: {}. Expected: {}, Actual: {}",
+              log.warn(
+                  "Amount mismatch (underpayment) detected via API for order: {}. Expected: {}, Actual: {}",
                   order.getOrderId(), order.getAmount(), status.getActualAmount());
               mismatchOrderService.processMismatchOrder(order, status.getActualAmount());
             }

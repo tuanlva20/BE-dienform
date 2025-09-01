@@ -11,22 +11,22 @@ import org.springframework.stereotype.Repository;
 import com.dienform.tool.dienformtudong.payment.entity.PaymentOrder;
 import com.dienform.tool.dienformtudong.payment.enums.PaymentStatus;
 
-@Repository
+@Repository("sepayPaymentOrderRepository")
 public interface PaymentOrderRepository extends JpaRepository<PaymentOrder, UUID> {
 
-    Optional<PaymentOrder> findByOrderId(String orderId);
+        Optional<PaymentOrder> findByOrderId(String orderId);
 
-    List<PaymentOrder> findByUserIdAndStatus(String userId, PaymentStatus status);
+        List<PaymentOrder> findByUserIdAndStatus(String userId, PaymentStatus status);
 
-    @Query("SELECT p FROM PaymentOrder p WHERE p.status = :status AND p.expiresAt < :now")
-    List<PaymentOrder> findExpiredOrders(@Param("status") PaymentStatus status,
-            @Param("now") LocalDateTime now);
+        @Query("SELECT p FROM PaymentOrder p WHERE p.status = :status AND p.expiresAt < :now")
+        List<PaymentOrder> findExpiredOrders(@Param("status") PaymentStatus status,
+                        @Param("now") LocalDateTime now);
 
-    @Query("SELECT p FROM PaymentOrder p WHERE p.status = :status AND (p.lastWebhookAttempt IS NULL OR p.lastWebhookAttempt < :threshold)")
-    List<PaymentOrder> findPendingOrdersForWebhookCheck(@Param("status") PaymentStatus status,
-            @Param("threshold") LocalDateTime threshold);
+        @Query("SELECT p FROM PaymentOrder p WHERE p.status = :status AND (p.lastWebhookAttempt IS NULL OR p.lastWebhookAttempt < :threshold)")
+        List<PaymentOrder> findPendingOrdersForWebhookCheck(@Param("status") PaymentStatus status,
+                        @Param("threshold") LocalDateTime threshold);
 
-    @Query("SELECT COUNT(p) FROM PaymentOrder p WHERE p.userId = :userId AND p.status = :status")
-    long countByUserIdAndStatus(@Param("userId") String userId,
-            @Param("status") PaymentStatus status);
+        @Query("SELECT COUNT(p) FROM PaymentOrder p WHERE p.userId = :userId AND p.status = :status")
+        long countByUserIdAndStatus(@Param("userId") String userId,
+                        @Param("status") PaymentStatus status);
 }

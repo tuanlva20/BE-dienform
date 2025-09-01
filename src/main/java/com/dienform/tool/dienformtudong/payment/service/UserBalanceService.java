@@ -6,7 +6,6 @@ import org.springframework.transaction.annotation.Transactional;
 import com.dienform.tool.dienformtudong.payment.entity.UserBalance;
 import com.dienform.tool.dienformtudong.payment.enums.PaymentStatus;
 import com.dienform.tool.dienformtudong.payment.exception.PaymentException;
-import com.dienform.tool.dienformtudong.payment.repository.PaymentOrderRepository;
 import com.dienform.tool.dienformtudong.payment.repository.UserBalanceRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -32,7 +31,7 @@ public class UserBalanceService {
 
   private final UserBalanceRepository userBalanceRepository;
 
-  private final PaymentOrderRepository paymentOrderRepository;
+  private final com.dienform.tool.dienformtudong.payment.repository.PaymentOrderRepository paymentOrderRepository;
 
   @Transactional
   public void addBalance(String userId, BigDecimal amount) {

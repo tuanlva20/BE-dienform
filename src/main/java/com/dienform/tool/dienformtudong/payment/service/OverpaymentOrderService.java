@@ -33,7 +33,7 @@ public class OverpaymentOrderService {
   }
 
   private final PaymentRealtimeService paymentRealtimeService;
-  private final PaymentOrderRepository paymentOrderRepository;
+  private final com.dienform.tool.dienformtudong.payment.repository.PaymentOrderRepository paymentOrderRepository;
 
   /**
    * Process overpayment order - DO NOT add to user balance for security reasons This prevents

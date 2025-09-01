@@ -41,7 +41,7 @@ public class FormServiceImpl implements FormService {
   private static final Logger log = LoggerFactory.getLogger(FormServiceImpl.class);
   private final FormMapper formMapper;
   private final FormRepository formRepository;
-  private final FormStatisticRepository statisticRepository;
+  private final FormStatisticRepository formStatisticRepository;
   private final GoogleFormService googleFormService;
   private final QuestionRepository questionRepository;
   private final QuestionOptionRepository optionRepository;
@@ -127,7 +127,7 @@ public class FormServiceImpl implements FormService {
     // Create initial statistics
     FormStatistic statistic = FormStatistic.builder().form(savedForm).totalSurvey(0)
         .completedSurvey(0).failedSurvey(0).errorQuestion(0).build();
-    statisticRepository.save(statistic);
+    formStatisticRepository.save(statistic);
 
     // Save questions from extracted data
     List<ExtractedQuestion> extractedQuestions = formData.getQuestions();
@@ -216,7 +216,7 @@ public class FormServiceImpl implements FormService {
       questionRepository.deleteByForm(form);
 
       // Delete form statistics
-      statisticRepository.findByFormId(id).ifPresent(statisticRepository::delete);
+      formStatisticRepository.findByFormId(id).ifPresent(formStatisticRepository::delete);
 
       // Finally delete the form
       formRepository.delete(form);

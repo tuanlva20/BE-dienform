@@ -26,6 +26,7 @@ public class AuthService {
   private final AvatarGeneratorService avatarGeneratorService;
   private final GoogleAuthService googleAuthService;
   private final FacebookAuthService facebookAuthService;
+  private final PaymentOrderService paymentOrderService;
 
   public AuthResponse loginManual(String email, String password, String ip) {
     Optional<User> opt = userRepository.findByEmail(email);
@@ -59,7 +60,17 @@ public class AuthService {
       if (u.getUpdatedAt() == null) {
         u.setUpdatedAt(LocalDateTime.now());
       }
-      return userRepository.save(u);
+      User savedUser = userRepository.save(u);
+
+      // Create new account promotion for new user
+      try {
+        paymentOrderService.createNewAccountPromotion(savedUser.getId());
+      } catch (Exception e) {
+        // Log error but don't fail the login process
+        System.err.println("Failed to create new account promotion: " + e.getMessage());
+      }
+
+      return savedUser;
     });
     user.setLastLoginIp(ip);
     userRepository.save(user);
@@ -88,6 +99,14 @@ public class AuthService {
         user.setUpdatedAt(LocalDateTime.now());
       }
       user = userRepository.save(user);
+
+      // Create new account promotion for new user
+      try {
+        paymentOrderService.createNewAccountPromotion(user.getId());
+      } catch (Exception e) {
+        // Log error but don't fail the login process
+        System.err.println("Failed to create new account promotion: " + e.getMessage());
+      }
     }
     user.setLastLoginIp(ip);
     userRepository.save(user);
@@ -130,8 +149,17 @@ public class AuthService {
     if (user.getUpdatedAt() == null) {
       user.setUpdatedAt(LocalDateTime.now());
     }
-    userRepository.save(user);
-    return buildAuthResponse(user);
+    User savedUser = userRepository.save(user);
+
+    // Create new account promotion for new user
+    try {
+      paymentOrderService.createNewAccountPromotion(savedUser.getId());
+    } catch (Exception e) {
+      // Log error but don't fail the registration process
+      System.err.println("Failed to create new account promotion: " + e.getMessage());
+    }
+
+    return buildAuthResponse(savedUser);
   }
 
   private AuthResponse buildAuthResponse(User user) {
