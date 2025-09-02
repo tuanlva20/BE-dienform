@@ -6,7 +6,6 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import com.dienform.tool.dienformtudong.payment.entity.PaymentOrder;
 import com.dienform.tool.dienformtudong.payment.enums.PaymentStatus;
-import com.dienform.tool.dienformtudong.payment.repository.PaymentOrderRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
@@ -37,6 +36,8 @@ public class MismatchOrderService {
   private final PaymentRealtimeService paymentRealtimeService;
 
   private final com.dienform.tool.dienformtudong.payment.repository.PaymentOrderRepository paymentOrderRepository;
+  private final com.dienform.common.repository.ReportPaymentOrderRepository reportPaymentOrderRepository;
+  private final com.dienform.common.repository.UserRepository userRepository;
 
   /**
    * Process underpayment order by adding actual amount to user balance This ensures user receives
@@ -61,6 +62,9 @@ public class MismatchOrderService {
       // Emit realtime event for mismatch
       paymentRealtimeService.emitMismatchPaymentEvent(order);
 
+      // Sync to report table (mark as PROCESSING with actual amount)
+      syncReportRecord(order);
+
       log.info("Underpayment order processed successfully: {} - Added {} to user balance",
           order.getOrderId(), actualAmount);
 
@@ -83,6 +87,34 @@ public class MismatchOrderService {
         .isOverpayment(difference.compareTo(BigDecimal.ZERO) > 0)
         .isUnderpayment(difference.compareTo(BigDecimal.ZERO) < 0)
         .processedAt(order.getProcessedAt()).build();
+  }
+
+  private void syncReportRecord(PaymentOrder order) {
+    try {
+      java.util.Optional<com.dienform.common.entity.ReportPaymentOrder> reportOpt =
+          reportPaymentOrderRepository.findByTransactionId(order.getOrderId());
+      com.dienform.common.entity.ReportPaymentOrder report;
+      if (reportOpt.isPresent()) {
+        report = reportOpt.get();
+      } else {
+        com.dienform.common.entity.User user = null;
+        try {
+          user = userRepository.findById(java.util.UUID.fromString(order.getUserId())).orElse(null);
+        } catch (Exception ignore) {
+        }
+        report = com.dienform.common.entity.ReportPaymentOrder.builder().user(user)
+            .transactionId(order.getOrderId())
+            .paymentType(com.dienform.common.entity.ReportPaymentOrder.PaymentType.DEPOSIT)
+            .isPromotional(false).isReported(false).build();
+      }
+      java.math.BigDecimal amount =
+          order.getActualAmount() != null ? order.getActualAmount() : order.getAmount();
+      report.setAmount(amount);
+      report.setStatus(com.dienform.common.entity.ReportPaymentOrder.PaymentStatus.COMPLETED);
+      reportPaymentOrderRepository.save(report);
+    } catch (Exception e) {
+      log.error("Error syncing report record for mismatch order: {}", order.getOrderId(), e);
+    }
   }
 }
 

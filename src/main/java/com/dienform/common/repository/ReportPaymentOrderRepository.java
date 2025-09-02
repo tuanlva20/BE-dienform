@@ -61,4 +61,7 @@ public interface ReportPaymentOrderRepository extends JpaRepository<ReportPaymen
                         @Param("isReported") Boolean isReported,
                         @Param("fromDate") LocalDateTime fromDate,
                         @Param("toDate") LocalDateTime toDate, Pageable pageable);
+
+        @EntityGraph(attributePaths = {"user"})
+        Optional<ReportPaymentOrder> findByTransactionId(String transactionId);
 }

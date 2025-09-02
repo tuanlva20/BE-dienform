@@ -41,6 +41,8 @@ public class SEPAYPaymentServiceImpl implements SEPAYPaymentService {
   private final SEPAYApiService sepayApiService;
   private final MismatchOrderService mismatchOrderService;
   private final OverpaymentOrderService overpaymentOrderService;
+  private final com.dienform.common.repository.ReportPaymentOrderRepository reportPaymentOrderRepository;
+  private final com.dienform.common.repository.UserRepository userRepository;
 
   @Value("${sepay.secret-key}")
   private String sepaySecretKey;
@@ -71,6 +73,26 @@ public class SEPAYPaymentServiceImpl implements SEPAYPaymentService {
 
       log.info("Created SEPAY order: {} for user: {} with amount: {}", orderId, userId,
           request.getAmount());
+
+      // Create report record with PENDING status for tracking
+      try {
+        java.util.UUID uid = java.util.UUID.fromString(userId);
+        com.dienform.common.entity.User user = userRepository.findById(uid).orElse(null);
+        if (user != null) {
+          com.dienform.common.entity.ReportPaymentOrder report =
+              com.dienform.common.entity.ReportPaymentOrder.builder().user(user)
+                  .amount(request.getAmount())
+                  .paymentType(com.dienform.common.entity.ReportPaymentOrder.PaymentType.DEPOSIT)
+                  .status(com.dienform.common.entity.ReportPaymentOrder.PaymentStatus.PENDING)
+                  .description("SEPAY deposit order created").transactionId(orderId)
+                  .isPromotional(false).isReported(false).build();
+          reportPaymentOrderRepository.save(report);
+        } else {
+          log.warn("User {} not found when creating report record for order {}", userId, orderId);
+        }
+      } catch (Exception ex) {
+        log.error("Failed to create report record for order {}", orderId, ex);
+      }
 
       return SEPAYOrderResponse.builder().success(true).orderId(orderId).qrCodeUrl(qrCodeUrl)
           .amount(request.getAmount()).expiresAt(order.getExpiresAt())
@@ -139,6 +161,14 @@ public class SEPAYPaymentServiceImpl implements SEPAYPaymentService {
         processSuccessfulPayment(order, webhook);
       } else {
         processFailedPayment(order, webhook);
+      }
+
+      // Sync report record based on updated order
+      try {
+        syncReportRecord(order);
+      } catch (Exception ex) {
+        log.error("Failed to sync report record for order {} after webhook", order.getOrderId(),
+            ex);
       }
 
       return ResponseEntity.ok("Webhook processed successfully");
@@ -295,6 +325,13 @@ public class SEPAYPaymentServiceImpl implements SEPAYPaymentService {
     order.setProcessedAt(LocalDateTime.now());
     paymentOrderRepository.save(order);
 
+    // Sync report record on failure
+    try {
+      syncReportRecord(order);
+    } catch (Exception ex) {
+      log.error("Failed to sync report record for failed order {}", order.getOrderId(), ex);
+    }
+
     log.info("Payment failed for order: {} with transfer type: {} amount: {}", order.getOrderId(),
         webhook.getTransferType(), webhook.getTransferAmount());
   }
@@ -332,11 +369,21 @@ public class SEPAYPaymentServiceImpl implements SEPAYPaymentService {
             paymentOrderRepository.save(order);
             userBalanceService.addBalance(order.getUserId(), status.getActualAmount());
             paymentRealtimeService.emitPaymentSuccessEvent(order);
+            try {
+              syncReportRecord(order);
+            } catch (Exception ex) {
+              log.error("Failed to sync report record for order {}", order.getOrderId(), ex);
+            }
           }
         } else {
           // For other statuses (FAILED, etc.)
           order.setStatus(status.getStatus());
           paymentOrderRepository.save(order);
+          try {
+            syncReportRecord(order);
+          } catch (Exception ex) {
+            log.error("Failed to sync report record for order {}", order.getOrderId(), ex);
+          }
         }
 
         log.info("Updated order {} status to {} via SEPAY API", order.getOrderId(),
@@ -357,6 +404,47 @@ public class SEPAYPaymentServiceImpl implements SEPAYPaymentService {
       order.setRetryCount(order.getRetryCount() + 1);
       order.setLastWebhookAttempt(LocalDateTime.now());
       paymentOrderRepository.save(order);
+    }
+  }
+
+  private void syncReportRecord(PaymentOrder order) {
+    try {
+      java.util.Optional<com.dienform.common.entity.ReportPaymentOrder> reportOpt =
+          reportPaymentOrderRepository.findByTransactionId(order.getOrderId());
+      com.dienform.common.entity.ReportPaymentOrder report;
+      if (reportOpt.isPresent()) {
+        report = reportOpt.get();
+      } else {
+        com.dienform.common.entity.User user = null;
+        try {
+          user = userRepository.findById(java.util.UUID.fromString(order.getUserId())).orElse(null);
+        } catch (Exception ignore) {
+        }
+        report = com.dienform.common.entity.ReportPaymentOrder.builder().user(user)
+            .transactionId(order.getOrderId())
+            .paymentType(com.dienform.common.entity.ReportPaymentOrder.PaymentType.DEPOSIT)
+            .isPromotional(false).isReported(false).build();
+      }
+      java.math.BigDecimal amount =
+          order.getActualAmount() != null ? order.getActualAmount() : order.getAmount();
+      report.setAmount(amount);
+      switch (order.getStatus()) {
+        case COMPLETED -> report
+            .setStatus(com.dienform.common.entity.ReportPaymentOrder.PaymentStatus.COMPLETED);
+        case FAILED -> report
+            .setStatus(com.dienform.common.entity.ReportPaymentOrder.PaymentStatus.FAILED);
+        case EXPIRED -> report
+            .setStatus(com.dienform.common.entity.ReportPaymentOrder.PaymentStatus.CANCELLED);
+        case MISMATCH -> report
+            .setStatus(com.dienform.common.entity.ReportPaymentOrder.PaymentStatus.COMPLETED);
+        case OVERPAYMENT -> report
+            .setStatus(com.dienform.common.entity.ReportPaymentOrder.PaymentStatus.CANCELLED);
+        case PENDING -> report
+            .setStatus(com.dienform.common.entity.ReportPaymentOrder.PaymentStatus.PENDING);
+      }
+      reportPaymentOrderRepository.save(report);
+    } catch (Exception e) {
+      log.error("Error syncing report record for order: {}", order.getOrderId(), e);
     }
   }
 

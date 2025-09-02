@@ -285,6 +285,14 @@ public class PaymentOrderServiceImpl implements PaymentOrderService {
 
       paymentOrderRepository.save(promotionalOrder);
 
+      // Also credit user balance so it reflects immediately
+      try {
+        userBalanceService.addBalance(user.getId().toString(), amount);
+      } catch (Exception ex) {
+        log.warn("Failed to update user_balances for manual promo user {}: {}", user.getId(),
+            ex.getMessage());
+      }
+
       return ResponseModel.success("Promotional credit created successfully", HttpStatus.OK);
 
     } catch (Exception e) {

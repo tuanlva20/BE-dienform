@@ -6,7 +6,6 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import com.dienform.tool.dienformtudong.payment.entity.PaymentOrder;
 import com.dienform.tool.dienformtudong.payment.enums.PaymentStatus;
-import com.dienform.tool.dienformtudong.payment.repository.PaymentOrderRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
@@ -34,6 +33,8 @@ public class OverpaymentOrderService {
 
   private final PaymentRealtimeService paymentRealtimeService;
   private final com.dienform.tool.dienformtudong.payment.repository.PaymentOrderRepository paymentOrderRepository;
+  private final com.dienform.common.repository.ReportPaymentOrderRepository reportPaymentOrderRepository;
+  private final com.dienform.common.repository.UserRepository userRepository;
 
   /**
    * Process overpayment order - DO NOT add to user balance for security reasons This prevents
@@ -61,6 +62,9 @@ public class OverpaymentOrderService {
       log.warn("OVERPAYMENT order processed: {} - Amount {} NOT added to balance for security",
           order.getOrderId(), actualAmount);
 
+      // Sync to report table (mark as PROCESSING with actual amount)
+      syncReportRecord(order);
+
     } catch (Exception e) {
       log.error("Error processing overpayment order: {}", order.getOrderId(), e);
       throw new RuntimeException("Failed to process overpayment order", e);
@@ -81,6 +85,34 @@ public class OverpaymentOrderService {
     return OverpaymentDetails.builder().orderId(order.getOrderId()).userId(order.getUserId())
         .expectedAmount(expectedAmount).actualAmount(actualAmount).excessAmount(excessAmount)
         .processedAt(order.getProcessedAt()).securityRiskLevel(securityRiskLevel).build();
+  }
+
+  private void syncReportRecord(PaymentOrder order) {
+    try {
+      java.util.Optional<com.dienform.common.entity.ReportPaymentOrder> reportOpt =
+          reportPaymentOrderRepository.findByTransactionId(order.getOrderId());
+      com.dienform.common.entity.ReportPaymentOrder report;
+      if (reportOpt.isPresent()) {
+        report = reportOpt.get();
+      } else {
+        com.dienform.common.entity.User user = null;
+        try {
+          user = userRepository.findById(java.util.UUID.fromString(order.getUserId())).orElse(null);
+        } catch (Exception ignore) {
+        }
+        report = com.dienform.common.entity.ReportPaymentOrder.builder().user(user)
+            .transactionId(order.getOrderId())
+            .paymentType(com.dienform.common.entity.ReportPaymentOrder.PaymentType.DEPOSIT)
+            .isPromotional(false).isReported(false).build();
+      }
+      java.math.BigDecimal amount =
+          order.getActualAmount() != null ? order.getActualAmount() : order.getAmount();
+      report.setAmount(amount);
+      report.setStatus(com.dienform.common.entity.ReportPaymentOrder.PaymentStatus.CANCELLED);
+      reportPaymentOrderRepository.save(report);
+    } catch (Exception e) {
+      log.error("Error syncing report record for overpayment order: {}", order.getOrderId(), e);
+    }
   }
 
   /**
