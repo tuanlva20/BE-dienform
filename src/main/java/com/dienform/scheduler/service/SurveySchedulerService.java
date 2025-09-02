@@ -22,9 +22,7 @@ import com.dienform.tool.dienformtudong.fillrequest.repository.FillRequestReposi
 import com.dienform.tool.dienformtudong.fillrequest.service.BatchDataFillCampaignService;
 import com.dienform.tool.dienformtudong.fillrequest.service.DataFillCampaignService;
 import com.dienform.tool.dienformtudong.fillrequest.service.QueueManagementService;
-import com.dienform.tool.dienformtudong.fillrequest.service.ScheduleDistributionService;
 import com.dienform.tool.dienformtudong.form.entity.Form;
-import com.dienform.tool.dienformtudong.form.repository.FormRepository;
 import com.dienform.tool.dienformtudong.googleform.service.impl.GoogleFormServiceImpl;
 import com.dienform.tool.dienformtudong.question.entity.Question;
 import com.dienform.tool.dienformtudong.question.repository.QuestionRepository;
@@ -45,15 +43,11 @@ public class SurveySchedulerService {
   private final FillRequestRepository fillRequestRepository;
   private final FillRequestMappingRepository fillRequestMappingRepository;
   private final AnswerDistributionRepository answerDistributionRepository;
-  private final FormRepository formRepository;
   private final QuestionRepository questionRepository;
   private final CampaignSchedulerProperties schedulerConfig;
   private final GoogleFormServiceImpl googleFormServiceImpl;
   private final DataFillCampaignService dataFillCampaignService;
   private final BatchDataFillCampaignService batchDataFillCampaignService;
-  private final ScheduleDistributionService scheduleDistributionService;
-  private final com.dienform.realtime.FillRequestRealtimeGateway realtimeGateway;
-  private final com.dienform.common.util.CurrentUserUtil currentUserUtil;
   private final QueueManagementService queueManagementService;
   private final com.dienform.tool.dienformtudong.fillrequest.service.FillRequestCounterService fillRequestCounterService;
 

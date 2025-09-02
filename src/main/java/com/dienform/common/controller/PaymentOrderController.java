@@ -1,5 +1,6 @@
 package com.dienform.common.controller;
 
+import java.math.BigDecimal;
 import java.util.List;
 import java.util.UUID;
 import org.springframework.http.ResponseEntity;
@@ -212,6 +213,27 @@ public class PaymentOrderController {
       return ResponseEntity.badRequest()
           .body(ResponseModel.error("Error retrieving user payment orders: " + e.getMessage(),
               org.springframework.http.HttpStatus.BAD_REQUEST));
+    }
+  }
+
+  /**
+   * Grant promotional credit to a user by email.
+   *
+   * @param email User email
+   * @param amount Amount to credit (VND)
+   * @param description Optional description
+   */
+  @PostMapping("/promotional/by-email")
+  public ResponseEntity<ResponseModel<String>> createPromotionalByEmail(@RequestParam String email,
+      @RequestParam BigDecimal amount, @RequestParam(required = false) String description) {
+    try {
+      ResponseModel<String> response =
+          paymentOrderService.createPromotionalByEmail(email, amount, description);
+      return ResponseEntity.status(response.getStatus()).body(response);
+    } catch (Exception e) {
+      log.error("Error creating promotional credit by email {}: {}", email, e.getMessage(), e);
+      return ResponseEntity.badRequest().body(com.dienform.common.model.ResponseModel
+          .error("Error: " + e.getMessage(), org.springframework.http.HttpStatus.BAD_REQUEST));
     }
   }
 }

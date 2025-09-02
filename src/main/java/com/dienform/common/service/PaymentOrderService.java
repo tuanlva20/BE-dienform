@@ -20,4 +20,10 @@ public interface PaymentOrderService {
 
   ResponseModel<List<ReportPaymentOrderResponse>> getPaymentOrders(
       PaymentOrderSearchRequest request);
+
+  /**
+   * Create a promotional credit for a user by email.
+   */
+  ResponseModel<String> createPromotionalByEmail(String email, java.math.BigDecimal amount,
+      String description);
 }

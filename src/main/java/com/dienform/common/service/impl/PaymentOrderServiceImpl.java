@@ -23,6 +23,7 @@ import com.dienform.common.model.ResponseModel;
 import com.dienform.common.repository.ReportPaymentOrderRepository;
 import com.dienform.common.repository.UserRepository;
 import com.dienform.common.service.PaymentOrderService;
+import com.dienform.tool.dienformtudong.payment.service.UserBalanceService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
@@ -37,6 +38,7 @@ public class PaymentOrderServiceImpl implements PaymentOrderService {
 
   private final ReportPaymentOrderRepository paymentOrderRepository;
   private final UserRepository userRepository;
+  private final UserBalanceService userBalanceService;
 
   @Override
   public ResponseModel<FinancialReportResponse> getFinancialReport() {
@@ -93,6 +95,13 @@ public class PaymentOrderServiceImpl implements PaymentOrderService {
 
       log.info("Created new account promotion for user {}: {} VND", userId,
           NEW_ACCOUNT_PROMOTION_AMOUNT);
+
+      // Also add to user balance table so that immediate balance reflects promo (defensive)
+      try {
+        userBalanceService.addBalance(userId.toString(), NEW_ACCOUNT_PROMOTION_AMOUNT);
+      } catch (Exception ex) {
+        log.warn("Failed to update user_balances for promo user {}: {}", userId, ex.getMessage());
+      }
 
     } catch (Exception e) {
       log.error("Error creating new account promotion for user {}: {}", userId, e.getMessage(), e);
@@ -245,6 +254,42 @@ public class PaymentOrderServiceImpl implements PaymentOrderService {
     } catch (Exception e) {
       log.error("Error getting payment orders: {}", e.getMessage(), e);
       return ResponseModel.error("Error retrieving payment orders: " + e.getMessage(),
+          HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  @Override
+  @Transactional
+  public ResponseModel<String> createPromotionalByEmail(String email, BigDecimal amount,
+      String description) {
+    log.info("Creating promotional credit by email: {}, amount: {}", email, amount);
+
+    try {
+      if (email == null || email.isBlank()) {
+        return ResponseModel.error("Email is required", HttpStatus.BAD_REQUEST);
+      }
+      if (amount == null || amount.signum() <= 0) {
+        return ResponseModel.error("Amount must be positive", HttpStatus.BAD_REQUEST);
+      }
+
+      User user = userRepository.findByEmail(email)
+          .orElseThrow(() -> new RuntimeException("User not found with email: " + email));
+
+      ReportPaymentOrder promotionalOrder = ReportPaymentOrder.builder().user(user).amount(amount)
+          .paymentType(ReportPaymentOrder.PaymentType.PROMOTIONAL)
+          .status(ReportPaymentOrder.PaymentStatus.COMPLETED)
+          .description(description != null && !description.isBlank() ? description
+              : ("Khuyến mãi thủ công - " + amount + " VND"))
+          .transactionId("PROMO_" + System.currentTimeMillis()).isPromotional(true)
+          .isReported(false).build();
+
+      paymentOrderRepository.save(promotionalOrder);
+
+      return ResponseModel.success("Promotional credit created successfully", HttpStatus.OK);
+
+    } catch (Exception e) {
+      log.error("Error creating promotional credit by email {}: {}", email, e.getMessage(), e);
+      return ResponseModel.error("Error creating promotional credit: " + e.getMessage(),
           HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }

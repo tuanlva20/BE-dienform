@@ -30,14 +30,22 @@ public class UserBalanceController {
   private final PaymentRealtimeService paymentRealtimeService;
   private final CurrentUserUtil currentUserUtil;
   private final com.dienform.tool.dienformtudong.payment.repository.PaymentOrderRepository paymentOrderRepository;
+  private final com.dienform.common.repository.ReportPaymentOrderRepository reportPaymentOrderRepository;
 
   @GetMapping
   public ResponseEntity<ResponseModel<BigDecimal>> getBalance() {
     try {
       String userId = currentUserUtil.requireCurrentUserId().toString();
 
-      // Calculate balance dynamically from payment orders and spending
+      // Base balance from user_balances table (derived from payment_orders and spending)
       BigDecimal balance = userBalanceService.getBalance(userId);
+
+      // Add PROMOTIONAL credits from report_payment_orders for this user
+      BigDecimal promotional =
+          reportPaymentOrderRepository.getUserTotalPromotional(java.util.UUID.fromString(userId));
+      if (promotional != null && promotional.signum() > 0) {
+        balance = balance.add(promotional);
+      }
 
       return ResponseEntity.ok(ResponseModel.success(balance, HttpStatus.OK));
     } catch (Exception e) {
