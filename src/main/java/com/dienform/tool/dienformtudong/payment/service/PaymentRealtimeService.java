@@ -2,6 +2,8 @@ package com.dienform.tool.dienformtudong.payment.service;
 
 import java.math.BigDecimal;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.event.TransactionPhase;
+import org.springframework.transaction.event.TransactionalEventListener;
 import com.dienform.realtime.PaymentRealtimeGateway;
 import com.dienform.tool.dienformtudong.payment.dto.PaymentMismatchEvent;
 import com.dienform.tool.dienformtudong.payment.dto.PaymentOverpaymentEvent;
@@ -15,9 +17,40 @@ import lombok.extern.slf4j.Slf4j;
 @Slf4j
 public class PaymentRealtimeService {
 
+  /**
+   * Event class for balance updates
+   */
+  public static class BalanceUpdateEvent {
+    private final String userId;
+    private final BigDecimal balance;
+    private final String timestamp;
+
+    public BalanceUpdateEvent(String userId, BigDecimal balance) {
+      this.userId = userId;
+      this.balance = balance;
+      this.timestamp = java.time.Instant.now().toString();
+    }
+
+    public String getUserId() {
+      return userId;
+    }
+
+    public BigDecimal getBalance() {
+      return balance;
+    }
+
+    public String getTimestamp() {
+      return timestamp;
+    }
+  }
+
   private final PaymentRealtimeGateway paymentRealtimeGateway;
+
   private final UserBalanceService userBalanceService;
 
+  /**
+   * Emit payment success event with balance update This method is called after payment processing
+   */
   public void emitPaymentSuccessEvent(PaymentOrder order) {
     try {
       // Get updated balance after payment
@@ -35,11 +68,13 @@ public class PaymentRealtimeService {
           newBalance);
     } catch (Exception e) {
       log.error("Error emitting payment success event for user: {}", order.getUserId(), e);
+      // Don't throw exception to avoid affecting payment flow
     }
   }
 
   /**
-   * Emit balance update for any reason (not just payment success)
+   * Emit balance update for any reason (not just payment success) This method is called after
+   * balance changes (deduction, addition, etc.)
    */
   public void emitBalanceUpdate(String userId) {
     try {
@@ -48,6 +83,21 @@ public class PaymentRealtimeService {
       log.info("Balance update emitted for user: {} with balance: {}", userId, currentBalance);
     } catch (Exception e) {
       log.error("Error emitting balance update for user: {}", userId, e);
+      // Don't throw exception to avoid affecting balance operations
+    }
+  }
+
+  /**
+   * Emit balance update with specific balance amount This method is used when we already have the
+   * balance value
+   */
+  public void emitBalanceUpdate(String userId, BigDecimal balance) {
+    try {
+      paymentRealtimeGateway.emitBalanceUpdate(userId, balance);
+      log.info("Balance update emitted for user: {} with balance: {}", userId, balance);
+    } catch (Exception e) {
+      log.error("Error emitting balance update for user: {} with balance: {}", userId, balance, e);
+      // Don't throw exception to avoid affecting balance operations
     }
   }
 
@@ -74,6 +124,7 @@ public class PaymentRealtimeService {
           newBalance);
     } catch (Exception e) {
       log.error("Error emitting underpayment event for user: {}", order.getUserId(), e);
+      // Don't throw exception to avoid affecting payment flow
     }
   }
 
@@ -100,6 +151,25 @@ public class PaymentRealtimeService {
           order.getUserId(), excessAmount, securityRiskLevel);
     } catch (Exception e) {
       log.error("Error emitting overpayment event for user: {}", order.getUserId(), e);
+      // Don't throw exception to avoid affecting payment flow
+    }
+  }
+
+  /**
+   * Transactional event listener for balance updates This ensures balance updates are emitted only
+   * after successful transaction commit
+   */
+  @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+  public void handleBalanceUpdateEvent(BalanceUpdateEvent balanceUpdateEvent) {
+    try {
+      log.debug("Processing balance update event for user: {}", balanceUpdateEvent.getUserId());
+      paymentRealtimeGateway.emitBalanceUpdate(balanceUpdateEvent.getUserId(),
+          balanceUpdateEvent.getBalance());
+      log.info("Balance update event processed successfully for user: {}",
+          balanceUpdateEvent.getUserId());
+    } catch (Exception e) {
+      log.error("Error processing balance update event for user: {}",
+          balanceUpdateEvent.getUserId(), e);
     }
   }
 

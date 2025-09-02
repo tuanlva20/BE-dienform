@@ -384,7 +384,8 @@ public class FillRequestServiceImpl implements FillRequestService {
 
       paymentOrderRepository.save(withdrawalOrder);
 
-      paymentRealtimeService.emitBalanceUpdate(currentUserId);
+      // Balance update event will be automatically published by UserBalanceService
+      // No need to manually call paymentRealtimeService.emitBalanceUpdate(currentUserId);
 
       log.info("Created withdrawal payment order: {} for data fill request amount: {}",
           withdrawalOrder.getId(), totalPrice);

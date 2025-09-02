@@ -156,6 +156,38 @@ public class UserBalanceController {
     }
   }
 
+  /**
+   * Test endpoint to verify WebSocket balance updates This endpoint simulates a balance change and
+   * triggers realtime update
+   */
+  @PostMapping("/test-realtime-update")
+  public ResponseEntity<ResponseModel<String>> testRealtimeUpdate() {
+    try {
+      String userId = currentUserUtil.requireCurrentUserId().toString();
+
+      // Get current balance
+      BigDecimal currentBalance = userBalanceService.getBalance(userId);
+
+      // Simulate a small balance change (add 0.01 VND for testing)
+      BigDecimal testAmount = new BigDecimal("0.01");
+      userBalanceService.addBalance(userId, testAmount);
+
+      // Immediately deduct it back to restore original balance
+      userBalanceService.deductBalance(userId, testAmount);
+
+      log.info("Test realtime update completed for user: {} - Current balance: {}", userId,
+          currentBalance);
+
+      return ResponseEntity.ok(ResponseModel.success(
+          "Test realtime update completed. Check WebSocket for balance_update events.",
+          HttpStatus.OK));
+    } catch (Exception e) {
+      log.error("Error testing realtime update", e);
+      return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(ResponseModel
+          .error("Failed to test realtime update: " + e.getMessage(), HttpStatus.BAD_REQUEST));
+    }
+  }
+
   @PostMapping("/sync")
   public ResponseEntity<ResponseModel<Map<String, Object>>> synchronizeBalance() {
     try {

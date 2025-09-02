@@ -1,6 +1,7 @@
 package com.dienform.tool.dienformtudong.payment.service;
 
 import java.math.BigDecimal;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import com.dienform.tool.dienformtudong.payment.entity.UserBalance;
@@ -30,8 +31,8 @@ public class UserBalanceService {
   }
 
   private final UserBalanceRepository userBalanceRepository;
-
   private final com.dienform.tool.dienformtudong.payment.repository.PaymentOrderRepository paymentOrderRepository;
+  private final ApplicationEventPublisher eventPublisher;
 
   @Transactional
   public void addBalance(String userId, BigDecimal amount) {
@@ -48,6 +49,10 @@ public class UserBalanceService {
       userBalanceRepository.save(userBalance);
 
       log.info("Added balance {} to user {}. New balance: {}", amount, userId, newBalance);
+
+      // Publish balance update event for realtime notification
+      publishBalanceUpdateEvent(userId, newBalance);
+
     } catch (Exception e) {
       log.error("Error adding balance to user: {}", userId, e);
       throw new PaymentException("Failed to add balance", e);
@@ -79,6 +84,10 @@ public class UserBalanceService {
       userBalanceRepository.save(userBalance);
 
       log.info("Deducted {} from user {}. New balance: {}", amount, userId, newBalance);
+
+      // Publish balance update event for realtime notification
+      publishBalanceUpdateEvent(userId, newBalance);
+
     } catch (PaymentException e) {
       throw e;
     } catch (Exception e) {
@@ -162,6 +171,9 @@ public class UserBalanceService {
       log.info("Balance synchronized for user {}: balance={}, totalDeposited={}, totalSpent={}",
           userId, newBalance, totalDeposited, totalSpent);
 
+      // Publish balance update event for realtime notification
+      publishBalanceUpdateEvent(userId, newBalance);
+
     } catch (Exception e) {
       log.error("Error synchronizing balance for user: {}", userId, e);
       throw new PaymentException("Failed to synchronize balance", e);
@@ -201,12 +213,15 @@ public class UserBalanceService {
   }
 
   /**
-   * Get total spent from user balance record
+   * Get total spent from user_balances table
    */
   private BigDecimal getUserTotalSpent(String userId) {
     try {
-      return userBalanceRepository.findByUserId(userId).map(UserBalance::getTotalSpent)
-          .orElse(BigDecimal.ZERO);
+      UserBalance userBalance = userBalanceRepository.findByUserId(userId)
+          .orElseGet(() -> UserBalance.builder().userId(userId).balance(BigDecimal.ZERO)
+              .totalDeposited(BigDecimal.ZERO).totalSpent(BigDecimal.ZERO).build());
+
+      return userBalance.getTotalSpent();
     } catch (Exception e) {
       log.error("Error getting total spent for user: {}", userId, e);
       return BigDecimal.ZERO;
@@ -214,46 +229,19 @@ public class UserBalanceService {
   }
 
   /**
-   * Update stored balance if it differs from calculated balance
+   * Publish balance update event for realtime notification This method publishes an event that will
+   * be handled by the TransactionalEventListener
    */
-  private void updateStoredBalanceIfNeeded(String userId, BigDecimal calculatedBalance,
-      BigDecimal totalDeposited, BigDecimal totalSpent) {
+  private void publishBalanceUpdateEvent(String userId, BigDecimal newBalance) {
     try {
-      UserBalance userBalance = userBalanceRepository.findByUserId(userId)
-          .orElseGet(() -> UserBalance.builder().userId(userId).balance(BigDecimal.ZERO)
-              .totalDeposited(BigDecimal.ZERO).totalSpent(BigDecimal.ZERO).build());
-
-      boolean needsUpdate = false;
-
-      // Check if stored balance differs from calculated
-      if (userBalance.getBalance().compareTo(calculatedBalance) != 0) {
-        userBalance.setBalance(calculatedBalance);
-        needsUpdate = true;
-        log.info("Updated stored balance for user {}: {} -> {}", userId, userBalance.getBalance(),
-            calculatedBalance);
-      }
-
-      // Check if stored totalDeposited differs from calculated
-      if (userBalance.getTotalDeposited().compareTo(totalDeposited) != 0) {
-        userBalance.setTotalDeposited(totalDeposited);
-        needsUpdate = true;
-        log.info("Updated stored totalDeposited for user {}: {} -> {}", userId,
-            userBalance.getTotalDeposited(), totalDeposited);
-      }
-
-      // Check if stored totalSpent differs from calculated
-      if (userBalance.getTotalSpent().compareTo(totalSpent) != 0) {
-        userBalance.setTotalSpent(totalSpent);
-        needsUpdate = true;
-        log.info("Updated stored totalSpent for user {}: {} -> {}", userId,
-            userBalance.getTotalSpent(), totalSpent);
-      }
-
-      if (needsUpdate) {
-        userBalanceRepository.save(userBalance);
-      }
+      PaymentRealtimeService.BalanceUpdateEvent event =
+          new PaymentRealtimeService.BalanceUpdateEvent(userId, newBalance);
+      eventPublisher.publishEvent(event);
+      log.debug("Published balance update event for user: {} with balance: {}", userId, newBalance);
     } catch (Exception e) {
-      log.error("Error updating stored balance for user: {}", userId, e);
+      log.error("Error publishing balance update event for user: {} with balance: {}", userId,
+          newBalance, e);
+      // Don't throw exception to avoid affecting balance operations
     }
   }
 }

@@ -631,7 +631,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
         log.info("Extracting both title and questions from form in single session: {}", formUrl);
 
         try {
-            // Use the new combined method to capture both HTMLs and metadata in one browser session
+            // Use the combined method to capture both HTMLs and metadata in one browser session
             SectionNavigationService.SectionNavigationResult navigationResult =
                     sectionNavigationService.captureSectionData(formUrl);
 
@@ -655,9 +655,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
 
             // Parse each section HTML with existing parser logic and attach metadata if available
             int position = 0;
-            // Create a map to align sectionHtmls index with sectionMetadata
-            // sectionHtmls: [section0, section1, section2, section3] (all sections)
-            // sectionMetadata: [section1, section2, section3] (skip first section)
+            // Map to align sectionHtmls index with sectionMetadata (metadata skips first section)
             java.util.Map<Integer, SectionNavigationService.SectionMetadata> metadataMap =
                     new java.util.HashMap<>();
             if (sectionMetadata != null) {
@@ -674,7 +672,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                         for (ExtractedQuestion q : qs) {
                             q.setPosition(position++);
                             // Attach section metadata: section0 gets no metadata, section1+ get
-                            // their metadata
+                            // theirs
                             if (i > 0 && metadataMap.containsKey(i)) {
                                 SectionNavigationService.SectionMetadata md = metadataMap.get(i);
                                 if (q.getAdditionalData() == null) {

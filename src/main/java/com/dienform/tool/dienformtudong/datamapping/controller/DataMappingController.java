@@ -191,6 +191,27 @@ public class DataMappingController {
   }
 
   /**
+   * Check if the question type is a grid question type
+   */
+  public boolean isGridQuestionType(String questionType) {
+    if (questionType == null)
+      return false;
+    return "multiple_choice_grid".equals(questionType.toLowerCase())
+        || "checkbox_grid".equals(questionType.toLowerCase());
+  }
+
+  /**
+   * Extract row labels from grid question options
+   */
+  public List<String> getGridRowLabels(QuestionResponse question) {
+    if (question.getOptions() == null)
+      return null;
+
+    return question.getOptions().stream().filter(option -> option.isRow())
+        .map(option -> option.getText()).collect(Collectors.toList());
+  }
+
+  /**
    * Perform automatic mapping between form questions and sheet columns using similarity analysis
    * 
    * @param formQuestions List of questions from the form (with cleaned titles)
@@ -212,6 +233,8 @@ public class DataMappingController {
       }
     }
 
+    int currentColumnIndex = 0; // Track current column position for sequential mapping
+
     for (int qIndex = 0; qIndex < formQuestions.size(); qIndex++) {
       QuestionResponse question = formQuestions.get(qIndex);
 
@@ -223,6 +246,26 @@ public class DataMappingController {
       Integer matchIndex = null;
       double confidence = 0.0;
 
+      // Check if this is a Grid question
+      boolean isGridQuestion = isGridQuestionType(question.getType());
+
+      if (isGridQuestion) {
+        // For Grid questions, map each row to consecutive columns
+        List<String> rowLabels = getGridRowLabels(question);
+        if (rowLabels != null && !rowLabels.isEmpty()) {
+          for (String rowLabel : rowLabels) {
+            if (currentColumnIndex < formattedSheetColumns.size()) {
+              String displayColumn = formattedSheetColumns.get(currentColumnIndex);
+              mappings.add(new AutoMapping(question.getId().toString(),
+                  question.getTitle() + " - " + rowLabel, displayColumn, 0.6));
+              currentColumnIndex++;
+            }
+          }
+          // Skip the main question mapping since we've mapped all rows
+          continue;
+        }
+      }
+
       // 1) Prefer exact header-name match by title
       if (normalizedTitle != null && headerIndexByName.containsKey(normalizedTitle)) {
         matchIndex = headerIndexByName.get(normalizedTitle);
@@ -233,9 +276,9 @@ public class DataMappingController {
         matchIndex = headerIndexByName.get(normalizedDescription);
         confidence = 0.9;
       } else {
-        // 3) Fallback to positional mapping: question i -> column i (if present)
-        if (qIndex < formattedSheetColumns.size()) {
-          matchIndex = qIndex;
+        // 3) Fallback to positional mapping: use current column index
+        if (currentColumnIndex < formattedSheetColumns.size()) {
+          matchIndex = currentColumnIndex;
           confidence = 0.5;
         }
       }
@@ -244,6 +287,7 @@ public class DataMappingController {
         String displayColumn = formattedSheetColumns.get(matchIndex);
         mappings.add(new AutoMapping(question.getId().toString(), question.getTitle(),
             displayColumn, confidence));
+        currentColumnIndex = matchIndex + 1; // Move to next column for next question
       }
     }
 
@@ -259,11 +303,33 @@ public class DataMappingController {
    */
   private List<String> findUnmappedQuestions(List<QuestionResponse> formQuestions,
       List<AutoMapping> autoMappings) {
-    List<String> mappedQuestionIds =
-        autoMappings.stream().map(mapping -> mapping.questionId).collect(Collectors.toList());
+    List<String> unmappedQuestions = new ArrayList<>();
 
-    return formQuestions.stream()
-        .filter(question -> !mappedQuestionIds.contains(question.getId().toString()))
-        .map(QuestionResponse::getTitle).collect(Collectors.toList());
+    for (QuestionResponse question : formQuestions) {
+      if (isGridQuestionType(question.getType())) {
+        // For Grid questions, check if all rows are mapped
+        List<String> rowLabels = getGridRowLabels(question);
+        if (rowLabels != null && !rowLabels.isEmpty()) {
+          boolean allRowsMapped =
+              rowLabels.stream().allMatch(rowLabel -> autoMappings.stream().anyMatch(
+                  mapping -> mapping.questionTitle.equals(question.getTitle() + " - " + rowLabel)));
+
+          if (!allRowsMapped) {
+            unmappedQuestions.add(question.getTitle() + " (Grid question - some rows unmapped)");
+          }
+        }
+      } else {
+        // For regular questions, check if the question ID is mapped
+        boolean isMapped = autoMappings.stream()
+            .anyMatch(mapping -> mapping.questionId.equals(question.getId().toString())
+                && mapping.questionTitle.equals(question.getTitle()));
+
+        if (!isMapped) {
+          unmappedQuestions.add(question.getTitle());
+        }
+      }
+    }
+
+    return unmappedQuestions;
   }
 }
