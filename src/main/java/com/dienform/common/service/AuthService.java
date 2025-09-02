@@ -27,6 +27,7 @@ public class AuthService {
   private final GoogleAuthService googleAuthService;
   private final FacebookAuthService facebookAuthService;
   private final PaymentOrderService paymentOrderService;
+  private final RoleService roleService;
 
   public AuthResponse loginManual(String email, String password, String ip) {
     Optional<User> opt = userRepository.findByEmail(email);
@@ -61,6 +62,7 @@ public class AuthService {
         u.setUpdatedAt(LocalDateTime.now());
       }
       User savedUser = userRepository.save(u);
+      roleService.ensureDefaultUserRole(savedUser);
 
       // Create new account promotion for new user
       try {
@@ -99,6 +101,7 @@ public class AuthService {
         user.setUpdatedAt(LocalDateTime.now());
       }
       user = userRepository.save(user);
+      roleService.ensureDefaultUserRole(user);
 
       // Create new account promotion for new user
       try {
@@ -150,6 +153,7 @@ public class AuthService {
       user.setUpdatedAt(LocalDateTime.now());
     }
     User savedUser = userRepository.save(user);
+    roleService.ensureDefaultUserRole(savedUser);
 
     // Create new account promotion for new user
     try {
@@ -169,9 +173,10 @@ public class AuthService {
     String accessToken = jwtTokenProvider.generateAccessToken(user.getEmail(), claims);
     String refreshToken = jwtTokenProvider.generateRefreshToken(user.getEmail());
 
+    String role = roleService.getPrimaryRole(user);
     AuthUserDto dto = AuthUserDto.builder().id(user.getId().toString()).email(user.getEmail())
         .name(user.getName()).avatar(user.getAvatar()).provider(user.getProvider().name())
-        .role("user").build();
+        .role(role).build();
 
     return AuthResponse.builder().success(true).message("OK").data(dto)
         .tokens(TokenPair.builder().accessToken(accessToken).refreshToken(refreshToken).build())

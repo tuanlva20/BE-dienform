@@ -82,7 +82,7 @@ public class AISuggestionRequestEntity {
     @Builder.Default
     private Integer maxRetries = 3;
 
-    @Column(name = "error_message")
+    @Column(name = "error_message", columnDefinition = "TEXT")
     private String errorMessage;
 
     @Column(name = "result_data", columnDefinition = "JSON")

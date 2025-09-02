@@ -1,6 +1,7 @@
 package com.dienform.config.service;
 
-import java.util.Collections;
+import java.util.List;
+import java.util.stream.Collectors;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.core.userdetails.UserDetailsService;
@@ -8,6 +9,7 @@ import org.springframework.security.core.userdetails.UsernameNotFoundException;
 import org.springframework.stereotype.Service;
 import com.dienform.common.entity.User;
 import com.dienform.common.repository.UserRepository;
+import com.dienform.common.repository.UserRoleRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
@@ -17,6 +19,7 @@ import lombok.extern.slf4j.Slf4j;
 public class CustomUserDetailsService implements UserDetailsService {
 
   private final UserRepository userRepository;
+  private final UserRoleRepository userRoleRepository;
 
   @Override
   public UserDetails loadUserByUsername(String email) throws UsernameNotFoundException {
@@ -29,10 +32,16 @@ public class CustomUserDetailsService implements UserDetailsService {
 
     log.debug("Found user: {} with email: {}", user.getName(), user.getEmail());
 
+    List<SimpleGrantedAuthority> authorities =
+        userRoleRepository.findAllByUserIdFetchRole(user.getId()).stream()
+            .map(ur -> new SimpleGrantedAuthority("ROLE_" + ur.getRole().getName().toUpperCase()))
+            .collect(Collectors.toList());
+    if (authorities.isEmpty()) {
+      authorities = List.of(new SimpleGrantedAuthority("ROLE_USER"));
+    }
+
     return org.springframework.security.core.userdetails.User.builder().username(user.getEmail())
-        .password("") // JWT authentication doesn't use password
-        .authorities(Collections.singletonList(new SimpleGrantedAuthority("ROLE_USER")))
-        .accountExpired(false).accountLocked(false).credentialsExpired(false).disabled(false)
-        .build();
+        .password("").authorities(authorities).accountExpired(false).accountLocked(false)
+        .credentialsExpired(false).disabled(false).build();
   }
 }

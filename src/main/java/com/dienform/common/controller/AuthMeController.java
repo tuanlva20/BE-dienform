@@ -13,6 +13,7 @@ import com.dienform.common.dto.auth.AuthUserDto;
 import com.dienform.common.entity.User;
 import com.dienform.common.repository.UserRepository;
 import com.dienform.common.service.JwtTokenProvider;
+import com.dienform.common.service.RoleService;
 import lombok.RequiredArgsConstructor;
 
 @RestController
@@ -22,6 +23,7 @@ public class AuthMeController {
 
   private final JwtTokenProvider jwtTokenProvider;
   private final UserRepository userRepository;
+  private final RoleService roleService;
 
   @GetMapping("/me")
   public ResponseEntity<AuthResponse> me(
@@ -42,9 +44,10 @@ public class AuthMeController {
       String email = decoded.getSubject();
       User user = userRepository.findByEmail(email)
           .orElseThrow(() -> new RuntimeException("User not found"));
+      String role = roleService.getPrimaryRole(user);
       AuthUserDto dto = AuthUserDto.builder().id(user.getId().toString()).email(user.getEmail())
           .name(user.getName()).avatar(user.getAvatar()).provider(user.getProvider().name())
-          .role("user").build();
+          .role(role).build();
       long expEpochSeconds = decoded.getExpiresAt().toInstant().getEpochSecond();
       return ResponseEntity.ok(AuthResponse.builder().success(true).message("OK").data(dto)
           .exp(expEpochSeconds).build());
