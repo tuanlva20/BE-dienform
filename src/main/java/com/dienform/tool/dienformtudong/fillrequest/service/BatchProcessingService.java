@@ -9,6 +9,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import com.dienform.tool.dienformtudong.fillrequest.entity.FillRequest;
+import com.dienform.tool.dienformtudong.fillrequest.repository.FillRequestRepository;
 import com.dienform.tool.dienformtudong.fillschedule.entity.FillSchedule;
 import com.dienform.tool.dienformtudong.fillschedule.repository.FillScheduleRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -108,6 +109,9 @@ public class BatchProcessingService {
   @Autowired
   private ScheduleDistributionService scheduleDistributionService;
 
+  @Autowired
+  private FillRequestRepository fillRequestRepository;
+
   @Value("${google.form.batch-size:100}")
   private int defaultBatchSize;
 
@@ -196,8 +200,30 @@ public class BatchProcessingService {
               objectMapper.getTypeFactory().constructCollectionType(List.class,
                   ScheduleDistributionService.ScheduledTask.class));
 
+      // Ensure deterministic order: sort by rowIndex asc
+      allTasks.sort(java.util.Comparator.comparingInt(
+          com.dienform.tool.dienformtudong.fillrequest.service.ScheduleDistributionService.ScheduledTask::getRowIndex));
+
       // Calculate batch boundaries
       int startIndex = schedule.getCurrentBatch() * schedule.getBatchSize();
+
+      // Align with current completedSurvey so we don't pick rows below progress
+      int completed = fillRequestRepository.findById(fillRequestId)
+          .map(FillRequest::getCompletedSurvey).orElse(0);
+      int baseIndex = 0;
+      for (int i = 0; i < allTasks.size(); i++) {
+        if (allTasks.get(i).getRowIndex() >= completed) {
+          baseIndex = i;
+          break;
+        }
+        if (i == allTasks.size() - 1) {
+          baseIndex = allTasks.size();
+        }
+      }
+      if (baseIndex > startIndex) {
+        startIndex = baseIndex;
+      }
+
       int endIndex = Math.min(startIndex + schedule.getBatchSize(), allTasks.size());
 
       if (startIndex >= allTasks.size()) {

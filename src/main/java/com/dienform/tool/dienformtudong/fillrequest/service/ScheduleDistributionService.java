@@ -223,29 +223,16 @@ public class ScheduleDistributionService {
             delaySeconds, delaySeconds / 60);
       }
 
-      schedule.add(new ScheduledTask(executionTime, delaySeconds, completedSurvey + i));
+      // FIX: Sử dụng completedSurvey + i để tiếp tục từ vị trí đã dừng
+      // Khi completedSurvey = 1: survey 2 = row 2, survey 3 = row 3, survey 4 = row 4...
+      int rowIndex = completedSurvey + i;
+      schedule.add(new ScheduledTask(executionTime, delaySeconds, rowIndex));
     }
 
-    // Sort by execution time and recalculate delays based on actual execution times
-    schedule.sort((a, b) -> a.getExecutionTime().compareTo(b.getExecutionTime()));
-
-    // Recalculate delays based on IMPROVED LOGIC
-    for (int i = 0; i < schedule.size(); i++) {
-      ScheduledTask task = schedule.get(i);
-      int newDelaySeconds;
-
-      // IMPROVED LOGIC: First form executes immediately, subsequent forms have distributed delays
-      if (completedSurvey == 0 && i == 0) {
-        newDelaySeconds = 0; // First form: execute immediately
-      } else {
-        // Subsequent forms: distributed delays between 2-15 minutes (120-900 seconds)
-        newDelaySeconds = 120 + random.nextInt(780); // 120-899 seconds (2-15 minutes)
-      }
-
-      // Create new task with updated delay
-      schedule.set(i,
-          new ScheduledTask(task.getExecutionTime(), newDelaySeconds, task.getRowIndex()));
-    }
+    // FIX: Không sort theo execution time để đảm bảo thứ tự row đúng
+    // Thứ tự row sẽ luôn là: 0, 1, 2, 3... (tương ứng với Row 1, Row 2, Row 3...)
+    log.info("Human-like schedule created with {} tasks - maintaining row order: 0,1,2,3...",
+        schedule.size());
 
     return schedule;
   }
@@ -274,7 +261,10 @@ public class ScheduleDistributionService {
         delaySeconds = 0; // First form: no delay
       }
 
-      schedule.add(new ScheduledTask(currentTime, delaySeconds, completedSurvey + i));
+      // FIX: Sử dụng completedSurvey + i để tiếp tục từ vị trí đã dừng
+      // Khi completedSurvey = 1: survey 2 = row 2, survey 3 = row 3, survey 4 = row 4...
+      int rowIndex = completedSurvey + i;
+      schedule.add(new ScheduledTask(currentTime, delaySeconds, rowIndex));
 
       // Add interval for next task
       long interval = intervalSeconds;
@@ -332,7 +322,10 @@ public class ScheduleDistributionService {
         }
       }
 
-      schedule.add(new ScheduledTask(currentTime, delaySeconds, completedSurvey + i));
+      // FIX: Sử dụng completedSurvey + i để tiếp tục từ vị trí đã dừng
+      // Khi completedSurvey = 1: survey 2 = row 2, survey 3 = row 3, survey 4 = row 4...
+      int rowIndex = completedSurvey + i;
+      schedule.add(new ScheduledTask(currentTime, delaySeconds, rowIndex));
     }
 
     log.info("Created {} immediate execution tasks starting at {}", schedule.size(), startDate);

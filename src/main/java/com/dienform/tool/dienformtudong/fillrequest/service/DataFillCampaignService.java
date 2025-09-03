@@ -6,9 +6,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
@@ -36,6 +38,9 @@ import lombok.extern.slf4j.Slf4j;
 @Service
 @Slf4j
 public class DataFillCampaignService {
+
+  // Enforce max concurrent form submissions per fill-request across all code paths
+  private static final Map<UUID, Semaphore> perRequestSemaphores = new ConcurrentHashMap<>();
 
   @Autowired
   private GoogleFormService googleFormService;
@@ -70,10 +75,10 @@ public class DataFillCampaignService {
   @Value("${google.form.heavy-timeout-multiplier:2.0}")
   private double heavyTimeoutMultiplier;
 
+  // Using ThreadPoolManager instead of local executorService
+
   @Value("${google.form.per-request.max-inflight:2}")
   private int perRequestMaxInflight;
-
-  // Using ThreadPoolManager instead of local executorService
 
   @Autowired
   private com.dienform.realtime.FillRequestRealtimeGateway realtimeGateway;
@@ -142,8 +147,9 @@ public class DataFillCampaignService {
       List<Question> questions) {
 
     log.info(
-        "Starting regular campaign execution for fillRequest: {} with {} forms (human-like: {})",
-        fillRequest.getId(), fillRequest.getSurveyCount(), fillRequest.isHumanLike());
+        "Starting regular campaign execution for fillRequest: {} with {} forms (human-like: {}, maxInflight: {})",
+        fillRequest.getId(), fillRequest.getSurveyCount(), fillRequest.isHumanLike(),
+        Math.max(1, perRequestMaxInflight));
 
     // Create schedule distribution for regular fill request
     List<ScheduleDistributionService.ScheduledTask> schedule = scheduleDistributionService
@@ -235,6 +241,11 @@ public class DataFillCampaignService {
     }
   }
 
+  private Semaphore getSemaphoreForRequest(UUID fillRequestId) {
+    int permits = Math.max(1, perRequestMaxInflight);
+    return perRequestSemaphores.computeIfAbsent(fillRequestId, k -> new Semaphore(permits));
+  }
+
   /**
    * Execute regular campaign core logic with adaptive timeout and circuit breaker
    */
@@ -264,7 +275,10 @@ public class DataFillCampaignService {
     // Adjust schedule to only process remaining surveys
     List<ScheduledTask> remainingSchedule =
         schedule.subList(0, Math.min(remainingSurveys, schedule.size()));
-    log.info("Adjusted schedule to {} tasks for remaining surveys", remainingSchedule.size());
+    // Enforce stable ascending order by row index to guarantee lower rows execute first
+    remainingSchedule.sort(java.util.Comparator.comparingInt(ScheduledTask::getRowIndex));
+    log.info("Adjusted schedule to {} tasks for remaining surveys (sorted by rowIndex asc)",
+        remainingSchedule.size());
 
     // Set initial status to IN_PROCESS
     updateFillRequestStatus(fillRequest, FillRequestStatusEnum.IN_PROCESS);
@@ -315,46 +329,8 @@ public class DataFillCampaignService {
       // Kick off initial window
       submitNext.run();
 
-      // Wait for all tasks to complete
-      CompletableFuture<Void> allFutures =
-          CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
-
-      allFutures.thenAccept(v -> {
-        // Count results
-        int completed = 0;
-        int failed = 0;
-
-        for (CompletableFuture<Boolean> future : futures) {
-          try {
-            Boolean result = future.get();
-            if (result != null && result) {
-              completed++;
-            } else {
-              failed++;
-            }
-          } catch (Exception e) {
-            log.error("Error getting task result: {}", e.getMessage());
-            failed++;
-          }
-        }
-
-        log.info("Regular campaign completed for request: {} - {} successful, {} failed",
-            fillRequest.getId(), completed, failed);
-
-        // Update final status
-        if (completed > 0) {
-          updateFillRequestStatus(fillRequest, FillRequestStatusEnum.COMPLETED);
-        } else {
-          updateFillRequestStatus(fillRequest, FillRequestStatusEnum.FAILED);
-        }
-
-        executionFuture.complete(null);
-      }).exceptionally(throwable -> {
-        log.error("Regular campaign failed for request: {}", fillRequest.getId(), throwable);
-        updateFillRequestStatus(fillRequest, FillRequestStatusEnum.FAILED);
-        executionFuture.completeExceptionally(throwable);
-        return null;
-      });
+      // Do NOT create a separate allOf/aggregation here.
+      // Finalization is handled in the per-task whenComplete block when completed == totalTasks.
 
     } catch (Exception e) {
       log.error("Error in regular campaign execution: {}", fillRequest.getId(), e);
@@ -396,7 +372,10 @@ public class DataFillCampaignService {
     // Adjust schedule to only process remaining surveys
     List<ScheduledTask> remainingSchedule =
         schedule.subList(0, Math.min(remainingSurveys, schedule.size()));
-    log.info("Adjusted schedule to {} tasks for remaining surveys", remainingSchedule.size());
+    // Enforce stable ascending order by row index to guarantee lower rows execute first
+    remainingSchedule.sort(java.util.Comparator.comparingInt(ScheduledTask::getRowIndex));
+    log.info("Adjusted schedule to {} tasks for remaining surveys (sorted by rowIndex asc)",
+        remainingSchedule.size());
 
     // Set initial status to IN_PROCESS and ensure user is in room
     updateFillRequestStatus(fillRequest, FillRequestStatusEnum.IN_PROCESS);
@@ -649,6 +628,9 @@ public class DataFillCampaignService {
 
     CompletableFuture<Boolean> future = CompletableFuture.supplyAsync(() -> {
       try {
+        // Enforce per-request concurrency with semaphore
+        Semaphore semaphore = getSemaphoreForRequest(fillRequest.getId());
+        semaphore.acquire();
         log.info("THREAD ASSIGNED: Task row {} started execution on thread: {} (fillRequest: {})",
             task.getRowIndex(), Thread.currentThread().getName(), fillRequest.getId());
 
@@ -703,6 +685,11 @@ public class DataFillCampaignService {
       } catch (Exception e) {
         log.error("Error in scheduled form fill: {}", e.getMessage(), e);
         return false;
+      } finally {
+        try {
+          getSemaphoreForRequest(fillRequest.getId()).release();
+        } catch (Exception ignore) {
+        }
       }
     }, executor);
 
@@ -748,6 +735,9 @@ public class DataFillCampaignService {
 
     CompletableFuture<Boolean> future = CompletableFuture.supplyAsync(() -> {
       try {
+        // Enforce per-request concurrency with semaphore
+        Semaphore semaphore = getSemaphoreForRequest(fillRequest.getId());
+        semaphore.acquire();
         log.info("THREAD ASSIGNED: Task row {} started execution on thread: {} (fillRequest: {})",
             task.getRowIndex(), Thread.currentThread().getName(), fillRequest.getId());
 
@@ -794,6 +784,11 @@ public class DataFillCampaignService {
       } catch (Exception e) {
         log.error("Error in scheduled form fill: {}", e.getMessage(), e);
         return false;
+      } finally {
+        try {
+          getSemaphoreForRequest(fillRequest.getId()).release();
+        } catch (Exception ignore) {
+        }
       }
     }, executor);
 
