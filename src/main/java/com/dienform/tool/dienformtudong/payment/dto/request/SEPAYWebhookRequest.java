@@ -24,15 +24,36 @@ public class SEPAYWebhookRequest {
   // Helper methods to extract orderId from content
   public String extractOrderId() {
     if (content != null && !content.isBlank()) {
-      // Try to extract orderId from content (assuming format like "TS1234567890")
-      String[] parts = content.split("\\s+");
+      // Pattern to match TS number between dots and before .CT
+      // Example: MBVCB.10782070993.137550.TS17568965085753886.CT
+      // We want to extract: TS17568965085753886
+
+      // Method 1: Using regex to find TS number between dots
+      java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("\\.(TS\\d+)\\.");
+      java.util.regex.Matcher matcher = pattern.matcher(content);
+
+      if (matcher.find()) {
+        String orderId = matcher.group(1);
+        return orderId;
+      }
+
+      // Method 2: Fallback - split by dots and find TS number
+      String[] parts = content.split("\\.");
       for (String part : parts) {
         if (part.startsWith("TS") && part.length() > 10) {
           return part;
         }
       }
+
+      // Method 3: Fallback - find TS number anywhere in content
+      java.util.regex.Pattern tsPattern = java.util.regex.Pattern.compile("TS\\d+");
+      java.util.regex.Matcher tsMatcher = tsPattern.matcher(content);
+      if (tsMatcher.find()) {
+        String orderId = tsMatcher.group();
+        return orderId;
+      }
     }
-    return null; // No fallback needed since we only use content
+    return null; // No order ID found
   }
 
   // Helper method to determine if payment is successful
@@ -49,5 +70,36 @@ public class SEPAYWebhookRequest {
   // Helper method to get transaction timestamp
   public String getTransactionTimestamp() {
     return transactionDate;
+  }
+
+  // Helper method to get detailed extraction info for debugging
+  public String getExtractionInfo() {
+    if (content == null || content.isBlank()) {
+      return "Content is null or empty";
+    }
+
+    StringBuilder info = new StringBuilder();
+    info.append("Content: ").append(content).append("\n");
+
+    // Check for TS pattern between dots
+    java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("\\.(TS\\d+)\\.");
+    java.util.regex.Matcher matcher = pattern.matcher(content);
+    if (matcher.find()) {
+      info.append("Found TS number between dots: ").append(matcher.group(1)).append("\n");
+    }
+
+    // Check for TS pattern anywhere
+    java.util.regex.Pattern tsPattern = java.util.regex.Pattern.compile("TS\\d+");
+    java.util.regex.Matcher tsMatcher = tsPattern.matcher(content);
+    if (tsMatcher.find()) {
+      info.append("Found TS number anywhere: ").append(tsMatcher.group()).append("\n");
+    }
+
+    return info.toString();
+  }
+
+  // Helper method to check if content contains order ID pattern
+  public boolean hasOrderIdPattern() {
+    return content != null && content.matches(".*TS\\d+.*");
   }
 }
