@@ -205,7 +205,7 @@ ai:
 
 # SEPAY Payment Configuration
 sepay:
-  secret-key: ${SEPAY_SECRET_KEY:your-sepay-secret-key}
+  secret-key: ${SEPAY_SECRET_KEY:msfjs05kr5mqtk8nsli7hmmrid9qlc3t}
   qr-base-url: ${SEPAY_QR_BASE_URL:https://qr.sepay.vn/img}
   api-url: ${SEPAY_API_URL:https://api.sepay.vn}
   webhook-url: ${SEPAY_WEBHOOK_URL:https://160.25.72.91:2412/api/payments/sepay/webhook}
