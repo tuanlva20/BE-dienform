@@ -15,7 +15,7 @@ spring:
     open-in-view: false
     show-sql: false # Enable SQL logging in development
     hibernate:
-      ddl-auto: update # Auto update schema in development
+      ddl-auto: none # Auto update schema in development
     properties:
       hibernate:
         jdbc:
@@ -23,7 +23,7 @@ spring:
         connection:
           timezone: Asia/Ho_Chi_Minh
   datasource:
-    url: jdbc:mysql://localhost:3306/fill_form?serverTimezone=Asia/Ho_Chi_Minh
+    url: jdbc:mysql://localhost:3306/khaosat_0209?serverTimezone=Asia/Ho_Chi_Minh
     username: fillform
     password: admin@
     driver-class-name: com.mysql.cj.jdbc.Driver
@@ -78,7 +78,7 @@ google:
     max-retries: 2 # Reduced from 3
     retry-delay-ms: 2000 # Increased from 1000ms
     per-request:
-      max-inflight: 2 #Điều chỉnh số form được submit executor mỗi fill-request
+      max-inflight: 1 #Điều chỉnh số form được submit executor mỗi fill-request
 
     # Feature flags
     auto-submit: true # Set to false for local debugging
@@ -86,6 +86,9 @@ google:
     async-enabled: true
     cache-enabled: true
     submit-when-visible: true
+    # Disable branch probing/backtracking when reading multi-section forms
+    branch-capture:
+      enabled: false
 
     # Adaptive timeout settings
     adaptive-timeout:
@@ -100,8 +103,8 @@ google:
       skip-failed-forms: true # Bỏ qua form lỗi
 
     # Legacy timeout settings (for backward compatibility)
-    fast-timeout-seconds: 300 # 5 phút cho fast mode
-    human-timeout-seconds: 600 # 10 phút cho human-like
+    fast-timeout-seconds: 120000 # 10 phút cho fast mode
+    human-timeout-seconds: 540000 # 20 phút cho human-like
     heavy-load-threshold: 25 # Reduced threshold for 2-core server
     heavy-timeout-multiplier: 1.5 # Reduced multiplier for memory efficiency
 
@@ -186,11 +189,11 @@ ai:
     gemini:
       api-key: AIzaSyDINl0xLfEZm5_QVT_nang30Vgt8El7VZU
       base-url: https://generativelanguage.googleapis.com/v1beta/models
-      model: gemini-2.0-flash
+      model: gemini-2.0-flash-lite
       max-tokens: 800000
       timeout: 30000
-      batch-size: 10
-      parallelism: 3
+      batch-size: 5
+      parallelism: 2
     validation:
       max-sample-count: 1000
       max-questions-per-form: 1000

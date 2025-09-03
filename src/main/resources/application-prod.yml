@@ -80,7 +80,7 @@ google:
     max-retries: 2 # Reduced from 3 to save memory
     retry-delay-ms: 2000 # Increased from 1000ms
     per-request:
-      max-inflight: 2
+      max-inflight: 1
 
     # Feature flags for production
     auto-submit: true
@@ -88,6 +88,9 @@ google:
     async-enabled: true
     cache-enabled: true
     submit-when-visible: true
+    # Disable branch probing/backtracking when reading multi-section forms
+    branch-capture:
+      enabled: false
 
     # Adaptive timeout settings
     adaptive-timeout:
@@ -102,8 +105,8 @@ google:
       skip-failed-forms: true # Bỏ qua form lỗi
 
     # Legacy timeout settings (for backward compatibility)
-    fast-timeout-seconds: 300 # 5 phút cho fast mode
-    human-timeout-seconds: 600 # 10 phút cho human-like
+    fast-timeout-seconds: 120000 # 5 phút cho fast mode
+    human-timeout-seconds: 540000 # 10 phút cho human-like
     heavy-load-threshold: 25 # Reduced threshold for 2-core server
     heavy-timeout-multiplier: 1.5 # Reduced multiplier for memory efficiency
 
@@ -120,7 +123,7 @@ google:
       human:
         min: 1 # Minimum 1 human thread
       fast:
-        min: 3 # Minimum 3 fast threads for parallel processing
+        min: 1 # Minimum 3 fast threads for parallel processing
   # Google OAuth Configuration
   oauth:
     client-id: 576659994866-msfjs05kr5mqtk8nsli7hmmrid9qlc3t.apps.googleusercontent.com
@@ -192,7 +195,7 @@ ai:
       model: gemini-2.0-flash
       max-tokens: 800000
       timeout: 30000
-      batch-size: 8
+      batch-size: 3
       parallelism: 2
     validation:
       max-sample-count: 1000

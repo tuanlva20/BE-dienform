@@ -1,15 +1,13 @@
 package com.dienform.config;
 
 import java.time.Duration;
-
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.client.RestTemplate;
 
 /**
- * Configuration for AI Suggestion service
- * Configures AI service client and related beans
+ * Configuration for AI Suggestion service Configures AI service client and related beans
  */
 @Configuration
 public class AISuggestionConfig {
@@ -21,7 +19,7 @@ public class AISuggestionConfig {
     public static class GeminiProperties {
       private String apiKey;
       private String baseUrl = "https://generativelanguage.googleapis.com/v1beta/models";
-      private String model = "gemini-2.0-flash";
+      private String model = "gemini-2.0-flash-lite";
       private Integer maxTokens = 800000;
       private Duration timeout = Duration.ofSeconds(30);
 
