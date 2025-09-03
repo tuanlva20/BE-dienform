@@ -57,6 +57,7 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
   private final FormFillingHelper formFillingHelper;
   private final RequiredQuestionAutofillService requiredQuestionAutofillService;
   private final FillRequestRepository fillRequestRepository;
+  private final com.dienform.tool.dienformtudong.fillrequest.repository.FillRequestMappingRepository fillRequestMappingRepository;
 
   @Value("${google.form.timeout-seconds:30}")
   private int timeoutSeconds;
@@ -228,7 +229,7 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
 
       // Build robust lookup maps so we don't depend on entity identity equality
       Map<java.util.UUID, QuestionOption> optionById = buildOptionByQuestionId(selections);
-      Map<String, QuestionOption> optionByKey = buildOptionByCompositeKey(selections);
+      Map<String, QuestionOption> optionByKey = buildOptionByCompositeKey(selections, null);
 
       // 2.a Fill first page (intro) questions that don't have section_index in additionalData
       int introFilled = fillIntroQuestionsIfAny(driver, selections, humanLike);
@@ -954,7 +955,7 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
   }
 
   private Map<String, QuestionOption> buildOptionByCompositeKey(
-      Map<Question, QuestionOption> selections) {
+      Map<Question, QuestionOption> selections, Map<String, String> columnMappings) {
     java.util.Map<String, QuestionOption> map = new java.util.HashMap<>();
 
     for (Map.Entry<Question, QuestionOption> e : selections.entrySet()) {
@@ -963,7 +964,7 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
         QuestionOption o = e.getValue();
         if (q == null || o == null)
           continue;
-        String key = buildCompositeKey(q);
+        String key = buildCompositeKey(q, columnMappings);
         if (key != null) {
           map.put(key, o);
         }
@@ -988,12 +989,46 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
       }
 
       if (optionByKey != null) {
-        String key = buildCompositeKey(question);
+        // Lấy column mappings từ currentFillRequestId để tạo key chính xác
+        Map<String, String> columnMappings = getColumnMappingsFromFillRequest(currentFillRequestId);
+        String key = buildCompositeKey(question, columnMappings);
         if (key != null) {
           QuestionOption byKey = optionByKey.get(key);
           if (byKey != null) {
             return byKey;
           }
+        }
+      }
+
+      // Fallback: Try to find option by question title when no column mappings available
+      if (optionByKey != null) {
+        log.debug(
+            "No column mappings available, trying fallback with question title for question: {}",
+            question.getTitle());
+        String fallbackKey = buildCompositeKey(question, null); // Use null columnMappings to
+                                                                // fallback to title
+        if (fallbackKey != null) {
+          QuestionOption byFallbackKey = optionByKey.get(fallbackKey);
+          if (byFallbackKey != null) {
+            log.debug("Found option using fallback key '{}' for question: {}", fallbackKey,
+                question.getTitle());
+            return byFallbackKey;
+          }
+        }
+      }
+
+      // Final fallback: Try to find option from answer distributions if available
+      if (currentFillRequestId != null) {
+        try {
+          QuestionOption fromDistribution = findOptionFromAnswerDistribution(question);
+          if (fromDistribution != null) {
+            log.debug("Found option from answer distribution for question: {}",
+                question.getTitle());
+            return fromDistribution;
+          }
+        } catch (Exception e) {
+          log.debug("Error finding option from answer distribution for question '{}': {}",
+              question.getTitle(), e.getMessage());
         }
       }
 
@@ -1005,12 +1040,11 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
     return null;
   }
 
-  private String buildCompositeKey(Question q) {
+  private String buildCompositeKey(Question q, Map<String, String> columnMappings) {
     try {
       StringBuilder sb = new StringBuilder();
       String formPart =
           q.getForm() != null && q.getForm().getId() != null ? q.getForm().getId().toString() : "";
-      String titlePart = q.getTitle() != null ? q.getTitle().trim() : "";
       String typePart = q.getType() != null ? q.getType().trim().toLowerCase() : "";
       String sectionPart = null;
       Map<String, String> add = q.getAdditionalData();
@@ -1019,10 +1053,31 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
       }
       if (sectionPart == null)
         sectionPart = "";
+
+      // Ưu tiên sử dụng column name từ mappings, nếu không có thì dùng question title
+      String titlePart;
+      if (columnMappings != null && q.getId() != null) {
+        String columnName = columnMappings.get(q.getId().toString());
+        if (columnName != null && !columnName.trim().isEmpty()) {
+          titlePart = columnName.trim();
+          log.debug("Using column name '{}' for question '{}' (ID: {})", columnName, q.getTitle(),
+              q.getId());
+        } else {
+          titlePart = q.getTitle() != null ? q.getTitle().trim() : "";
+          log.debug("No column mapping found, using question title '{}' for question ID: {}",
+              titlePart, q.getId());
+        }
+      } else {
+        titlePart = q.getTitle() != null ? q.getTitle().trim() : "";
+        log.debug("No column mappings available, using question title '{}' for question ID: {}",
+            titlePart, q.getId());
+      }
+
       sb.append(formPart).append("|").append(sectionPart).append("|").append(typePart).append("|")
           .append(titlePart);
       return sb.toString();
     } catch (Exception e) {
+      log.error("Error building composite key for question '{}': {}", q.getTitle(), e.getMessage());
       return null;
     }
   }
@@ -1949,6 +2004,62 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
       log.warn("Error checking for questions in current section: {}", e.getMessage());
       return false; // Assume no questions if an error occurs
     }
+  }
+
+  /**
+   * Find option from answer distributions for a question
+   */
+  private QuestionOption findOptionFromAnswerDistribution(Question question) {
+    try {
+      if (currentFillRequestId == null) {
+        return null;
+      }
+
+      FillRequest fillRequest =
+          fillRequestRepository.findByIdWithAllData(currentFillRequestId).orElse(null);
+      if (fillRequest == null || fillRequest.getAnswerDistributions() == null) {
+        return null;
+      }
+
+      // Find answer distribution for this question
+      for (AnswerDistribution dist : fillRequest.getAnswerDistributions()) {
+        if (dist.getQuestion() != null && dist.getQuestion().getId().equals(question.getId())) {
+          if (dist.getOption() != null) {
+            return dist.getOption();
+          }
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Error finding option from answer distribution for question '{}': {}",
+          question.getTitle(), e.getMessage());
+    }
+    return null;
+  }
+
+  /**
+   * Get column mappings from the current fill request.
+   */
+  private Map<String, String> getColumnMappingsFromFillRequest(UUID fillRequestId) {
+    if (fillRequestId == null) {
+      return null;
+    }
+    try {
+      // Get column mappings from FillRequestMapping repository
+      List<com.dienform.tool.dienformtudong.fillrequest.entity.FillRequestMapping> mappings =
+          fillRequestMappingRepository.findByFillRequestId(fillRequestId);
+
+      if (mappings != null && !mappings.isEmpty()) {
+        Map<String, String> columnMappings = new HashMap<>();
+        for (com.dienform.tool.dienformtudong.fillrequest.entity.FillRequestMapping mapping : mappings) {
+          columnMappings.put(mapping.getQuestionId().toString(), mapping.getColumnName());
+        }
+        return columnMappings;
+      }
+    } catch (Exception e) {
+      log.warn("Failed to get column mappings for fill request {}: {}", fillRequestId,
+          e.getMessage());
+    }
+    return null;
   }
 
 }

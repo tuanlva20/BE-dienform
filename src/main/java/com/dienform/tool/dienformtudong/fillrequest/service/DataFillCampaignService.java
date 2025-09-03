@@ -1137,15 +1137,14 @@ public class DataFillCampaignService {
           if (existing != null && !existing.isBlank()) {
             formData.put(baseQuestionId, existing + ";" + convertedValue);
           } else {
-            // Increment failed survey count in database
-            incrementFailedSurveyCount(fillRequest.getId());
             formData.put(baseQuestionId, convertedValue);
           }
         } else {
-          // Increment failed survey count in database
-          incrementFailedSurveyCount(fillRequest.getId());
           formData.put(baseQuestionId, convertedValue);
         }
+      } else {
+        log.warn("Failed to convert value '{}' for question '{}' (ID: {})", value,
+            question.getTitle(), baseQuestionId);
       }
     }
 
@@ -1257,10 +1256,40 @@ public class DataFillCampaignService {
         }
 
         case "multiple_choice_grid": {
-          String rowLabelMC =
-              explicitRowLabel != null ? explicitRowLabel : extractBracketLabel(columnName);
+          String rowLabelMC = null;
+
+          // First try explicit row label from mapping
+          if (explicitRowLabel != null) {
+            rowLabelMC = explicitRowLabel;
+            log.debug("Using explicit row label '{}' for multiple_choice_grid in column {}",
+                rowLabelMC, columnName);
+          }
+          // Then try to extract from column name format like "Title [Row Label]"
+          else if (extractBracketLabel(columnName) != null) {
+            rowLabelMC = extractBracketLabel(columnName);
+            log.debug("Extracted row label '{}' from column name '{}'", rowLabelMC, columnName);
+          }
+          // Then try to map column name to row by position (GN1 = row 1, GN2 = row 2, etc.)
+          else if (isColumnNameMappableToRow(columnName)) {
+            rowLabelMC = mapColumnNameToRowLabel(question, columnName);
+            if (rowLabelMC != null) {
+              log.debug("Mapped column '{}' to row label '{}' for question '{}'", columnName,
+                  rowLabelMC, question.getTitle());
+            }
+          }
+          // Finally try to get the first row label from question options as fallback
           if (rowLabelMC == null) {
-            log.warn("Missing row label for multiple_choice_grid in column {}", columnName);
+            rowLabelMC = getFirstRowLabelFromQuestion(question);
+            if (rowLabelMC != null) {
+              log.info("Using fallback row label '{}' for multiple_choice_grid in column {}",
+                  rowLabelMC, columnName);
+            }
+          }
+
+          if (rowLabelMC == null) {
+            log.warn(
+                "Missing row label for multiple_choice_grid in column {} and no fallback row found",
+                columnName);
             return null;
           }
           String v = value.trim();
@@ -1280,10 +1309,39 @@ public class DataFillCampaignService {
         }
 
         case "checkbox_grid": {
-          String rowLabelCB =
-              explicitRowLabel != null ? explicitRowLabel : extractBracketLabel(columnName);
+          String rowLabelCB = null;
+
+          // First try explicit row label from mapping
+          if (explicitRowLabel != null) {
+            rowLabelCB = explicitRowLabel;
+            log.debug("Using explicit row label '{}' for checkbox_grid in column {}", rowLabelCB,
+                columnName);
+          }
+          // Then try to extract from column name format like "Title [Row Label]"
+          else if (extractBracketLabel(columnName) != null) {
+            rowLabelCB = extractBracketLabel(columnName);
+            log.debug("Extracted row label '{}' from column name '{}'", rowLabelCB, columnName);
+          }
+          // Then try to map column name to row by position (GN1 = row 1, GN2 = row 2, etc.)
+          else if (isColumnNameMappableToRow(columnName)) {
+            rowLabelCB = mapColumnNameToRowLabel(question, columnName);
+            if (rowLabelCB != null) {
+              log.debug("Mapped column '{}' to row label '{}' for question '{}'", columnName,
+                  rowLabelCB, question.getTitle());
+            }
+          }
+          // Finally try to get the first row label from question options as fallback
           if (rowLabelCB == null) {
-            log.warn("Missing row label for checkbox_grid in column {}", columnName);
+            rowLabelCB = getFirstRowLabelFromQuestion(question);
+            if (rowLabelCB != null) {
+              log.info("Using fallback row label '{}' for checkbox_grid in column {}", rowLabelCB,
+                  columnName);
+            }
+          }
+
+          if (rowLabelCB == null) {
+            log.warn("Missing row label for checkbox_grid in column {} and no fallback row found",
+                columnName);
             return null;
           }
           String[] parts = value.split("\\|");
@@ -1351,6 +1409,24 @@ public class DataFillCampaignService {
   }
 
   /**
+   * Get the first row label from a grid question's options
+   */
+  private String getFirstRowLabelFromQuestion(Question question) {
+    try {
+      List<QuestionOption> options = getQuestionOptionsSafely(question);
+      for (QuestionOption option : options) {
+        if (option.isRow() && option.getText() != null && !option.getText().trim().isEmpty()) {
+          return option.getText().trim();
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Error getting first row label for question '{}': {}", question.getTitle(),
+          e.getMessage());
+    }
+    return null;
+  }
+
+  /**
    * Safely get question options, handling lazy initialization
    */
   private List<QuestionOption> getQuestionOptionsSafely(Question question) {
@@ -1368,6 +1444,67 @@ public class DataFillCampaignService {
         log.warn("Failed to reload question with options: {}", question.getId(), ex);
         return new ArrayList<>();
       }
+    }
+  }
+
+  /**
+   * Check if column name can be mapped to a row by position (e.g., GN1, GN2, etc.)
+   */
+  private boolean isColumnNameMappableToRow(String columnName) {
+    if (columnName == null || columnName.trim().isEmpty()) {
+      return false;
+    }
+
+    // Check if column name follows pattern like GN1, GN2, GN3, etc.
+    // or any pattern that ends with a number
+    String trimmed = columnName.trim();
+    return trimmed.matches(".*\\d+$");
+  }
+
+  /**
+   * Map column name to row label by position (GN1 = row 1, GN2 = row 2, etc.)
+   */
+  private String mapColumnNameToRowLabel(Question question, String columnName) {
+    try {
+      if (columnName == null || columnName.trim().isEmpty()) {
+        return null;
+      }
+
+      // Extract the number from column name (e.g., GN1 -> 1, GN2 -> 2)
+      String trimmed = columnName.trim();
+      String numberPart = trimmed.replaceAll(".*?(\\d+)$", "$1");
+
+      if (numberPart.isEmpty()) {
+        return null;
+      }
+
+      int rowIndex = Integer.parseInt(numberPart);
+      if (rowIndex < 1) {
+        return null;
+      }
+
+      // Get all row options and find the one at the specified position
+      List<QuestionOption> rowOptions =
+          getQuestionOptionsSafely(question).stream().filter(opt -> opt.isRow())
+              .sorted((a, b) -> Integer.compare(a.getPosition() == null ? 0 : a.getPosition(),
+                  b.getPosition() == null ? 0 : b.getPosition()))
+              .collect(Collectors.toList());
+
+      if (rowIndex <= rowOptions.size()) {
+        QuestionOption targetRow = rowOptions.get(rowIndex - 1);
+        if (targetRow.getText() != null && !targetRow.getText().trim().isEmpty()) {
+          return targetRow.getText().trim();
+        }
+      }
+
+      log.debug("Could not map column '{}' to row label for question '{}'", columnName,
+          question.getTitle());
+      return null;
+
+    } catch (Exception e) {
+      log.debug("Error mapping column '{}' to row label for question '{}': {}", columnName,
+          question.getTitle(), e.getMessage());
+      return null;
     }
   }
 }

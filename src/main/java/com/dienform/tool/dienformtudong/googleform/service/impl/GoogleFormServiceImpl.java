@@ -828,10 +828,15 @@ public class GoogleFormServiceImpl implements GoogleFormService {
 
                 // Fallback: create minimal option preserving the full raw value (no split)
                 if (resolved == null) {
-                    resolved = new QuestionOption();
-                    resolved.setQuestion(question);
-                    resolved.setText(raw);
-                    resolved.setValue(raw);
+                    // Special handling for grid questions
+                    if (isGridQuestionType(question.getType())) {
+                        resolved = createGridQuestionOption(question, raw);
+                    } else {
+                        resolved = new QuestionOption();
+                        resolved.setQuestion(question);
+                        resolved.setText(raw);
+                        resolved.setValue(raw);
+                    }
                 }
 
                 selections.put(question, resolved);
@@ -1238,6 +1243,80 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                 log.debug("Failed to handle fatal error: {}", ignore.getMessage());
             }
         }
+    }
+
+    /**
+     * Check if the question type is a grid question type
+     */
+    private boolean isGridQuestionType(String questionType) {
+        return "multiple_choice_grid".equals(questionType) || "checkbox_grid".equals(questionType);
+    }
+
+    /**
+     * Create a QuestionOption for grid questions with proper format
+     */
+    private QuestionOption createGridQuestionOption(Question question, String raw) {
+        try {
+            log.debug("Creating grid question option for question '{}' with raw value: '{}'",
+                    question.getTitle(), raw);
+
+            // For grid questions, try to detect if we have rowLabel:value format
+            // If not, we need to create a format that grid handlers can understand
+            String optionText = raw;
+
+            // If raw doesn't contain ":", it might be just a column value
+            // We need to use the first available row as default
+            if (!raw.contains(":")) {
+                // Get the first row label from question options
+                String firstRowLabel = getFirstRowLabel(question);
+                if (firstRowLabel != null) {
+                    optionText = firstRowLabel + ":" + raw;
+                    log.debug("Created grid option format: '{}' for question '{}'", optionText,
+                            question.getTitle());
+                } else {
+                    // If no row found, use "all" as fallback
+                    optionText = "all:" + raw;
+                    log.debug("Using fallback 'all' format: '{}' for question '{}'", optionText,
+                            question.getTitle());
+                }
+            }
+
+            QuestionOption option = new QuestionOption();
+            option.setQuestion(question);
+            option.setText(optionText);
+            option.setValue(optionText);
+
+            return option;
+        } catch (Exception e) {
+            log.warn("Error creating grid question option for question '{}': {}",
+                    question.getTitle(), e.getMessage());
+            // Fallback to basic option
+            QuestionOption option = new QuestionOption();
+            option.setQuestion(question);
+            option.setText(raw);
+            option.setValue(raw);
+            return option;
+        }
+    }
+
+    /**
+     * Get the first row label from a grid question's options
+     */
+    private String getFirstRowLabel(Question question) {
+        try {
+            if (question.getOptions() != null) {
+                for (QuestionOption option : question.getOptions()) {
+                    if (option.isRow() && option.getText() != null
+                            && !option.getText().trim().isEmpty()) {
+                        return option.getText().trim();
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.debug("Error getting first row label for question '{}': {}", question.getTitle(),
+                    e.getMessage());
+        }
+        return null;
     }
 
     private void scrollIntoView(WebDriver driver, WebElement element) {
