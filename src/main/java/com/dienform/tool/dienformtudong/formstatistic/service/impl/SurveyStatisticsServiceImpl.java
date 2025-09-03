@@ -5,6 +5,7 @@ import java.math.RoundingMode;
 import java.time.DayOfWeek;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.UUID;
 import org.springframework.stereotype.Service;
 import com.dienform.tool.dienformtudong.fillrequest.enums.FillRequestStatusEnum;
 import com.dienform.tool.dienformtudong.formstatistic.dto.SurveyStatisticsResponse;
@@ -21,36 +22,42 @@ public class SurveyStatisticsServiceImpl implements SurveyStatisticsService {
   private final SurveyStatisticsRepository surveyStatisticsRepository;
 
   @Override
-  public SurveyStatisticsResponse getDashboardStatistics() {
-    log.info("Calculating dashboard statistics");
+  public SurveyStatisticsResponse getDashboardStatistics(UUID userId) {
+    log.info("Calculating dashboard statistics for user: {}", userId);
 
     try {
-      // Tính toán các thống kê cơ bản
-      Long pendingCount = surveyStatisticsRepository.countByStatus(FillRequestStatusEnum.QUEUED);
-      Long inProcessCount = surveyStatisticsRepository.countByStatus(FillRequestStatusEnum.IN_PROCESS);
-      Long completedCount = surveyStatisticsRepository.countByStatus(FillRequestStatusEnum.COMPLETED);
-      Long failedCount = surveyStatisticsRepository.countByStatus(FillRequestStatusEnum.FAILED);
+      // Tính toán các thống kê cơ bản với userId filter
+      Long pendingCount =
+          surveyStatisticsRepository.countByStatusAndUserId(FillRequestStatusEnum.QUEUED, userId);
+      Long inProcessCount = surveyStatisticsRepository
+          .countByStatusAndUserId(FillRequestStatusEnum.IN_PROCESS, userId);
+      Long completedCount = surveyStatisticsRepository
+          .countByStatusAndUserId(FillRequestStatusEnum.COMPLETED, userId);
+      Long failedCount =
+          surveyStatisticsRepository.countByStatusAndUserId(FillRequestStatusEnum.FAILED, userId);
 
       // Tổng số khảo sát
       Long totalCount = pendingCount + inProcessCount + completedCount + failedCount;
 
-      // Thống kê theo thời gian
-      Long newSurveysToday = surveyStatisticsRepository.countNewSurveysToday();
-      Long completedThisWeek =
-          surveyStatisticsRepository.countCompletedSurveysThisWeek(getStartOfWeek());
-      Long failedNeedReview = surveyStatisticsRepository.countFailedSurveysNeedReview();
-      Long totalRunSuccessfully = surveyStatisticsRepository.countTotalSurveysRunSuccessfully();
+      // Thống kê theo thời gian với userId filter
+      Long newSurveysToday = surveyStatisticsRepository.countNewSurveysTodayByUserId(userId);
+      Long completedThisWeek = surveyStatisticsRepository
+          .countCompletedSurveysThisWeekByUserId(getStartOfWeek(), userId);
+      Long failedNeedReview =
+          surveyStatisticsRepository.countFailedSurveysNeedReviewByUserId(userId);
+      Long totalRunSuccessfully =
+          surveyStatisticsRepository.countTotalSurveysRunSuccessfullyByUserId(userId);
 
       // Tính toán trend (so sánh với tuần trước)
       LocalDateTime lastWeekStart = getStartOfWeek().minusWeeks(1);
       LocalDateTime lastWeekEnd = getStartOfWeek().minusSeconds(1);
 
-      Long lastWeekCompleted = surveyStatisticsRepository
-          .countByStatusAndDateRange(FillRequestStatusEnum.COMPLETED, lastWeekStart, lastWeekEnd);
-      Long lastWeekFailed = surveyStatisticsRepository
-          .countByStatusAndDateRange(FillRequestStatusEnum.FAILED, lastWeekStart, lastWeekEnd);
-      Long lastWeekPending = surveyStatisticsRepository
-          .countByStatusAndDateRange(FillRequestStatusEnum.QUEUED, lastWeekStart, lastWeekEnd);
+      Long lastWeekCompleted = surveyStatisticsRepository.countByStatusAndDateRangeAndUserId(
+          FillRequestStatusEnum.COMPLETED, lastWeekStart, lastWeekEnd, userId);
+      Long lastWeekFailed = surveyStatisticsRepository.countByStatusAndDateRangeAndUserId(
+          FillRequestStatusEnum.FAILED, lastWeekStart, lastWeekEnd, userId);
+      Long lastWeekPending = surveyStatisticsRepository.countByStatusAndDateRangeAndUserId(
+          FillRequestStatusEnum.QUEUED, lastWeekStart, lastWeekEnd, userId);
 
       // Tính phần trăm và trend
       BigDecimal pendingPercentage = calculatePercentage(pendingCount + inProcessCount, totalCount);
@@ -84,21 +91,25 @@ public class SurveyStatisticsServiceImpl implements SurveyStatisticsService {
           .totalSurveysRunSuccessfully(totalRunSuccessfully).build();
 
     } catch (Exception e) {
-      log.error("Error calculating dashboard statistics: {}", e.getMessage(), e);
+      log.error("Error calculating dashboard statistics for user {}: {}", userId, e.getMessage(),
+          e);
       throw new RuntimeException("Failed to calculate dashboard statistics", e);
     }
   }
 
   @Override
-  public SurveyStatisticsResponse getStatisticsByDateRange(String startDate, String endDate) {
-    log.info("Calculating statistics for date range: {} to {}", startDate, endDate);
+  public SurveyStatisticsResponse getStatisticsByDateRange(String startDate, String endDate,
+      UUID userId) {
+    log.info("Calculating statistics for date range: {} to {} for user: {}", startDate, endDate,
+        userId);
 
     try {
       DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
       LocalDateTime start = LocalDateTime.parse(startDate, formatter);
       LocalDateTime end = LocalDateTime.parse(endDate, formatter);
 
-      Object[] stats = surveyStatisticsRepository.getStatisticsByDateRange(start, end);
+      Object[] stats =
+          surveyStatisticsRepository.getStatisticsByDateRangeAndUserId(start, end, userId);
 
       Long totalCount = (Long) stats[0];
       Long completedCount = (Long) stats[1];
@@ -107,14 +118,15 @@ public class SurveyStatisticsServiceImpl implements SurveyStatisticsService {
       return calculateStatisticsFromCounts(totalCount, completedCount, failedCount);
 
     } catch (Exception e) {
-      log.error("Error calculating statistics by date range: {}", e.getMessage(), e);
+      log.error("Error calculating statistics by date range for user {}: {}", userId,
+          e.getMessage(), e);
       throw new RuntimeException("Failed to calculate statistics by date range", e);
     }
   }
 
   @Override
-  public SurveyStatisticsResponse getStatisticsByFormId(String formId) {
-    log.info("Calculating statistics for form ID: {}", formId);
+  public SurveyStatisticsResponse getStatisticsByFormId(String formId, UUID userId) {
+    log.info("Calculating statistics for form ID: {} for user: {}", formId, userId);
     throw new UnsupportedOperationException("Form-specific statistics not yet implemented");
   }
 

@@ -1,5 +1,6 @@
 package com.dienform.tool.dienformtudong.formstatistic.controller;
 
+import java.util.UUID;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
@@ -11,6 +12,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import com.dienform.common.model.ResponseModel;
+import com.dienform.common.util.CurrentUserUtil;
 import com.dienform.tool.dienformtudong.formstatistic.dto.OrderStatisticsResponse;
 import com.dienform.tool.dienformtudong.formstatistic.dto.SurveyStatisticsResponse;
 import com.dienform.tool.dienformtudong.formstatistic.service.OrderStatisticsService;
@@ -26,6 +28,7 @@ public class SurveyStatisticsController {
 
   private final SurveyStatisticsService surveyStatisticsService;
   private final OrderStatisticsService orderStatisticsService;
+  private final CurrentUserUtil currentUserUtil;
 
   /**
    * Lấy thống kê tổng quan cho dashboard GET /api/v1/statistics/dashboard
@@ -33,8 +36,12 @@ public class SurveyStatisticsController {
   @GetMapping("/dashboard")
   public ResponseEntity<ResponseModel<SurveyStatisticsResponse>> getDashboardStatistics() {
     try {
-      log.info("Getting dashboard statistics");
-      SurveyStatisticsResponse response = surveyStatisticsService.getDashboardStatistics();
+      // Lấy userId từ token hiện tại
+      UUID currentUserId = currentUserUtil.requireCurrentUserId();
+
+      log.info("Getting dashboard statistics for user: {}", currentUserId);
+      SurveyStatisticsResponse response =
+          surveyStatisticsService.getDashboardStatistics(currentUserId);
       return ResponseEntity.ok(ResponseModel.success(response, HttpStatus.OK));
     } catch (Exception e) {
       log.error("Error getting dashboard statistics: {}", e.getMessage(), e);
@@ -51,9 +58,13 @@ public class SurveyStatisticsController {
   public ResponseEntity<ResponseModel<SurveyStatisticsResponse>> getStatisticsByDateRange(
       @RequestParam String startDate, @RequestParam String endDate) {
     try {
-      log.info("Getting statistics for date range: {} to {}", startDate, endDate);
+      // Lấy userId từ token hiện tại
+      UUID currentUserId = currentUserUtil.requireCurrentUserId();
+
+      log.info("Getting statistics for date range: {} to {} for user: {}", startDate, endDate,
+          currentUserId);
       SurveyStatisticsResponse response =
-          surveyStatisticsService.getStatisticsByDateRange(startDate, endDate);
+          surveyStatisticsService.getStatisticsByDateRange(startDate, endDate, currentUserId);
       return ResponseEntity.ok(ResponseModel.success(response, HttpStatus.OK));
     } catch (Exception e) {
       log.error("Error getting statistics by date range: {}", e.getMessage(), e);
@@ -69,8 +80,12 @@ public class SurveyStatisticsController {
   public ResponseEntity<ResponseModel<SurveyStatisticsResponse>> getStatisticsByFormId(
       @PathVariable String formId) {
     try {
-      log.info("Getting statistics for form ID: {}", formId);
-      SurveyStatisticsResponse response = surveyStatisticsService.getStatisticsByFormId(formId);
+      // Lấy userId từ token hiện tại
+      UUID currentUserId = currentUserUtil.requireCurrentUserId();
+
+      log.info("Getting statistics for form ID: {} for user: {}", formId, currentUserId);
+      SurveyStatisticsResponse response =
+          surveyStatisticsService.getStatisticsByFormId(formId, currentUserId);
       return ResponseEntity.ok(ResponseModel.success(response, HttpStatus.OK));
     } catch (Exception e) {
       log.error("Error getting statistics for form {}: {}", formId, e.getMessage(), e);
@@ -85,8 +100,12 @@ public class SurveyStatisticsController {
   @GetMapping("/quick")
   public ResponseEntity<ResponseModel<SurveyStatisticsResponse>> getQuickStatistics() {
     try {
-      log.info("Getting quick statistics");
-      SurveyStatisticsResponse response = surveyStatisticsService.getDashboardStatistics();
+      // Lấy userId từ token hiện tại
+      UUID currentUserId = currentUserUtil.requireCurrentUserId();
+
+      log.info("Getting quick statistics for user: {}", currentUserId);
+      SurveyStatisticsResponse response =
+          surveyStatisticsService.getDashboardStatistics(currentUserId);
       return ResponseEntity.ok(ResponseModel.success(response, HttpStatus.OK));
     } catch (Exception e) {
       log.error("Error getting quick statistics: {}", e.getMessage(), e);

@@ -161,4 +161,87 @@ public interface FillRequestRepository extends JpaRepository<FillRequest, UUID> 
         @Transactional
         @Query("UPDATE FillRequest fr SET fr.status = ?2, fr.retryCount = ?3, fr.updatedAt = NOW() WHERE fr.id = ?1")
         int updateStatusAndRetryCount(UUID id, FillRequestStatusEnum status, int retryCount);
+
+        /**
+         * Find FillRequests for report with pagination and filtering
+         */
+        @EntityGraph(attributePaths = {"form", "form.createdBy", "answerDistributions"})
+        @Query("SELECT fr FROM FillRequest fr " + "WHERE fr.form.createdBy.id = :userId "
+                        + "AND (:searchTerm IS NULL OR :searchTerm = '' OR "
+                        + "       LOWER(fr.form.name) LIKE LOWER(CONCAT('%', :searchTerm, '%')) OR "
+                        + "       LOWER(fr.status) LIKE LOWER(CONCAT('%', :searchTerm, '%')) OR "
+                        + "       LOWER(CASE WHEN fr.humanLike = true THEN 'Manual' ELSE 'Auto' END) LIKE LOWER(CONCAT('%', :searchTerm, '%'))) "
+                        + "AND (:status IS NULL OR fr.status = :status) "
+                        + "AND (:formStatus IS NULL OR fr.form.status = :formStatus) "
+                        + "AND (:formType IS NULL OR :formType = '' OR "
+                        + "       (fr.humanLike = true AND :formType = 'Manual') OR "
+                        + "       (fr.humanLike = false AND :formType = 'Auto')) "
+                        + "AND (:startDate IS NULL OR DATE(fr.createdAt) >= :startDate) "
+                        + "AND (:endDate IS NULL OR DATE(fr.createdAt) <= :endDate)")
+        List<FillRequest> findForReport(
+                        @org.springframework.data.repository.query.Param("userId") UUID userId,
+                        @org.springframework.data.repository.query.Param("searchTerm") String searchTerm,
+                        @org.springframework.data.repository.query.Param("status") FillRequestStatusEnum status,
+                        @org.springframework.data.repository.query.Param("formStatus") com.dienform.tool.dienformtudong.form.enums.FormStatusEnum formStatus,
+                        @org.springframework.data.repository.query.Param("formType") String formType,
+                        @org.springframework.data.repository.query.Param("startDate") java.time.LocalDate startDate,
+                        @org.springframework.data.repository.query.Param("endDate") java.time.LocalDate endDate,
+                        org.springframework.data.domain.Pageable pageable);
+
+        /**
+         * Count FillRequests for report with filtering
+         */
+        @Query("SELECT COUNT(fr) FROM FillRequest fr " + "WHERE fr.form.createdBy.id = :userId "
+                        + "AND (:searchTerm IS NULL OR :searchTerm = '' OR "
+                        + "       LOWER(fr.form.name) LIKE LOWER(CONCAT('%', :searchTerm, '%')) OR "
+                        + "       LOWER(fr.status) LIKE LOWER(CONCAT('%', :searchTerm, '%')) OR "
+                        + "       LOWER(CASE WHEN fr.humanLike = true THEN 'Manual' ELSE 'Auto' END) LIKE LOWER(CONCAT('%', :searchTerm, '%'))) "
+                        + "AND (:status IS NULL OR fr.status = :status) "
+                        + "AND (:formStatus IS NULL OR fr.form.status = :formStatus) "
+                        + "AND (:formType IS NULL OR :formType = '' OR "
+                        + "       (fr.humanLike = true AND :formType = 'Manual') OR "
+                        + "       (fr.humanLike = false AND :formType = 'Auto')) "
+                        + "AND (:startDate IS NULL OR DATE(fr.createdAt) >= :startDate) "
+                        + "AND (:endDate IS NULL OR DATE(fr.createdAt) <= :endDate)")
+        long countForReport(@org.springframework.data.repository.query.Param("userId") UUID userId,
+                        @org.springframework.data.repository.query.Param("searchTerm") String searchTerm,
+                        @org.springframework.data.repository.query.Param("status") FillRequestStatusEnum status,
+                        @org.springframework.data.repository.query.Param("formStatus") com.dienform.tool.dienformtudong.form.enums.FormStatusEnum formStatus,
+                        @org.springframework.data.repository.query.Param("formType") String formType,
+                        @org.springframework.data.repository.query.Param("startDate") java.time.LocalDate startDate,
+                        @org.springframework.data.repository.query.Param("endDate") java.time.LocalDate endDate);
+
+        /**
+         * Get summary statistics for report
+         */
+        @Query("SELECT " + "COUNT(fr) as totalForms, "
+                        + "SUM(CASE WHEN fr.status = 'COMPLETED' THEN 1 ELSE 0 END) as totalCompletedForms, "
+                        + "SUM(CASE WHEN fr.status = 'IN_PROCESS' THEN 1 ELSE 0 END) as totalProcessingForms, "
+                        + "SUM(CASE WHEN fr.status = 'FAILED' THEN 1 ELSE 0 END) as totalFailedForms, "
+                        + "SUM(CASE WHEN fr.status = 'QUEUED' THEN 1 ELSE 0 END) as totalQueuedForms, "
+                        + "SUM(fr.totalPrice) as totalCost, "
+                        + "AVG(fr.totalPrice) as averageCostPerForm, "
+                        + "SUM(fr.surveyCount) as totalSurveys, "
+                        + "SUM(fr.completedSurvey) as totalCompletedSurveys, "
+                        + "SUM(fr.failedSurvey) as totalFailedSurveys " + "FROM FillRequest fr "
+                        + "WHERE fr.form.createdBy.id = :userId "
+                        + "AND (:searchTerm IS NULL OR :searchTerm = '' OR "
+                        + "       LOWER(fr.form.name) LIKE LOWER(CONCAT('%', :searchTerm, '%')) OR "
+                        + "       LOWER(fr.status) LIKE LOWER(CONCAT('%', :searchTerm, '%')) OR "
+                        + "       LOWER(CASE WHEN fr.humanLike = true THEN 'Manual' ELSE 'Auto' END) LIKE LOWER(CONCAT('%', :searchTerm, '%'))) "
+                        + "AND (:status IS NULL OR fr.status = :status) "
+                        + "AND (:formStatus IS NULL OR fr.form.status = :formStatus) "
+                        + "AND (:formType IS NULL OR :formType = '' OR "
+                        + "       (fr.humanLike = true AND :formType = 'Auto') OR "
+                        + "       (fr.humanLike = false AND :formType = 'Manual')) "
+                        + "AND (:startDate IS NULL OR DATE(fr.createdAt) >= :startDate) "
+                        + "AND (:endDate IS NULL OR DATE(fr.createdAt) <= :endDate)")
+        Object[] getSummaryStatistics(
+                        @org.springframework.data.repository.query.Param("userId") UUID userId,
+                        @org.springframework.data.repository.query.Param("searchTerm") String searchTerm,
+                        @org.springframework.data.repository.query.Param("status") FillRequestStatusEnum status,
+                        @org.springframework.data.repository.query.Param("formStatus") com.dienform.tool.dienformtudong.form.enums.FormStatusEnum formStatus,
+                        @org.springframework.data.repository.query.Param("formType") String formType,
+                        @org.springframework.data.repository.query.Param("startDate") java.time.LocalDate startDate,
+                        @org.springframework.data.repository.query.Param("endDate") java.time.LocalDate endDate);
 }
