@@ -23,14 +23,14 @@ spring:
         connection:
           timezone: Asia/Ho_Chi_Minh
   datasource:
-    url: ${DATABASE_URL:jdbc:mysql://160.25.72.91:3306/fill_form?useSSL=false&serverTimezone=Asia/Ho_Chi_Minh}
+    url: ${DATABASE_URL:jdbc:mysql://192.168.2.24:3306/fill_form?useSSL=false&serverTimezone=Asia/Ho_Chi_Minh}
     username: ${DATABASE_USERNAME:fillform}
     password: ${DATABASE_PASSWORD:admin@}
     driver-class-name: com.mysql.cj.jdbc.Driver
     hikari:
       connection-init-sql: "SET SESSION time_zone = '+07:00'"
-      maximum-pool-size: 15
-      minimum-idle: 8
+      maximum-pool-size: 40
+      minimum-idle: 20
       connection-timeout: 30000
       idle-timeout: 600000
       max-lifetime: 1800000
@@ -66,19 +66,19 @@ security:
 
   rate-limiting:
     enabled: true
-    max-requests-per-minute: 500
-    max-requests-per-hour: 1000
+    max-requests-per-minute: 2000
+    max-requests-per-hour: 5000
 
 # Google Form optimization settings for production
 google:
   api:
     key: ${GOOGLE_API_KEY:AIzaSyBCFk8JZ8OYLVEjs92cSLfcccyFH7VyeU0}
   form:
-    # Performance settings optimized for 2-core production server
+    # Performance settings optimized for 8-core production server
     timeout-seconds: 60 # Increased for production stability
-    thread-pool-size: 4 # Optimized for 2 cores (1 human + 3 fast)
-    max-retries: 2 # Reduced from 3 to save memory
-    retry-delay-ms: 2000 # Increased from 1000ms
+    thread-pool-size: 16 # Optimized for 8 cores (2 human + 6 fast)
+    max-retries: 3 # Increased for better reliability
+    retry-delay-ms: 1500 # Optimized for faster retry
     per-request:
       max-inflight: 1
 
@@ -105,21 +105,21 @@ google:
       skip-failed-forms: true # Bỏ qua form lỗi
 
     # Legacy timeout settings (for backward compatibility)
-    fast-timeout-seconds: 120000 # 5 phút cho fast mode
-    human-timeout-seconds: 540000 # 10 phút cho human-like
-    heavy-load-threshold: 25 # Reduced threshold for 2-core server
-    heavy-timeout-multiplier: 1.5 # Reduced multiplier for memory efficiency
+    fast-timeout-seconds: 120000 # 2 phút cho fast mode
+    human-timeout-seconds: 300000 # 5 phút cho human-like
+    heavy-load-threshold: 50 # Increased threshold for 8-core server
+    heavy-timeout-multiplier: 2.0 # Increased multiplier for better performance
 
     # Advanced settings
     similarity-threshold: 0.7
 
     # Batch processing settings
-    batch-size: 25 # Reduced for 2-core server
+    batch-size: 50 # Increased for 8-core server
     enable-batch-processing: true
 
     # Adaptive thread pool settings
     pool:
-      rebalance-ms: 5000 # Less frequent rebalancing to save CPU
+      rebalance-ms: 3000 # More frequent rebalancing for better performance
       human:
         min: 1 # Minimum 1 human thread
       fast:
@@ -130,10 +130,10 @@ google:
 
 # Queue Management Configuration for production
 queue:
-  max-size: 200
-  check-interval: 15000 # 15 seconds for faster processing
+  max-size: 200 # Increased for 8-core server
+  check-interval: 10000 # 10 seconds for faster processing
   max-retries: 5
-  retry-delay: 10000 # 10 seconds
+  retry-delay: 8000 # 8 seconds for faster retry
 
 # Realtime Socket settings
 realtime:
@@ -146,7 +146,7 @@ realtime:
 
 campaign:
   scheduler:
-    fixed-rate: 30000 # Check every 60 seconds in production
+    fixed-rate: 20000 # Check every 20 seconds for faster processing
     enabled: true
 
 # JWT Configuration for production
@@ -157,7 +157,7 @@ jwt:
 
 app:
   frontend:
-    url: ${FRONTEND_URL:https://160.25.72.91:3000}
+    url: ${FRONTEND_URL:https://192.168.2.24:3000}
   security:
     enable-ip-on-register: ${ENABLE_IP_ON_REGISTER:false}
   cookie:
@@ -167,12 +167,12 @@ app:
   monitoring:
     enabled: true
   async:
-    core-pool-size: 2 # Optimized for 2-core server
-    max-pool-size: 4 # Optimized for 2-core server
-    queue-capacity: 50 # Reduced queue capacity
+    core-pool-size: 8 # Optimized for 8-core server
+    max-pool-size: 16 # Optimized for 8-core server
+    queue-capacity: 200 # Increased queue capacity
     thread-name-prefix: Async-
   request-limiter:
-    max-concurrent: 2
+    max-concurrent: 8 # Increased for 8-core server
 
 facebook:
   app:
@@ -184,11 +184,11 @@ ai:
     enabled: true
     provider: gemini
     queue:
-      max-size: 100
-      max-concurrent: 2
-      processing-interval: 5000
+      max-size: 200
+      max-concurrent: 8
+      processing-interval: 3000
       max-retries: 3
-      retry-delay: 10000
+      retry-delay: 8000
     gemini:
       api-key: AIzaSyDINl0xLfEZm5_QVT_nang30Vgt8El7VZU
       base-url: https://generativelanguage.googleapis.com/v1beta/models
@@ -196,7 +196,7 @@ ai:
       max-tokens: 800000
       timeout: 30000
       batch-size: 3
-      parallelism: 2
+      parallelism: 4
     validation:
       max-sample-count: 1000
       max-questions-per-form: 1000
@@ -208,7 +208,7 @@ sepay:
   secret-key: ${SEPAY_SECRET_KEY:msfjs05kr5mqtk8nsli7hmmrid9qlc3t}
   qr-base-url: ${SEPAY_QR_BASE_URL:https://qr.sepay.vn/img}
   api-url: ${SEPAY_API_URL:https://api.sepay.vn}
-  webhook-url: ${SEPAY_WEBHOOK_URL:https://160.25.72.91:2412/api/payments/sepay/webhook}
+  webhook-url: ${SEPAY_WEBHOOK_URL:https://192.168.2.24:2412/api/payments/sepay/webhook}
   order-expiration-minutes: 15
   webhook-retry-minutes: 5
   max-retry-attempts: 3
