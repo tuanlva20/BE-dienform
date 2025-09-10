@@ -224,7 +224,19 @@ public class ScheduleDistributionService {
     if (isHumanLike) {
       // Human-like mode: 2-15 minutes average (7.5 min = 450 seconds)
       int avgDelaySeconds = remainingTasks > 1 ? (remainingTasks - 1) * 450 : 0;
-      return base.plusSeconds(avgDelaySeconds + 90); // +90s execution buffer
+
+      // Add 120-150 seconds buffer for human-like mode
+      int humanBufferSeconds = 135; // 2 minutes 15 seconds buffer
+
+      LocalDateTime estimate = base.plusSeconds(avgDelaySeconds + humanBufferSeconds);
+
+      // Ensure estimate is always in the future (at least 1 minute from now)
+      LocalDateTime now = DateTimeUtil.now();
+      if (estimate.isBefore(now.plusMinutes(1))) {
+        estimate = now.plusMinutes(1);
+      }
+
+      return estimate;
     } else {
       // Fast mode: Based on real data analysis with minimal buffer
       // Real observed timing: ~16 seconds average between forms
