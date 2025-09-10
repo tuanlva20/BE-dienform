@@ -4,7 +4,7 @@ import lombok.Getter;
 
 @Getter
 public enum FormStatusEnum {
-  CREATED, PROCESSING, COMPLETED;
+  CREATED, PROCESSING, COMPLETED, FAILED;
 
   private final String label;
 

@@ -1,6 +1,7 @@
 package com.dienform.tool.dienformtudong.form.controller;
 
 import java.util.UUID;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
@@ -34,6 +35,9 @@ public class FormController {
     private final FormService formService;
     private final CurrentUserUtil currentUserUtil;
 
+    @Qualifier("businessAsyncExecutor")
+    private final java.util.concurrent.Executor businessAsyncExecutor;
+
     @GetMapping
     public ResponseModel<?> getAllForms(@RequestParam(required = false) String search,
             @RequestParam(defaultValue = "0") int page,
@@ -66,6 +70,7 @@ public class FormController {
 
     @PostMapping
     public ResponseEntity<FormResponse> createForm(@Valid @RequestBody FormRequest formRequest) {
+        // Return only when form is fully created (success/failure handled inside service)
         FormResponse createdForm = formService.createForm(formRequest);
         return new ResponseEntity<>(createdForm, HttpStatus.CREATED);
     }

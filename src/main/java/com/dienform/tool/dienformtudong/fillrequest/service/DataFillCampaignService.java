@@ -1,5 +1,6 @@
 package com.dienform.tool.dienformtudong.fillrequest.service;
 
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -8,7 +9,6 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
@@ -104,9 +104,16 @@ public class DataFillCampaignService {
   @PostConstruct
   public void init() {
     log.info("DataFillCampaignService: Using ThreadPoolManager for separate human/fast executors");
-    // Initialize task scheduler for delayed submissions
-    taskScheduler = Executors.newScheduledThreadPool(1);
-    log.info("DataFillCampaignService: Task scheduler initialized for delayed submissions");
+    // Initialize task scheduler for delayed submissions with 2 threads to prevent bottleneck
+    // Use ScheduledThreadPoolExecutor directly to enable core thread timeout
+    java.util.concurrent.ScheduledThreadPoolExecutor scheduledExecutor =
+        new java.util.concurrent.ScheduledThreadPoolExecutor(2);
+    scheduledExecutor.setRemoveOnCancelPolicy(true);
+    scheduledExecutor.setKeepAliveTime(60, java.util.concurrent.TimeUnit.SECONDS);
+    scheduledExecutor.allowCoreThreadTimeOut(true);
+    taskScheduler = scheduledExecutor;
+    log.info(
+        "DataFillCampaignService: Task scheduler initialized with 2 threads for delayed submissions (with core timeout)");
   }
 
   @PreDestroy
@@ -437,6 +444,12 @@ public class DataFillCampaignService {
       java.util.concurrent.atomic.AtomicInteger inFlightTasks =
           new java.util.concurrent.atomic.AtomicInteger(0);
 
+      // Determine scheduling strategy based on task density
+      boolean useExecutionTime = shouldUseExecutionTime(fillRequest.getStartDate(),
+          fillRequest.getEndDate(), remainingSchedule.size());
+      log.info("Using {} scheduling for fillRequest {} (density-based decision)",
+          useExecutionTime ? "executionTime" : "delaySeconds", fillRequest.getId());
+
       java.util.function.Consumer<Integer> scheduleOne = new java.util.function.Consumer<>() {
         @Override
         public void accept(Integer ignored) {
@@ -448,7 +461,23 @@ public class DataFillCampaignService {
             ScheduledTask task = remainingSchedule.get(i);
             final int taskIndex = i + 1;
 
-            long submissionDelayMs = task.getDelaySeconds() * 1000L;
+            // Calculate submission delay based on strategy
+            long submissionDelayMs;
+            LocalDateTime now = com.dienform.common.util.DateTimeUtil.now();
+            if (useExecutionTime && task.getExecutionTime() != null) {
+              // Use executionTime with small jitter for human-like behavior
+              long diff = java.time.Duration.between(now, task.getExecutionTime()).toMillis();
+              long jitterMs = 5000L + new java.util.Random().nextInt(15000); // 5-20s jitter
+              submissionDelayMs = Math.max(0L, diff) + jitterMs;
+              log.debug("Task {}: using executionTime {} with {}ms delay ({}s jitter)", taskIndex,
+                  task.getExecutionTime(), submissionDelayMs, jitterMs / 1000);
+            } else {
+              // Use delaySeconds (existing behavior)
+              submissionDelayMs = task.getDelaySeconds() * 1000L;
+              log.debug("Task {}: using delaySeconds with {}ms delay", taskIndex,
+                  submissionDelayMs);
+            }
+
             inFlightTasks.incrementAndGet();
 
             taskScheduler.schedule(() -> {
@@ -1580,6 +1609,29 @@ public class DataFillCampaignService {
           question.getTitle(), e.getMessage());
       return null;
     }
+  }
+
+  /**
+   * Determine whether to use executionTime or delaySeconds based on task density
+   */
+  private boolean shouldUseExecutionTime(LocalDateTime start, LocalDateTime end, int taskCount) {
+    if (start == null || end == null || !end.isAfter(start)) {
+      return false; // Use delaySeconds for same-day or invalid date ranges
+    }
+
+    long hours = java.time.Duration.between(start, end).toHours();
+    if (hours <= 0) {
+      return false;
+    }
+
+    double density = (double) taskCount / hours;
+    boolean useExecTime = density < 30.0; // Threshold: < 30 submissions per hour
+
+    log.info("Task density analysis: {} tasks over {} hours = {} tasks/hour, using {}", taskCount,
+        hours, String.format("%.1f", density),
+        useExecTime ? "executionTime (slot-based)" : "delaySeconds (2-15min intervals)");
+
+    return useExecTime;
   }
 }
 

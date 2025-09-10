@@ -16,6 +16,21 @@ public interface FormService {
 
     FormResponse createForm(FormRequest formRequest);
 
+    /**
+     * Create initial form (fast operation - just basic validation and persistence)
+     */
+    FormResponse createFormInitial(FormRequest formRequest);
+
+    /**
+     * Process form asynchronously (heavy operations - parsing, encoding, etc.)
+     */
+    void processFormAsync(UUID formId, FormRequest formRequest);
+
+    /**
+     * Mark form as failed after async processing error
+     */
+    void markFormAsFailed(UUID formId, String errorMessage);
+
     FormResponse updateForm(UUID formId, FormRequest formRequest);
 
     void deleteForm(UUID formId);

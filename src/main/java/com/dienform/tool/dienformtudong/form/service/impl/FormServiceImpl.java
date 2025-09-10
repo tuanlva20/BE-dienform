@@ -93,35 +93,39 @@ public class FormServiceImpl implements FormService {
   @Override
   @Transactional
   public FormResponse createForm(FormRequest formRequest) {
-    // Create and save the form
+    // Synchronous end-to-end processing: only return when fully processed (success/failure)
+    FormResponse initial = createFormInitial(formRequest);
+    try {
+      // Run heavy processing inline (not async)
+      processFormAsync(initial.getId(), formRequest);
+      // Reload and return
+      Form updated = formRepository.findById(initial.getId())
+          .orElseThrow(() -> new ResourceNotFoundException("Form", "id", initial.getId()));
+      return formMapper.toResponse(updated);
+    } catch (Exception e) {
+      // Mark failed and rethrow for controller/global handler
+      markFormAsFailed(initial.getId(), e.getMessage());
+      throw e;
+    }
+  }
+
+  @Override
+  @Transactional
+  public FormResponse createFormInitial(FormRequest formRequest) {
+    log.info("Creating initial form for URL: {}", formRequest.getEditLink());
+
+    // Phase 1: Fast operations - basic validation and form creation
     Form form = formMapper.toEntity(formRequest);
     currentUserUtil.getCurrentUserIfPresent().ifPresent(form::setCreatedBy);
 
-    // Extract both title and questions from Google Form in a single browser session
-    GoogleFormService.FormExtractionResult formData =
-        googleFormService.extractFormData(formRequest.getEditLink());
+    // Set initial status as PROCESSING
+    form.setStatus(FormStatusEnum.PROCESSING);
 
-    // If form name is null or empty, use extracted title and append count based on existing forms
-    // with same title
+    // Use a temporary name if not provided
     if (form.getName() == null || form.getName().trim().isEmpty()) {
-      String baseTitle = formData.getTitle();
-      if (baseTitle == null || baseTitle.trim().isEmpty()) {
-        baseTitle = "Form";
-      }
-
-      final String finalBaseTitle = baseTitle;
-      long existingCount = currentUserUtil.getCurrentUserIdIfPresent()
-          .map(userId -> formRepository.countByCreatedBy_IdAndNameStartingWithIgnoreCase(userId,
-              finalBaseTitle))
-          .orElseGet(() -> formRepository.countByNameStartingWithIgnoreCase(finalBaseTitle));
-
-      long nextOrdinal = existingCount + 1;
-      form.setName(baseTitle + " #" + nextOrdinal);
-      log.info("Using title-based count for form name: {} (existing: {}, next: {})", form.getName(),
-          existingCount, nextOrdinal);
+      form.setName("Form (Processing...)");
     }
 
-    form.setStatus(FormStatusEnum.CREATED);
     Form savedForm = formRepository.save(form);
 
     // Create initial statistics
@@ -129,59 +133,117 @@ public class FormServiceImpl implements FormService {
         .completedSurvey(0).failedSurvey(0).errorQuestion(0).build();
     formStatisticRepository.save(statistic);
 
-    // Save questions from extracted data
-    List<ExtractedQuestion> extractedQuestions = formData.getQuestions();
-    extractedQuestions.forEach(q -> {
-      Question question = Question.builder().form(savedForm).title(q.getTitle())
-          .description(q.getDescription()).type(q.getType()).required(q.isRequired())
-          .position(q.getPosition()).additionalData(q.getAdditionalData()).build();
+    log.info("Initial form created with ID: {}, starting async processing", savedForm.getId());
+    return formMapper.toResponse(savedForm);
+  }
 
-      // Save the question to the repository
-      Question savedQuestion = questionRepository.save(question);
+  @Override
+  @Transactional
+  public void processFormAsync(UUID formId, FormRequest formRequest) {
+    log.info("Starting async processing for form ID: {}", formId);
 
-      // Save options based on question type
-      if ("checkbox_grid".equals(q.getType()) || "multiple_choice_grid".equals(q.getType())) {
-        // Dùng Map để loại trùng row theo value
-        Map<String, Boolean> rowValueMap = new java.util.HashMap<>();
-        Map<String, Boolean> subOptionValueMap = new java.util.HashMap<>();
-        for (var rowOption : q.getOptions()) {
-          if (rowOption.getValue() == null || rowValueMap.containsKey(rowOption.getValue())) {
-            continue;
-          }
-          rowValueMap.put(rowOption.getValue(), true);
-          QuestionOption row = QuestionOption.builder().question(savedQuestion)
-              .text(rowOption.getText()).value(rowOption.getValue())
-              .position(rowOption.getPosition()).isRow(true).build();
-          QuestionOption savedRow = optionRepository.save(row);
+    try {
+      Form form = formRepository.findById(formId)
+          .orElseThrow(() -> new ResourceNotFoundException("Form", "id", formId));
 
-          // Dùng Map để loại trùng subOptions theo value
-          if (rowOption.getSubOptions() != null) {
+      // Phase 2: Heavy operations - parsing and encoding
+      GoogleFormService.FormExtractionResult formData =
+          googleFormService.extractFormData(formRequest.getEditLink());
 
-            for (var subOption : rowOption.getSubOptions()) {
-              if (subOption.getValue() == null
-                  || subOptionValueMap.containsKey(subOption.getValue())) {
-                continue;
+      // Update form name with extracted title
+      if (form.getName().endsWith("(Processing...)")) {
+        String baseTitle = formData.getTitle();
+        if (baseTitle == null || baseTitle.trim().isEmpty()) {
+          baseTitle = "Form";
+        }
+
+        final String finalBaseTitle = baseTitle;
+        long existingCount = currentUserUtil.getCurrentUserIdIfPresent()
+            .map(userId -> formRepository.countByCreatedBy_IdAndNameStartingWithIgnoreCase(userId,
+                finalBaseTitle))
+            .orElseGet(() -> formRepository.countByNameStartingWithIgnoreCase(finalBaseTitle));
+
+        long nextOrdinal = existingCount + 1;
+        form.setName(baseTitle + " #" + nextOrdinal);
+        log.info("Updated form name to: {} (existing: {}, next: {})", form.getName(), existingCount,
+            nextOrdinal);
+      }
+
+      // Save questions from extracted data
+      List<ExtractedQuestion> extractedQuestions = formData.getQuestions();
+      extractedQuestions.forEach(q -> {
+        Question question = Question.builder().form(form).title(q.getTitle())
+            .description(q.getDescription()).type(q.getType()).required(q.isRequired())
+            .position(q.getPosition()).additionalData(q.getAdditionalData()).build();
+
+        Question savedQuestion = questionRepository.save(question);
+
+        // Save options based on question type
+        if ("checkbox_grid".equals(q.getType()) || "multiple_choice_grid".equals(q.getType())) {
+          Map<String, Boolean> rowValueMap = new java.util.HashMap<>();
+          Map<String, Boolean> subOptionValueMap = new java.util.HashMap<>();
+          for (var rowOption : q.getOptions()) {
+            if (rowOption.getValue() == null || rowValueMap.containsKey(rowOption.getValue())) {
+              continue;
+            }
+            rowValueMap.put(rowOption.getValue(), true);
+            QuestionOption row = QuestionOption.builder().question(savedQuestion)
+                .text(rowOption.getText()).value(rowOption.getValue())
+                .position(rowOption.getPosition()).isRow(true).build();
+            QuestionOption savedRow = optionRepository.save(row);
+
+            if (rowOption.getSubOptions() != null) {
+              for (var subOption : rowOption.getSubOptions()) {
+                if (subOption.getValue() == null
+                    || subOptionValueMap.containsKey(subOption.getValue())) {
+                  continue;
+                }
+                subOptionValueMap.put(subOption.getValue(), true);
+                QuestionOption option = QuestionOption.builder().question(savedQuestion)
+                    .text(subOption.getText()).value(subOption.getValue())
+                    .position(subOption.getPosition()).parentOption(savedRow).isRow(false).build();
+                optionRepository.save(option);
               }
-              subOptionValueMap.put(subOption.getValue(), true);
-              QuestionOption option = QuestionOption.builder().question(savedQuestion)
-                  .text(subOption.getText()).value(subOption.getValue())
-                  .position(subOption.getPosition()).parentOption(savedRow).isRow(false).build();
-              optionRepository.save(option);
             }
           }
+        } else {
+          q.getOptions().forEach(option -> {
+            QuestionOption questionOption =
+                QuestionOption.builder().question(savedQuestion).text(option.getText())
+                    .value(option.getValue()).position(option.getPosition()).build();
+            optionRepository.save(questionOption);
+          });
         }
-      } else {
-        // For regular questions, save options normally
-        q.getOptions().forEach(option -> {
-          QuestionOption questionOption =
-              QuestionOption.builder().question(savedQuestion).text(option.getText())
-                  .value(option.getValue()).position(option.getPosition()).build();
-          optionRepository.save(questionOption);
-        });
-      }
-    });
+      });
 
-    return formMapper.toResponse(savedForm);
+      // Mark as completed
+      form.setStatus(FormStatusEnum.CREATED);
+      formRepository.save(form);
+
+      log.info("Async form processing completed successfully for form ID: {}", formId);
+
+    } catch (Exception e) {
+      log.error("Error during async form processing for form ID: {}: {}", formId, e.getMessage(),
+          e);
+      throw e; // Re-throw to be caught by caller
+    }
+  }
+
+  @Override
+  @Transactional
+  public void markFormAsFailed(UUID formId, String errorMessage) {
+    try {
+      Form form = formRepository.findById(formId)
+          .orElseThrow(() -> new ResourceNotFoundException("Form", "id", formId));
+
+      form.setStatus(FormStatusEnum.FAILED);
+      form.setName(form.getName().replace("(Processing...)", "(Failed)"));
+      formRepository.save(form);
+
+      log.error("Marked form {} as failed: {}", formId, errorMessage);
+    } catch (Exception e) {
+      log.error("Error marking form {} as failed: {}", formId, e.getMessage(), e);
+    }
   }
 
   @Override

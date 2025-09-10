@@ -194,23 +194,55 @@ public class ScheduleDistributionService {
   }
 
   /**
+   * Calculate estimated completion time for a fill request
+   */
+  public LocalDateTime calculateEstimatedCompletionTime(int submissionCount,
+      LocalDateTime startDate, LocalDateTime endDate, boolean isHumanLike, int completedSurvey) {
+
+    if (submissionCount <= 0 || completedSurvey >= submissionCount) {
+      return startDate != null ? startDate : LocalDateTime.now();
+    }
+
+    int remainingTasks = submissionCount - completedSurvey;
+
+    if (endDate == null || startDate == null || startDate.equals(endDate) || !isHumanLike) {
+      // For same-day or fast mode: estimate based on sequential execution
+      LocalDateTime current = startDate != null ? startDate : LocalDateTime.now();
+      if (isHumanLike) {
+        // Human-like: first immediate, then 2-15 minutes average (7.5 min average)
+        int avgDelaySeconds = remainingTasks > 1 ? (remainingTasks - 1) * 450 : 0; // 7.5 min avg
+        return current.plusSeconds(avgDelaySeconds);
+      } else {
+        // Fast mode: 1 second between tasks
+        return current.plusSeconds(remainingTasks);
+      }
+    }
+
+    // For human-like with date range: use the original calculation method
+    return calculateEstimatedCompletion(remainingTasks, startDate, endDate, isHumanLike,
+        completedSurvey);
+  }
+
+  /**
    * Create human-like schedule with realistic patterns
    */
   private List<ScheduledTask> createHumanLikeSchedule(int submissionCount, ZonedDateTime start,
       ZonedDateTime end, int completedSurvey) {
     List<ScheduledTask> schedule = new ArrayList<>();
 
-    long totalMinutes = java.time.Duration.between(start, end).toMinutes();
-
     // Create time slots with different probabilities
     List<TimeSlot> timeSlots = createHumanTimeSlots(start, end);
 
+    LocalDateTime lastExecutionTime = null;
+
     for (int i = 0; i < submissionCount; i++) {
       TimeSlot selectedSlot = selectWeightedTimeSlot(timeSlots);
-      LocalDateTime executionTime = selectedSlot.getRandomTimeInSlot();
+      LocalDateTime slotExecutionTime = selectedSlot.getRandomTimeInSlot();
 
       // IMPROVED LOGIC: First form executes immediately, subsequent forms have distributed delays
       int delaySeconds;
+      LocalDateTime executionTime;
+
       if (completedSurvey == 0 && i == 0) {
         delaySeconds = 0; // First form: execute immediately
         executionTime = DateTimeUtil.now(); // Override to current time for immediate execution
@@ -219,9 +251,35 @@ public class ScheduleDistributionService {
       } else {
         // Subsequent forms: distributed delays between 2-15 minutes (120-900 seconds)
         delaySeconds = 120 + random.nextInt(780); // 120-899 seconds (2-15 minutes)
-        log.debug("Human-like mode: Form {} with delay of {} seconds ({} minutes)", i + 1,
-            delaySeconds, delaySeconds / 60);
+
+        // ENFORCE MIN-GAP: ensure minimum 2-15 minute gap from last execution
+        if (lastExecutionTime != null) {
+          LocalDateTime candidateTime = lastExecutionTime.plusSeconds(delaySeconds);
+          // Use the later of: candidate time or slot time to respect both gap and slot preference
+          executionTime =
+              candidateTime.isAfter(slotExecutionTime) ? candidateTime : slotExecutionTime;
+
+          // Ensure we don't exceed end date
+          if (executionTime.isAfter(end.toLocalDateTime())) {
+            executionTime = end.toLocalDateTime().minusMinutes(submissionCount - i);
+            // But still respect minimum gap if possible
+            if (lastExecutionTime != null) {
+              LocalDateTime minTime = lastExecutionTime.plusSeconds(120); // minimum 2 minutes
+              if (minTime.isBefore(end.toLocalDateTime())) {
+                executionTime = minTime;
+              }
+            }
+          }
+        } else {
+          executionTime = slotExecutionTime;
+        }
+
+        log.debug(
+            "Human-like mode: Form {} with delay of {} seconds ({} minutes), executionTime: {}",
+            i + 1, delaySeconds, delaySeconds / 60, executionTime);
       }
+
+      lastExecutionTime = executionTime;
 
       // FIX: Sử dụng completedSurvey + i để tiếp tục từ vị trí đã dừng
       // Khi completedSurvey = 1: survey 2 = row 2, survey 3 = row 3, survey 4 = row 4...
@@ -231,7 +289,8 @@ public class ScheduleDistributionService {
 
     // FIX: Không sort theo execution time để đảm bảo thứ tự row đúng
     // Thứ tự row sẽ luôn là: 0, 1, 2, 3... (tương ứng với Row 1, Row 2, Row 3...)
-    log.info("Human-like schedule created with {} tasks - maintaining row order: 0,1,2,3...",
+    log.info(
+        "Human-like schedule created with {} tasks - maintaining row order: 0,1,2,3... with enforced min-gap",
         schedule.size());
 
     return schedule;
@@ -256,7 +315,8 @@ public class ScheduleDistributionService {
       // EXACT LOGIC FROM API /form/{formId}/fill-request (GoogleFormServiceImpl)
       int delaySeconds;
       if (i > 0) {
-        delaySeconds = 1; // Fast mode: 1 second between forms
+        // Fast mode: 2-5 seconds between forms (randomized)
+        delaySeconds = 2 + random.nextInt(4); // 2,3,4,5 seconds
       } else {
         delaySeconds = 0; // First form: no delay
       }
@@ -268,7 +328,7 @@ public class ScheduleDistributionService {
 
       // Add interval for next task
       long interval = intervalSeconds;
-      currentTime = currentTime.plusSeconds(Math.max(1, interval));
+      currentTime = currentTime.plusSeconds(Math.max(2, interval));
 
       // Don't exceed end date
       if (currentTime.isAfter(end.toLocalDateTime())) {
@@ -316,9 +376,10 @@ public class ScheduleDistributionService {
           log.debug("Fast mode: First form with immediate execution (delay: {} seconds)",
               delaySeconds);
         } else {
-          delaySeconds = 1; // Subsequent forms: 1 second between forms
+          // Subsequent forms: 2-5 seconds between forms (randomized)
+          delaySeconds = 1 + random.nextInt(3); // 1,2,3,4 seconds
           currentTime = DateTimeUtil.now().plusSeconds(delaySeconds);
-          log.debug("Fast mode: Form {} with 1 second delay", i + 1);
+          log.debug("Fast mode: Form {} with {} second delay", i + 1, delaySeconds);
         }
       }
 

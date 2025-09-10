@@ -1403,7 +1403,7 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
         boolean submitConfirmed = false;
         try {
           // Wait for URL change to formResponse (primary indicator)
-          WebDriverWait submitWait = new WebDriverWait(driver, Duration.ofSeconds(20));
+          WebDriverWait submitWait = new WebDriverWait(driver, Duration.ofSeconds(30));
           submitWait.until(ExpectedConditions.urlContains("formResponse"));
           log.info("Form submitted successfully - URL contains 'formResponse'");
           submitConfirmed = true;
@@ -1412,7 +1412,7 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
 
           // Fallback: Wait for submit button to disappear or become disabled
           try {
-            WebDriverWait fallbackWait = new WebDriverWait(driver, Duration.ofSeconds(15));
+            WebDriverWait fallbackWait = new WebDriverWait(driver, Duration.ofSeconds(30));
             fallbackWait.until(ExpectedConditions.invisibilityOfElementLocated(
                 By.xpath("//div[@role='button' and @aria-label='Submit']")));
             log.info("Form submitted successfully - Submit button disappeared");
@@ -1433,7 +1433,8 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
             log.warn("Interrupted during additional wait");
           }
         } else {
-          log.warn("Submit confirmation not detected, but continuing anyway");
+          // Fail this attempt so caller will not count completed
+          throw new RuntimeException("Submit confirmation not detected");
         }
 
         log.info("Submit process completed - confirmed: {}", submitConfirmed);
@@ -1497,6 +1498,8 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
     options.addArguments("--disable-translate");
     options.addArguments("--no-first-run");
     options.addArguments("--no-default-browser-check");
+    // Limit renderer processes to reduce zombie processes
+    options.addArguments("--renderer-process-limit=1");
 
     // Add viewport and device emulation for consistent rendering
     if (headless) {
@@ -1684,7 +1687,7 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
   }
 
   /**
-   * Shutdown WebDriver safely
+   * Shutdown WebDriver safely and cleanup all resources
    */
   private void shutdownDriver(WebDriver driver) {
     if (driver == null)
@@ -1711,6 +1714,12 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
       }
     } catch (Exception e) {
       log.warn("Unexpected error during driver shutdown: {}", e.getMessage());
+    } finally {
+      // Always cleanup ThreadLocal to prevent memory leaks in thread reuse scenarios
+      try {
+        dataFillOtherTextByQuestion.remove();
+      } catch (Exception ignored) {
+      }
     }
   }
 

@@ -115,6 +115,12 @@ public class FillRequestServiceImpl implements FillRequestService {
       log.info("endDate is null, setting to startDate: {}", endDate);
     }
 
+    // Validate date range to prevent thread hanging
+    if (startDate != null && endDate != null && startDate.isAfter(endDate)) {
+      throw new BadRequestException("Ngày bắt đầu không thể sau ngày kết thúc. StartDate: "
+          + startDate + ", EndDate: " + endDate);
+    }
+
     // Validate timezone consistency
     validateTimezoneConsistency(startDate, "startDate");
     validateTimezoneConsistency(endDate, "endDate");
@@ -171,6 +177,14 @@ public class FillRequestServiceImpl implements FillRequestService {
     // Calculate and update priority based on business logic
     int calculatedPriority = calculatePriorityForRequest(savedRequest, fillRequestDTO);
     savedRequest.setPriority(calculatedPriority);
+
+    // Calculate and set estimated completion date
+    LocalDateTime estimatedCompletionDate =
+        scheduleDistributionService.calculateEstimatedCompletionTime(savedRequest.getSurveyCount(),
+            savedRequest.getStartDate(), savedRequest.getEndDate(), savedRequest.isHumanLike(),
+            savedRequest.getCompletedSurvey());
+    savedRequest.setEstimatedCompletionDate(estimatedCompletionDate);
+
     fillRequestRepository.save(savedRequest);
 
     log.info("Fill request {} created with calculated priority: {} ({})", savedRequest.getId(),
@@ -346,6 +360,12 @@ public class FillRequestServiceImpl implements FillRequestService {
       log.info("Data fill - endDate is null, setting to startDate: {}", endDate);
     }
 
+    // Validate date range to prevent thread hanging
+    if (startDate != null && endDate != null && startDate.isAfter(endDate)) {
+      throw new BadRequestException("Ngày bắt đầu không thể sau ngày kết thúc. StartDate: "
+          + startDate + ", EndDate: " + endDate);
+    }
+
     // Validate timezone consistency
     validateTimezoneConsistency(startDate, "startDate");
     validateTimezoneConsistency(endDate, "endDate");
@@ -401,6 +421,14 @@ public class FillRequestServiceImpl implements FillRequestService {
     // Calculate and update priority based on business logic
     int calculatedPriority = calculatePriorityForDataFillRequest(savedRequest, dataFillRequestDTO);
     savedRequest.setPriority(calculatedPriority);
+
+    // Calculate and set estimated completion date
+    LocalDateTime estimatedCompletionDate =
+        scheduleDistributionService.calculateEstimatedCompletionTime(savedRequest.getSurveyCount(),
+            savedRequest.getStartDate(), savedRequest.getEndDate(), savedRequest.isHumanLike(),
+            savedRequest.getCompletedSurvey());
+    savedRequest.setEstimatedCompletionDate(estimatedCompletionDate);
+
     fillRequestRepository.save(savedRequest);
 
     log.info("Data fill request {} created with calculated priority: {} ({})", savedRequest.getId(),
