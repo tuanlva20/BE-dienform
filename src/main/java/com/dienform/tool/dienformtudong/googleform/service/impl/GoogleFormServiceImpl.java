@@ -479,8 +479,9 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                         log.debug("Human-like mode: Form {} with delay of {} seconds ({} minutes)",
                                 planIndex, delaySeconds, delaySeconds / 60);
                     } else if (totalProcessed.get() > 0) {
-                        delaySeconds = 1; // Fast mode: 1 second between forms
-                        log.debug("Fast mode: 1 second delay between forms");
+                        // Fast mode: 1-2 seconds between forms (randomized)
+                        delaySeconds = 1 + random.nextInt(2); // 1 or 2 seconds
+                        log.debug("Fast mode: {} second delay between forms", delaySeconds);
                     } else {
                         delaySeconds = 0; // First form: no delay
                     }
@@ -1921,7 +1922,7 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                     try {
                         // Wait for URL change to formResponse (primary indicator)
                         WebDriverWait submitWait =
-                                new WebDriverWait(driver, Duration.ofSeconds(20));
+                                new WebDriverWait(driver, Duration.ofSeconds(humanLike ? 20 : 5));
                         submitWait.until(ExpectedConditions.urlContains("formResponse"));
                         log.info("Form submitted successfully - URL contains 'formResponse'");
                         submitConfirmed = true;
@@ -1931,8 +1932,8 @@ public class GoogleFormServiceImpl implements GoogleFormService {
 
                         // Fallback: Wait for submit button to disappear or become disabled
                         try {
-                            WebDriverWait fallbackWait =
-                                    new WebDriverWait(driver, Duration.ofSeconds(15));
+                            WebDriverWait fallbackWait = new WebDriverWait(driver,
+                                    Duration.ofSeconds(humanLike ? 15 : 5));
                             fallbackWait.until(ExpectedConditions.invisibilityOfElementLocated(
                                     By.xpath("//div[@role='button' and @aria-label='Submit']")));
                             log.info("Form submitted successfully - Submit button disappeared");
@@ -1943,8 +1944,8 @@ public class GoogleFormServiceImpl implements GoogleFormService {
 
                             // Additional fallback: Check for success message
                             try {
-                                WebDriverWait successWait =
-                                        new WebDriverWait(driver, Duration.ofSeconds(10));
+                                WebDriverWait successWait = new WebDriverWait(driver,
+                                        Duration.ofSeconds(humanLike ? 10 : 5));
                                 successWait.until(ExpectedConditions.presenceOfElementLocated(By
                                         .xpath("//*[contains(text(), 'Thank you') or contains(text(), 'Cảm ơn') or contains(text(), 'submitted') or contains(text(), 'đã gửi')]")));
                                 log.info("Form submitted successfully - Success message found");

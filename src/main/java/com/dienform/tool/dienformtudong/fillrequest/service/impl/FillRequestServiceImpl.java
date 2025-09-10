@@ -109,10 +109,10 @@ public class FillRequestServiceImpl implements FillRequestService {
         ? parseUtcStringToVietnamTime(fillRequestDTO.getEndDate())
         : null;
 
-    // If endDate is null, set it to startDate and execute immediately
-    if (endDate == null) {
-      endDate = startDate;
-      log.info("endDate is null, setting to startDate: {}", endDate);
+    // If endDate is null, set it to end of startDate day (23:59)
+    if (endDate == null && startDate != null) {
+      endDate = startDate.toLocalDate().atTime(23, 59);
+      log.info("endDate is null, setting to end of startDate day (23:59): {}", endDate);
     }
 
     // Validate date range to prevent thread hanging
@@ -354,10 +354,10 @@ public class FillRequestServiceImpl implements FillRequestService {
     LocalDateTime startDate = dataFillRequestDTO.getStartDate();
     LocalDateTime endDate = dataFillRequestDTO.getEndDate();
 
-    // If endDate is null, set it to startDate and execute immediately
-    if (endDate == null) {
-      endDate = startDate;
-      log.info("Data fill - endDate is null, setting to startDate: {}", endDate);
+    // If endDate is null, set it to end of startDate day (23:59)
+    if (endDate == null && startDate != null) {
+      endDate = startDate.toLocalDate().atTime(23, 59);
+      log.info("Data fill - endDate is null, setting to end of startDate day (23:59): {}", endDate);
     }
 
     // Validate date range to prevent thread hanging

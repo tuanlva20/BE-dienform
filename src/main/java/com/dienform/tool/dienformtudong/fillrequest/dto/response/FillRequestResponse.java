@@ -53,6 +53,8 @@ public class FillRequestResponse {
     private String status;
 
     private int completedSurvey;
+    private int failedSurvey;
+    private LocalDateTime estimatedCompletionDate;
 
     private List<AnswerDistributionResponse> answerDistributions;
 }

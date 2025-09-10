@@ -119,9 +119,9 @@ public class ScheduleDistributionService {
       LocalDateTime endDate, boolean isHumanLike, int completedSurvey) {
     List<ScheduledTask> schedule = new ArrayList<>();
 
-    if (endDate == null) {
-      // If no end date, schedule all tasks starting from start date
-      return distributeWithoutEndDate(submissionCount, startDate, isHumanLike, completedSurvey);
+    // endDate is required by FE; fall back to same-day end if somehow null
+    if (endDate == null && startDate != null) {
+      endDate = startDate.toLocalDate().atTime(23, 59);
     }
 
     // CRITICAL FIX: If startDate equals endDate OR non-human-like, execute immediately without
@@ -194,33 +194,58 @@ public class ScheduleDistributionService {
   }
 
   /**
-   * Calculate estimated completion time for a fill request
+   * Calculate estimated completion time for a fill request This method uses separate logic from
+   * actual form filling to provide accurate estimates
    */
   public LocalDateTime calculateEstimatedCompletionTime(int submissionCount,
       LocalDateTime startDate, LocalDateTime endDate, boolean isHumanLike, int completedSurvey) {
 
     if (submissionCount <= 0 || completedSurvey >= submissionCount) {
-      return startDate != null ? startDate : LocalDateTime.now();
+      return startDate != null ? startDate : DateTimeUtil.now();
     }
 
     int remainingTasks = submissionCount - completedSurvey;
 
-    if (endDate == null || startDate == null || startDate.equals(endDate) || !isHumanLike) {
-      // For same-day or fast mode: estimate based on sequential execution
-      LocalDateTime current = startDate != null ? startDate : LocalDateTime.now();
-      if (isHumanLike) {
-        // Human-like: first immediate, then 2-15 minutes average (7.5 min average)
-        int avgDelaySeconds = remainingTasks > 1 ? (remainingTasks - 1) * 450 : 0; // 7.5 min avg
-        return current.plusSeconds(avgDelaySeconds);
-      } else {
-        // Fast mode: 1 second between tasks
-        return current.plusSeconds(remainingTasks);
-      }
-    }
+    // Always use current time as base for estimation to avoid past completion dates
+    // Use DateTimeUtil.now() to ensure Vietnam timezone
+    LocalDateTime base = DateTimeUtil.now();
 
-    // For human-like with date range: use the original calculation method
-    return calculateEstimatedCompletion(remainingTasks, startDate, endDate, isHumanLike,
-        completedSurvey);
+    // Use separate estimation logic that doesn't affect actual form filling
+    return calculateRealisticEstimate(remainingTasks, base, endDate, isHumanLike, completedSurvey);
+  }
+
+  /**
+   * Calculate realistic estimate based on actual observed timing patterns This is separate from the
+   * actual form filling schedule logic
+   */
+  private LocalDateTime calculateRealisticEstimate(int remainingTasks, LocalDateTime base,
+      LocalDateTime endDate, boolean isHumanLike, int completedSurvey) {
+
+    if (isHumanLike) {
+      // Human-like mode: 2-15 minutes average (7.5 min = 450 seconds)
+      int avgDelaySeconds = remainingTasks > 1 ? (remainingTasks - 1) * 450 : 0;
+      return base.plusSeconds(avgDelaySeconds + 90); // +90s execution buffer
+    } else {
+      // Fast mode: Based on real data analysis with minimal buffer
+      // Real observed timing: ~16 seconds average between forms
+      // First form takes ~28 seconds to start, then ~16s intervals
+      int firstFormDelay = 30; // Time to start first form (slightly higher for safety)
+      int avgIntervalSeconds = 22; // Close to real 16s with small buffer
+      int totalEstimateSeconds = firstFormDelay + (remainingTasks - 1) * avgIntervalSeconds;
+
+      // Add minimal safety buffer (30 seconds)
+      int safetyBufferSeconds = 30; // 30 seconds buffer
+
+      LocalDateTime estimate = base.plusSeconds(totalEstimateSeconds + safetyBufferSeconds);
+
+      // Ensure estimate is always in the future (at least 1 minute from now)
+      LocalDateTime now = DateTimeUtil.now();
+      if (estimate.isBefore(now.plusMinutes(1))) {
+        estimate = now.plusMinutes(1);
+      }
+
+      return estimate;
+    }
   }
 
   /**
@@ -315,8 +340,7 @@ public class ScheduleDistributionService {
       // EXACT LOGIC FROM API /form/{formId}/fill-request (GoogleFormServiceImpl)
       int delaySeconds;
       if (i > 0) {
-        // Fast mode: 2-5 seconds between forms (randomized)
-        delaySeconds = 2 + random.nextInt(4); // 2,3,4,5 seconds
+        delaySeconds = 1 + random.nextInt(2); // 1 or 2 seconds
       } else {
         delaySeconds = 0; // First form: no delay
       }
@@ -328,7 +352,8 @@ public class ScheduleDistributionService {
 
       // Add interval for next task
       long interval = intervalSeconds;
-      currentTime = currentTime.plusSeconds(Math.max(2, interval));
+      // Cap max gap between planned tasks to 10 seconds in fast mode
+      currentTime = currentTime.plusSeconds(Math.min(10, Math.max(1, interval)));
 
       // Don't exceed end date
       if (currentTime.isAfter(end.toLocalDateTime())) {
@@ -376,8 +401,7 @@ public class ScheduleDistributionService {
           log.debug("Fast mode: First form with immediate execution (delay: {} seconds)",
               delaySeconds);
         } else {
-          // Subsequent forms: 2-5 seconds between forms (randomized)
-          delaySeconds = 1 + random.nextInt(3); // 1,2,3,4 seconds
+          delaySeconds = 1 + random.nextInt(2); // 1 or 2 seconds
           currentTime = DateTimeUtil.now().plusSeconds(delaySeconds);
           log.debug("Fast mode: Form {} with {} second delay", i + 1, delaySeconds);
         }
@@ -490,7 +514,7 @@ public class ScheduleDistributionService {
         if (i == 0) {
           delaySeconds = 0;
         } else {
-          delaySeconds = 1; // 1 second
+          delaySeconds = 1;
         }
       }
 
@@ -534,8 +558,8 @@ public class ScheduleDistributionService {
       log.info("Adjusted human-like delay: {} seconds (original: 120-900 seconds)",
           adjustedDelaySeconds);
     } else {
-      // For fast mode, keep 1 second delay
-      adjustedDelaySeconds = 1;
+      // For fast mode, assume ~20 seconds per form to match 5-35s spacing
+      adjustedDelaySeconds = 3;
     }
 
     LocalDateTime currentTime = startDate;

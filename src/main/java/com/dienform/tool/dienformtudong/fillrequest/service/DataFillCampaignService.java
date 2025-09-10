@@ -445,10 +445,13 @@ public class DataFillCampaignService {
           new java.util.concurrent.atomic.AtomicInteger(0);
 
       // Determine scheduling strategy based on task density
-      boolean useExecutionTime = shouldUseExecutionTime(fillRequest.getStartDate(),
-          fillRequest.getEndDate(), remainingSchedule.size());
-      log.info("Using {} scheduling for fillRequest {} (density-based decision)",
-          useExecutionTime ? "executionTime" : "delaySeconds", fillRequest.getId());
+      // IMPORTANT: Fast mode must NOT use executionTime or jitter; always use delaySeconds
+      boolean useExecutionTime =
+          fillRequest.isHumanLike() && shouldUseExecutionTime(fillRequest.getStartDate(),
+              fillRequest.getEndDate(), remainingSchedule.size());
+      log.info("Using {} scheduling for fillRequest {} (isHumanLike: {})",
+          useExecutionTime ? "executionTime" : "delaySeconds", fillRequest.getId(),
+          fillRequest.isHumanLike());
 
       java.util.function.Consumer<Integer> scheduleOne = new java.util.function.Consumer<>() {
         @Override
@@ -465,14 +468,14 @@ public class DataFillCampaignService {
             long submissionDelayMs;
             LocalDateTime now = com.dienform.common.util.DateTimeUtil.now();
             if (useExecutionTime && task.getExecutionTime() != null) {
-              // Use executionTime with small jitter for human-like behavior
+              // Human-like: Use executionTime with small jitter
               long diff = java.time.Duration.between(now, task.getExecutionTime()).toMillis();
               long jitterMs = 5000L + new java.util.Random().nextInt(15000); // 5-20s jitter
               submissionDelayMs = Math.max(0L, diff) + jitterMs;
               log.debug("Task {}: using executionTime {} with {}ms delay ({}s jitter)", taskIndex,
                   task.getExecutionTime(), submissionDelayMs, jitterMs / 1000);
             } else {
-              // Use delaySeconds (existing behavior)
+              // Fast mode or density too high: strictly use delaySeconds (no jitter)
               submissionDelayMs = task.getDelaySeconds() * 1000L;
               log.debug("Task {}: using delaySeconds with {}ms delay", taskIndex,
                   submissionDelayMs);

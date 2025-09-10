@@ -56,6 +56,7 @@ public class FillRequestDTO {
 
     private String startDate;
 
+    @NotNull(message = "endDate is required")
     private String endDate;
 
     @NotNull(message = "Answer distributions are required")

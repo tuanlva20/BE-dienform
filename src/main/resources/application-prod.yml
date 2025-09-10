@@ -105,8 +105,8 @@ google:
       skip-failed-forms: true # Bỏ qua form lỗi
 
     # Legacy timeout settings (for backward compatibility)
-    fast-timeout-seconds: 120000 # 2 phút cho fast mode
-    human-timeout-seconds: 300000 # 5 phút cho human-like
+    fast-timeout-seconds: 600 # 10 phút cho fast mode
+    human-timeout-seconds: 600 # 10 phút cho human-like
     heavy-load-threshold: 50 # Increased threshold for 8-core server
     heavy-timeout-multiplier: 2.0 # Increased multiplier for better performance
 
@@ -168,9 +168,15 @@ app:
     enabled: true
   async:
     core-pool-size: 8 # Optimized for 8-core server
-    max-pool-size: 16 # Optimized for 8-core server
+    max-pool-size: 22 # Optimized for 8-core server
     queue-capacity: 200 # Increased queue capacity
     thread-name-prefix: Async-
+  business:
+    async:
+      core-pool-size: 3 # Business operations (form parsing, encoding)
+      max-pool-size: 6 # Separate from Selenium pools
+      queue-capacity: 100 # Business task queue
+      thread-name-prefix: BizAsync-
   request-limiter:
     max-concurrent: 8 # Increased for 8-core server
 

@@ -42,6 +42,6 @@ public class DataFillRequestDTO {
   private LocalDateTime startDate;
 
   @JsonDeserialize(using = Iso8601LocalDateTimeDeserializer.class)
+  @NotNull(message = "endDate is required")
   private LocalDateTime endDate;
 }
-

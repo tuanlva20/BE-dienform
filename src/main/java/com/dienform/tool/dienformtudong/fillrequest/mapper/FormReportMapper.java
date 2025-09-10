@@ -15,12 +15,15 @@ public abstract class FormReportMapper {
   @Mapping(source = "form.name", target = "formName")
   @Mapping(source = "form.editLink", target = "formUrl")
   @Mapping(source = "form.status", target = "formStatus")
-  @Mapping(source = "form.status", target = "formStatusDisplayName")
-  @Mapping(source = "humanLike", target = "formType")
-  @Mapping(source = "status", target = "statusDisplayName")
-  @Mapping(source = "id", target = "completionProgress")
+  @Mapping(source = "form.status", target = "formStatusDisplayName",
+      qualifiedByName = "mapFormStatusDisplayName")
+  @Mapping(source = "humanLike", target = "formType", qualifiedByName = "mapFormType")
+  @Mapping(source = "status", target = "statusDisplayName",
+      qualifiedByName = "mapStatusDisplayName")
+  @Mapping(target = "completionProgress", expression = "java(mapCompletionProgress(fillRequest))")
   @Mapping(source = "totalPrice", target = "totalCost")
   @Mapping(source = "pricePerSurvey", target = "costPerSurvey")
+  @Mapping(target = "type", constant = "")
   public abstract FormReportResponse toFormReportResponse(FillRequest fillRequest);
 
   @Named("mapFormType")
@@ -38,6 +41,7 @@ public abstract class FormReportMapper {
       case IN_PROCESS -> "Đang xử lý";
       case COMPLETED -> "Hoàn thành";
       case FAILED -> "Thất bại";
+      default -> "";
     };
   }
 
@@ -51,6 +55,7 @@ public abstract class FormReportMapper {
       case CREATED -> "Đã tạo";
       case PROCESSING -> "Đang xử lý";
       case COMPLETED -> "Hoàn thành";
+      default -> "";
     };
   }
 
