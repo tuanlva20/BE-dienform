@@ -80,7 +80,7 @@ google:
     max-retries: 3 # Increased for better reliability
     retry-delay-ms: 1500 # Optimized for faster retry
     per-request:
-      max-inflight: 1
+      max-inflight: 4
 
     # Feature flags for production
     auto-submit: true
