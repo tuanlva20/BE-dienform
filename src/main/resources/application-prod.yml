@@ -94,7 +94,7 @@ google:
 
     # Adaptive timeout settings
     adaptive-timeout:
-      base-form-timeout: 300 # 5 phút cho mỗi form
+      base-form-timeout: 180 # 5 phút cho mỗi form
       max-form-timeout: 1800 # 30 phút tối đa cho mỗi form
       queue-wait-multiplier: 60 # 1 phút/queue position
 

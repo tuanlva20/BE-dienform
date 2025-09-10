@@ -11,6 +11,7 @@ import java.util.Random;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import org.openqa.selenium.By;
+import org.openqa.selenium.JavascriptExecutor;
 import org.openqa.selenium.WebDriver;
 import org.openqa.selenium.WebElement;
 import org.openqa.selenium.chrome.ChromeDriver;
@@ -50,7 +51,7 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
   private static final By NEXT_BUTTON = By.xpath(
       "//div[@role='button' and (.//span[normalize-space()='Tiếp'] or .//span[normalize-space()='Next'])]");
   private static final By SUBMIT_BUTTON = By.xpath(
-      "//div[@role='button' and (.//span[contains(text(), 'Gửi')] or .//span[contains(text(), 'Submit')] or @aria-label='Submit')]");
+      "//div[@role='button' and (@aria-label='Submit' or @aria-label='Gửi' or .//span[contains(text(), 'Gửi')] or .//span[contains(text(), 'Submit')])]");
   private final FormStructureAnalyzer formStructureAnalyzer;
 
   private final FormRepository formRepository;
@@ -398,6 +399,13 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
               } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
               }
+
+              // QUICK FIX: Check if we're on a submit-only section
+              if (quickSubmitCheck(driver, wait, humanLike)) {
+                log.info("Form submitted via quick submit check");
+                return true;
+              }
+
             } else {
               log.warn("Cannot proceed from section {} - Next button not ready after autofill",
                   section.getSectionIndex());
@@ -412,6 +420,13 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
                   } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                   }
+
+                  // QUICK FIX: Check if we're on a submit-only section
+                  if (quickSubmitCheck(driver, wait, humanLike)) {
+                    log.info("Form submitted via quick submit check after additional wait");
+                    return true;
+                  }
+
                 } else {
                   log.error("Still cannot proceed from section {} after additional wait",
                       section.getSectionIndex());
@@ -1254,13 +1269,24 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
         // Try multiple selectors for Submit button
         WebElement submitButton = null;
         try {
-          By[] alternativeSelectors =
-              {SUBMIT_BUTTON, By.xpath("//div[@role='button' and @aria-label='Submit']"),
-                  By.xpath("//div[@role='button' and @aria-label='Gửi']"),
-                  By.xpath("//div[@role='button' and .//span[contains(text(), 'Gửi')]]"),
-                  By.xpath("//div[@role='button' and .//span[contains(text(), 'Submit')]]"),
-                  By.xpath("//div[@role='button' and contains(., 'Submit')]"),
-                  By.xpath("//div[@role='button' and contains(., 'Gửi')]")};
+          By[] alternativeSelectors = {
+              // Priority 1: aria-label (most stable)
+              By.xpath("//div[@role='button' and @aria-label='Submit']"),
+              By.xpath("//div[@role='button' and @aria-label='Gửi']"),
+
+              // Priority 2: Text content (stable across forms)
+              By.xpath("//div[@role='button' and .//span[contains(text(), 'Gửi')]]"),
+              By.xpath("//div[@role='button' and .//span[contains(text(), 'Submit')]]"),
+
+              // Priority 3: General text matching (fallback)
+              By.xpath("//div[@role='button' and contains(., 'Submit')]"),
+              By.xpath("//div[@role='button' and contains(., 'Gửi')]"),
+
+              // Priority 4: Last button as fallback (stable)
+              By.xpath("//div[@role='button'][last()]"),
+
+              // Priority 5: Updated SUBMIT_BUTTON constant
+              SUBMIT_BUTTON};
 
           for (By selector : alternativeSelectors) {
             try {
@@ -1358,8 +1384,20 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
           }
         }
 
-        submitButton.click();
-        log.info("Clicked Submit button (attempt {}/{})", retryCount + 1, maxRetries);
+        try {
+          submitButton.click();
+          log.info("Clicked Submit button (attempt {}/{})", retryCount + 1, maxRetries);
+        } catch (Exception e) {
+          log.warn("Normal click failed, trying JavaScript click: {}", e.getMessage());
+          try {
+            ((JavascriptExecutor) driver).executeScript("arguments[0].click();", submitButton);
+            log.info("Successfully clicked Submit button using JavaScript (attempt {}/{})",
+                retryCount + 1, maxRetries);
+          } catch (Exception jsEx) {
+            log.error("Both normal and JavaScript click failed: {}", jsEx.getMessage());
+            throw jsEx;
+          }
+        }
 
         // Wait for submission confirmation with multiple approaches and longer timeout
         boolean submitConfirmed = false;
@@ -2034,6 +2072,91 @@ public class SectionAwareFormFillerImpl implements SectionAwareFormFiller {
           question.getTitle(), e.getMessage());
     }
     return null;
+  }
+
+  /**
+   * Quick check and submit if we're on a submit-only section Uses stable selectors that work across
+   * different forms
+   */
+  private boolean quickSubmitCheck(WebDriver driver, WebDriverWait wait, boolean humanLike) {
+    try {
+      // Use stable selectors based on role and aria-label
+      WebElement submitButton = null;
+
+      // Priority 1: aria-label="Submit" (most stable)
+      try {
+        submitButton =
+            driver.findElement(By.xpath("//div[@role='button' and @aria-label='Submit']"));
+        log.info("Found submit button using aria-label='Submit'");
+      } catch (Exception e) {
+        // Priority 2: Text content "Gửi" (stable across forms)
+        try {
+          submitButton = driver
+              .findElement(By.xpath("//div[@role='button' and .//span[contains(text(), 'Gửi')]]"));
+          log.info("Found submit button using text 'Gửi'");
+        } catch (Exception e2) {
+          // Priority 3: Text content "Submit" (fallback for English forms)
+          try {
+            submitButton = driver.findElement(
+                By.xpath("//div[@role='button' and .//span[contains(text(), 'Submit')]]"));
+            log.info("Found submit button using text 'Submit'");
+          } catch (Exception e3) {
+            log.debug("No submit button found in quick check");
+            return false;
+          }
+        }
+      }
+
+      if (submitButton != null) {
+        // Check if this section has any questions using stable selector
+        List<WebElement> questions = driver.findElements(By.xpath("//div[@role='listitem']"));
+
+        if (questions.isEmpty()) {
+          log.info("Submit button found and no questions in section - attempting quick submit");
+
+          // Quick click attempt
+          try {
+            // Check if button is enabled using stable attribute
+            String ariaDisabled = submitButton.getAttribute("aria-disabled");
+            if (!"true".equals(ariaDisabled)) {
+              log.info("Submit button is enabled, clicking immediately");
+
+              // Try normal click first
+              try {
+                submitButton.click();
+                log.info("Successfully clicked submit button with normal click");
+              } catch (Exception e) {
+                // Fallback to JavaScript click
+                log.info("Normal click failed, trying JavaScript click");
+                ((JavascriptExecutor) driver).executeScript("arguments[0].click();", submitButton);
+                log.info("Successfully clicked submit button with JavaScript");
+              }
+
+              // Quick wait for submission
+              try {
+                Thread.sleep(2000); // Short wait for submission
+                log.info("Quick submit completed");
+                return true;
+              } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return true; // Still consider it successful
+              }
+            } else {
+              log.info("Submit button is disabled, skipping quick submit");
+            }
+          } catch (Exception e) {
+            log.warn("Quick submit failed: {}", e.getMessage());
+          }
+        } else {
+          log.info("Submit button found but section has {} questions - will process normally",
+              questions.size());
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Error in quick submit check: {}", e.getMessage());
+    }
+
+    return false;
   }
 
   /**
