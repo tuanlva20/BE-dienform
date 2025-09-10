@@ -1272,12 +1272,24 @@ public class DataFillCampaignService {
                   rowLabelMC, question.getTitle());
             }
           }
-          // Finally try to get the first row label from question options as fallback
+          // Finally try to get row label by position from column name (Q9.4 -> position 4)
           if (rowLabelMC == null) {
-            rowLabelMC = getFirstRowLabelFromQuestion(question);
-            if (rowLabelMC != null) {
-              log.info("Using fallback row label '{}' for multiple_choice_grid in column {}",
-                  rowLabelMC, columnName);
+            int position = extractPositionFromColumnName(columnName);
+            if (position > 0) {
+              rowLabelMC = getRowLabelByPosition(question, position);
+              if (rowLabelMC != null) {
+                log.info(
+                    "Using row label by position {} '{}' for multiple_choice_grid in column {}",
+                    position, rowLabelMC, columnName);
+              }
+            }
+            // Fallback to first row if position extraction fails
+            if (rowLabelMC == null) {
+              rowLabelMC = getFirstRowLabelFromQuestion(question);
+              if (rowLabelMC != null) {
+                log.info("Using fallback row label '{}' for multiple_choice_grid in column {}",
+                    rowLabelMC, columnName);
+              }
             }
           }
 
@@ -1325,12 +1337,23 @@ public class DataFillCampaignService {
                   rowLabelCB, question.getTitle());
             }
           }
-          // Finally try to get the first row label from question options as fallback
+          // Finally try to get row label by position from column name (Q9.4 -> position 4)
           if (rowLabelCB == null) {
-            rowLabelCB = getFirstRowLabelFromQuestion(question);
-            if (rowLabelCB != null) {
-              log.info("Using fallback row label '{}' for checkbox_grid in column {}", rowLabelCB,
-                  columnName);
+            int position = extractPositionFromColumnName(columnName);
+            if (position > 0) {
+              rowLabelCB = getRowLabelByPosition(question, position);
+              if (rowLabelCB != null) {
+                log.info("Using row label by position {} '{}' for checkbox_grid in column {}",
+                    position, rowLabelCB, columnName);
+              }
+            }
+            // Fallback to first row if position extraction fails
+            if (rowLabelCB == null) {
+              rowLabelCB = getFirstRowLabelFromQuestion(question);
+              if (rowLabelCB != null) {
+                log.info("Using fallback row label '{}' for checkbox_grid in column {}", rowLabelCB,
+                    columnName);
+              }
             }
           }
 
@@ -1409,16 +1432,72 @@ public class DataFillCampaignService {
   private String getFirstRowLabelFromQuestion(Question question) {
     try {
       List<QuestionOption> options = getQuestionOptionsSafely(question);
-      for (QuestionOption option : options) {
-        if (option.isRow() && option.getText() != null && !option.getText().trim().isEmpty()) {
-          return option.getText().trim();
-        }
-      }
+
+      // Sắp xếp theo position để đảm bảo lấy đúng row đầu tiên
+      List<QuestionOption> rowOptions = options.stream()
+          .filter(option -> option.isRow() && option.getText() != null
+              && !option.getText().trim().isEmpty())
+          .sorted((a, b) -> Integer.compare(a.getPosition() == null ? 0 : a.getPosition(),
+              b.getPosition() == null ? 0 : b.getPosition()))
+          .collect(Collectors.toList());
+
+      return rowOptions.isEmpty() ? null : rowOptions.get(0).getText().trim();
     } catch (Exception e) {
       log.debug("Error getting first row label for question '{}': {}", question.getTitle(),
           e.getMessage());
     }
     return null;
+  }
+
+  /**
+   * Get row label by position for grid questions
+   */
+  private String getRowLabelByPosition(Question question, int position) {
+    try {
+      List<QuestionOption> options = getQuestionOptionsSafely(question);
+
+      List<QuestionOption> rowOptions = options.stream()
+          .filter(option -> option.isRow() && option.getText() != null
+              && !option.getText().trim().isEmpty())
+          .sorted((a, b) -> Integer.compare(a.getPosition() == null ? 0 : a.getPosition(),
+              b.getPosition() == null ? 0 : b.getPosition()))
+          .collect(Collectors.toList());
+
+      if (position >= 1 && position <= rowOptions.size()) {
+        return rowOptions.get(position - 1).getText().trim();
+      }
+    } catch (Exception e) {
+      log.debug("Error getting row label by position {} for question '{}': {}", position,
+          question.getTitle(), e.getMessage());
+    }
+    return null;
+  }
+
+  /**
+   * Extract position number from column name (e.g., Q9.4 -> 4, Q14.4 -> 4)
+   */
+  private int extractPositionFromColumnName(String columnName) {
+    if (columnName == null || columnName.trim().isEmpty()) {
+      return 0;
+    }
+
+    try {
+      // Extract number after the last dot (e.g., Q9.4 -> 4)
+      String trimmed = columnName.trim();
+      int lastDotIndex = trimmed.lastIndexOf('.');
+      if (lastDotIndex >= 0 && lastDotIndex < trimmed.length() - 1) {
+        String numberPart = trimmed.substring(lastDotIndex + 1);
+        // Remove any non-numeric characters (like "(T)" in "Q9.4 (T)")
+        numberPart = numberPart.replaceAll("[^0-9]", "");
+        if (!numberPart.isEmpty()) {
+          return Integer.parseInt(numberPart);
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Error extracting position from column name '{}': {}", columnName, e.getMessage());
+    }
+
+    return 0;
   }
 
   /**
