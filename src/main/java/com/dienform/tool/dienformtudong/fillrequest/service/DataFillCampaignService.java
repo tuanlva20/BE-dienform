@@ -472,6 +472,10 @@ public class DataFillCampaignService {
               long diff = java.time.Duration.between(now, task.getExecutionTime()).toMillis();
               long jitterMs = 5000L + new java.util.Random().nextInt(15000); // 5-20s jitter
               submissionDelayMs = Math.max(0L, diff) + jitterMs;
+              // Ensure the very first task submits immediately
+              if (taskIndex == 1) {
+                submissionDelayMs = 0L;
+              }
               log.debug("Task {}: using executionTime {} with {}ms delay ({}s jitter)", taskIndex,
                   task.getExecutionTime(), submissionDelayMs, jitterMs / 1000);
             } else {

@@ -86,6 +86,14 @@ public class ScheduleDistributionService {
       this.weight = weight;
     }
 
+    public LocalDateTime getStart() {
+      return start;
+    }
+
+    public LocalDateTime getEnd() {
+      return end;
+    }
+
     public LocalDateTime getRandomTimeInSlot() {
       long totalSeconds = java.time.Duration.between(start, end).getSeconds();
       if (totalSeconds <= 0)
@@ -101,8 +109,8 @@ public class ScheduleDistributionService {
   }
 
   private static final ZoneId VIETNAM_TIMEZONE = ZoneId.of("Asia/Ho_Chi_Minh");
-  private static final Random random = new Random();
 
+  private static final Random random = new Random();
   @Value("${google.form.min-gap-human:120}")
   private int minGapHumanSeconds;
 
@@ -222,6 +230,56 @@ public class ScheduleDistributionService {
   }
 
   /**
+   * Ensure current slot has at least minRequired tasks when feasible by borrowing from later slots.
+   * This is a light post-processing step that does not change min/max-gap runtime logic.
+   */
+  private void enforceMinForCurrentSlot(int[] perSlot, int currentIdx, List<TimeSlot> timeSlots,
+      int totalTasks, LocalDateTime now, int minGapSeconds, int minRequired) {
+    if (currentIdx < 0 || timeSlots.isEmpty() || minRequired <= 0)
+      return;
+
+    int already = perSlot[currentIdx];
+    if (already >= minRequired)
+      return;
+
+    // Compute feasible capacity within the remaining time of the current slot
+    TimeSlot cur = timeSlots.get(currentIdx);
+    LocalDateTime start = now.isAfter(cur.getStart()) ? now : cur.getStart();
+    long secondsLeft = Math.max(0, java.time.Duration.between(start, cur.getEnd()).getSeconds());
+    int capacity = (minGapSeconds <= 0) ? Integer.MAX_VALUE : (int) (secondsLeft / minGapSeconds);
+    if (capacity <= 0)
+      return;
+
+    int maxPossible = Math.min(capacity, totalTasks);
+    int target = Math.min(minRequired, maxPossible);
+    if (already >= target)
+      return;
+
+    int need = target - already;
+    int n = timeSlots.size();
+
+    // Borrow from forward slots, preferring the largest donors first
+    while (need > 0) {
+      int donor = -1;
+      int maxCount = 0;
+      for (int step = 1; step < n; step++) {
+        int idx = (currentIdx + step) % n;
+        if (perSlot[idx] > maxCount) {
+          maxCount = perSlot[idx];
+          donor = idx;
+        }
+      }
+
+      if (donor == -1 || perSlot[donor] <= 1)
+        break; // no more to borrow safely
+
+      perSlot[donor]--;
+      perSlot[currentIdx]++;
+      need--;
+    }
+  }
+
+  /**
    * Calculate realistic estimate based on actual observed timing patterns This is separate from the
    * actual form filling schedule logic
    */
@@ -277,71 +335,224 @@ public class ScheduleDistributionService {
     // Create time slots with different probabilities
     List<TimeSlot> timeSlots = createHumanTimeSlots(start, end);
 
-    LocalDateTime lastExecutionTime = null;
-
-    for (int i = 0; i < submissionCount; i++) {
-      TimeSlot selectedSlot = selectWeightedTimeSlot(timeSlots);
-      LocalDateTime slotExecutionTime = selectedSlot.getRandomTimeInSlot();
-
-      // IMPROVED LOGIC: First form executes immediately, subsequent forms have distributed delays
-      int delaySeconds;
-      LocalDateTime executionTime;
-
-      if (completedSurvey == 0 && i == 0) {
-        delaySeconds = 0; // First form: execute immediately
-        executionTime = DateTimeUtil.now(); // Override to current time for immediate execution
-        log.debug("Human-like mode: First form with immediate execution (delay: {} seconds)",
-            delaySeconds);
-      } else {
-        // Subsequent forms: distributed delays using configurable range
-        int delayRange = maxGapHumanSeconds - minGapHumanSeconds;
-        delaySeconds = minGapHumanSeconds + random.nextInt(delayRange + 1);
-
-        // ENFORCE MIN-GAP: ensure minimum 2-15 minute gap from last execution
-        if (lastExecutionTime != null) {
-          LocalDateTime candidateTime = lastExecutionTime.plusSeconds(delaySeconds);
-          // Use the later of: candidate time or slot time to respect both gap and slot preference
-          executionTime =
-              candidateTime.isAfter(slotExecutionTime) ? candidateTime : slotExecutionTime;
-
-          // Ensure we don't exceed end date
-          if (executionTime.isAfter(end.toLocalDateTime())) {
-            executionTime = end.toLocalDateTime().minusMinutes(submissionCount - i);
-            // But still respect minimum gap if possible
-            if (lastExecutionTime != null) {
-              LocalDateTime minTime = lastExecutionTime.plusSeconds(minGapHumanSeconds); // minimum
-                                                                                         // gap from
-                                                                                         // config
-              if (minTime.isBefore(end.toLocalDateTime())) {
-                executionTime = minTime;
-              }
-            }
-          }
-        } else {
-          executionTime = slotExecutionTime;
-        }
-
-        log.debug(
-            "Human-like mode: Form {} with delay of {} seconds ({} minutes), executionTime: {} [range: {}-{} seconds]",
-            i + 1, delaySeconds, delaySeconds / 60, executionTime, minGapHumanSeconds,
-            maxGapHumanSeconds);
+    // Determine current slot in VN timezone
+    LocalDateTime now = DateTimeUtil.now();
+    int currentIdx = -1;
+    for (int i = 0; i < timeSlots.size(); i++) {
+      TimeSlot s = timeSlots.get(i);
+      if ((now.isAfter(s.getStart()) || now.isEqual(s.getStart())) && now.isBefore(s.getEnd())) {
+        currentIdx = i;
+        break;
       }
-
-      lastExecutionTime = executionTime;
-
-      // FIX: Sử dụng completedSurvey + i để tiếp tục từ vị trí đã dừng
-      // Khi completedSurvey = 1: survey 2 = row 2, survey 3 = row 3, survey 4 = row 4...
-      int rowIndex = completedSurvey + i;
-      schedule.add(new ScheduledTask(executionTime, delaySeconds, rowIndex));
     }
 
-    // FIX: Không sort theo execution time để đảm bảo thứ tự row đúng
-    // Thứ tự row sẽ luôn là: 0, 1, 2, 3... (tương ứng với Row 1, Row 2, Row 3...)
-    log.info(
-        "Human-like schedule created with {} tasks - maintaining row order: 0,1,2,3... with enforced min-gap",
-        schedule.size());
+    // If small job (<10) and we have a current slot, try to place all inside this slot
+    if (submissionCount < 10 && currentIdx >= 0) {
+      LocalDateTime cursor = now;
+      long remainingSeconds =
+          java.time.Duration.between(now, timeSlots.get(currentIdx).getEnd()).getSeconds();
+      int remainingTasks = submissionCount;
 
+      int minGap = Math.max(5, minGapHumanSeconds);
+      int maxGap = Math.max(minGap, maxGapHumanSeconds);
+
+      long normalNeed = (long) (remainingTasks - 1) * minGapHumanSeconds;
+      int effectiveGap = normalNeed <= remainingSeconds ? minGapHumanSeconds
+          : (int) Math.max(5, remainingSeconds / Math.max(1, (remainingTasks - 1)));
+
+      for (int i = 0; i < remainingTasks; i++) {
+        int delaySeconds;
+        if (completedSurvey == 0 && i == 0) {
+          delaySeconds = 0;
+          schedule.add(new ScheduledTask(now, delaySeconds, completedSurvey + i));
+          cursor = now;
+        } else {
+          int range = Math.max(0, maxGap - effectiveGap);
+          int step = effectiveGap + (range > 0 ? random.nextInt(range + 1) : 0);
+          cursor = cursor.plusSeconds(step);
+          if (cursor.isAfter(timeSlots.get(currentIdx).getEnd())) {
+            cursor = timeSlots.get(currentIdx).getEnd()
+                .minusSeconds(Math.max(0, remainingTasks - i - 1));
+          }
+          schedule.add(new ScheduledTask(cursor, step, completedSurvey + i));
+        }
+      }
+      log.info(
+          "Scheduled {} tasks within current slot [{} - {}] with effectiveGap={}s (small-job mode)",
+          remainingTasks, timeSlots.get(currentIdx).getStart(), timeSlots.get(currentIdx).getEnd(),
+          effectiveGap);
+      return schedule;
+    }
+
+    // For larger jobs or when no current slot: prioritize current slot, then distribute by weights
+    int[] perSlot = distributeCountsByWeight(timeSlots, submissionCount, Math.max(0, currentIdx));
+
+    // Normalize for continuous coverage: ensure no gaps between first and last allocated slot
+    normalizeContinuousCoverage(perSlot, currentIdx >= 0 ? currentIdx : 0, timeSlots.size());
+    // Ensure current slot has a minimum number of tasks (> 2) when feasible
+    enforceMinForCurrentSlot(perSlot, currentIdx, timeSlots, submissionCount, now,
+        minGapHumanSeconds, 3);
+
+    LocalDateTime lastExecutionTime = null;
+    int produced = 0;
+    int totalSlots = timeSlots.size();
+    for (int stepIdx = 0; stepIdx < totalSlots; stepIdx++) {
+      int slotIndex = currentIdx >= 0 ? (currentIdx + stepIdx) % totalSlots : stepIdx;
+      TimeSlot slot = timeSlots.get(slotIndex);
+      int count = perSlot[slotIndex];
+      if (count <= 0)
+        continue;
+
+      // Start around a random time in the slot, but not before now for the current slot
+      LocalDateTime cursor = slot.getRandomTimeInSlot();
+      if (slotIndex == currentIdx && cursor.isBefore(now)) {
+        cursor = now;
+      }
+
+      for (int j = 0; j < count; j++) {
+        int delayRange = Math.max(0, maxGapHumanSeconds - minGapHumanSeconds);
+        // Ensure the very first task is NOT immediate: enforce at least minGap
+        int stepSeconds = (produced == 0 && completedSurvey == 0)
+            ? (minGapHumanSeconds + (delayRange > 0 ? random.nextInt(delayRange + 1) : 0))
+            : (minGapHumanSeconds + (delayRange > 0 ? random.nextInt(delayRange + 1) : 0));
+
+        if (lastExecutionTime != null) {
+          LocalDateTime candidate = lastExecutionTime.plusSeconds(stepSeconds);
+          if (candidate.isAfter(cursor)) {
+            cursor = candidate;
+          }
+        }
+
+        // For the first global task in current slot, ensure we don't start earlier than now +
+        // minGap
+        if (produced == 0 && slotIndex == currentIdx) {
+          LocalDateTime minStart = now.plusSeconds(minGapHumanSeconds);
+          if (cursor.isBefore(minStart)) {
+            cursor = minStart;
+          }
+        }
+
+        // Keep inside slot bounds and ensure continuity to next slot if overflow
+        if (cursor.isAfter(slot.getEnd())) {
+          cursor = slot.getEnd();
+        }
+
+        schedule.add(new ScheduledTask(cursor, stepSeconds, completedSurvey + produced));
+        lastExecutionTime = cursor;
+        produced++;
+        // Nudge cursor forward slightly to avoid identical timestamps when random step=0
+        cursor = cursor.plusSeconds(1);
+      }
+    }
+
+    log.info("Human-like schedule (current-first, weighted) created with {} tasks across {} slots",
+        schedule.size(), totalSlots);
     return schedule;
+  }
+
+  /**
+   * Normalizes slot distribution to ensure continuous coverage from first to last allocated slot.
+   * Fills gaps by borrowing from the highest-count slots.
+   */
+  private void normalizeContinuousCoverage(int[] perSlot, int startIdx, int totalSlots) {
+    // Find first and last non-zero slots starting from startIdx (forward only)
+    int firstNonZero = -1;
+    int lastNonZero = -1;
+
+    for (int i = 0; i < totalSlots; i++) {
+      int slotIdx = (startIdx + i) % totalSlots;
+      if (perSlot[slotIdx] > 0) {
+        if (firstNonZero == -1) {
+          firstNonZero = slotIdx;
+        }
+        lastNonZero = slotIdx;
+      }
+    }
+
+    if (firstNonZero == -1 || firstNonZero == lastNonZero) {
+      return; // No slots or only one slot, nothing to normalize
+    }
+
+    // Fill gaps between first and last non-zero slots (forward direction only)
+    for (int i = 0; i < totalSlots; i++) {
+      int slotIdx = (startIdx + i) % totalSlots;
+
+      // Check if this slot is between first and last (inclusive, forward direction)
+      boolean isInRange = false;
+      if (firstNonZero <= lastNonZero) {
+        isInRange = (slotIdx >= firstNonZero && slotIdx <= lastNonZero);
+      } else {
+        // Wrapping case - we still want forward direction from startIdx
+        int steps = 0;
+        for (int j = 0; j < totalSlots; j++) {
+          int checkIdx = (startIdx + j) % totalSlots;
+          if (checkIdx == slotIdx) {
+            steps = j;
+            break;
+          }
+        }
+
+        int firstSteps = 0, lastSteps = 0;
+        for (int j = 0; j < totalSlots; j++) {
+          int checkIdx = (startIdx + j) % totalSlots;
+          if (checkIdx == firstNonZero)
+            firstSteps = j;
+          if (checkIdx == lastNonZero)
+            lastSteps = j;
+        }
+
+        isInRange = (steps >= firstSteps && steps <= lastSteps);
+      }
+
+      if (isInRange && perSlot[slotIdx] == 0) {
+        // Find slot with maximum count to borrow from
+        int maxSlot = -1;
+        int maxCount = 0;
+        for (int j = 0; j < totalSlots; j++) {
+          if (perSlot[j] > maxCount) {
+            maxCount = perSlot[j];
+            maxSlot = j;
+          }
+        }
+
+        if (maxSlot != -1 && perSlot[maxSlot] > 1) {
+          perSlot[maxSlot]--;
+          perSlot[slotIdx] = 1;
+        }
+      }
+    }
+  }
+
+  // Helper: distribute counts by slot weights, biasing the current slot slightly
+  private int[] distributeCountsByWeight(List<TimeSlot> slots, int total, int currentIdx) {
+    double totalWeight = 0.0;
+    for (int i = 0; i < slots.size(); i++) {
+      double w = slots.get(i).getWeight();
+      if (i == currentIdx && slots.size() > 1) {
+        w += 0.5; // small bias to current slot
+      }
+      totalWeight += w;
+    }
+
+    int[] result = new int[slots.size()];
+    int assigned = 0;
+    for (int i = 0; i < slots.size(); i++) {
+      double w = slots.get(i).getWeight();
+      if (i == currentIdx && slots.size() > 1) {
+        w += 0.5;
+      }
+      int count = (int) Math.floor(total * (w / Math.max(1e-6, totalWeight)));
+      result[i] = count;
+      assigned += count;
+    }
+
+    int idx = currentIdx >= 0 ? currentIdx : 0;
+    while (assigned < total) {
+      result[idx]++;
+      assigned++;
+      idx = (idx + 1) % slots.size();
+    }
+    return result;
   }
 
   /**
