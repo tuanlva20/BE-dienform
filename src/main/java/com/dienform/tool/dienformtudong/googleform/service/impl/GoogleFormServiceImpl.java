@@ -172,6 +172,12 @@ public class GoogleFormServiceImpl implements GoogleFormService {
     @Value("${google.form.heavy-timeout-multiplier:2.0}")
     private double heavyTimeoutMultiplier;
 
+    @Value("${google.form.min-gap-human:120}")
+    private int minGapHumanSeconds;
+
+    @Value("${google.form.max-gap-human:900}")
+    private int maxGapHumanSeconds;
+
     // OPTIMIZED: Thread pool for parallel question processing
     private final ExecutorService questionProcessingExecutor = Executors.newFixedThreadPool(5);
 
@@ -471,13 +477,14 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                         if (fillRequest.getCompletedSurvey() == 0 && planIndex == 1) {
                             delaySeconds = 0; // First form: execute immediately
                         } else {
-                            // Subsequent forms: distributed delays between 2-15 minutes (120-900
-                            // seconds)
-                            delaySeconds = 120 + random.nextInt(780); // 120-899 seconds (2-15
-                                                                      // minutes)
+                            // Subsequent forms: distributed delays using configurable range
+                            int delayRange = maxGapHumanSeconds - minGapHumanSeconds;
+                            delaySeconds = minGapHumanSeconds + random.nextInt(delayRange + 1);
                         }
-                        log.debug("Human-like mode: Form {} with delay of {} seconds ({} minutes)",
-                                planIndex, delaySeconds, delaySeconds / 60);
+                        log.debug(
+                                "Human-like mode: Form {} with delay of {} seconds ({} minutes) [range: {}-{} seconds]",
+                                planIndex, delaySeconds, delaySeconds / 60, minGapHumanSeconds,
+                                maxGapHumanSeconds);
                     } else if (totalProcessed.get() > 0) {
                         // Fast mode: 1-2 seconds between forms (randomized)
                         delaySeconds = 1 + random.nextInt(2); // 1 or 2 seconds
@@ -506,19 +513,23 @@ public class GoogleFormServiceImpl implements GoogleFormService {
                             log.error("Async task failed for plan {}/{} (fillRequestId: {}): {}",
                                     currentPlanIndex, executionPlans.size(), fillRequestId,
                                     t.getMessage());
+                            // CRITICAL FIX: Increment failCount when task fails
+                            failCount.incrementAndGet();
                         } else {
                             log.debug("Async task completed for plan {}/{} (fillRequestId: {})",
                                     currentPlanIndex, executionPlans.size(), fillRequestId);
                         }
 
-                        log.info("Progress: {}/{} tasks completed for fillRequestId: {}", processed,
-                                remainingSurveys, fillRequestId);
+                        log.info(
+                                "Progress: {}/{} tasks completed for fillRequestId: {} (success: {}, failed: {})",
+                                processed, remainingSurveys, fillRequestId, successCount.get(),
+                                failCount.get());
 
                         if (processed == remainingSurveys) {
                             // All tasks finished execution, update final status based on DB state
                             log.info(
-                                    "All {} tasks completed for fillRequestId: {}. Updating final status...",
-                                    processed, fillRequestId);
+                                    "All {} tasks completed for fillRequestId: {}. Updating final status... (success: {}, failed: {})",
+                                    processed, fillRequestId, successCount.get(), failCount.get());
                             updateFinalStatusInTransaction(fillRequest, null, successCount.get(),
                                     failCount.get());
                         }
@@ -537,20 +548,71 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             CompletableFuture<Void> allTasks =
                     CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
             try {
-                // Wait for all tasks with configurable timeout; increase under heavy load
+                // Calculate timeout based on human-like delays and number of tasks
                 long baseTimeoutSeconds =
                         fillRequest.isHumanLike() ? humanTimeoutSeconds : fastTimeoutSeconds;
                 boolean heavyLoad = futures.size() >= heavyLoadThreshold;
-                long timeoutSeconds = heavyLoad
-                        ? (long) Math
-                                .ceil(baseTimeoutSeconds * Math.max(1.0, heavyTimeoutMultiplier))
-                        : baseTimeoutSeconds;
+
+                // CRITICAL FIX: For human-like mode, calculate timeout based on expected delays
+                long timeoutSeconds;
+                if (fillRequest.isHumanLike()) {
+                    // Human-like mode: base timeout + (max delay per form * number of forms)
+                    // Use configurable max delay, add buffer for form processing
+                    long maxDelayPerForm = maxGapHumanSeconds; // Use configurable max delay
+                    long processingTimePerForm = 60; // 1 minute buffer per form
+                    long humanLikeTimeout = baseTimeoutSeconds
+                            + (maxDelayPerForm + processingTimePerForm) * futures.size();
+                    timeoutSeconds = heavyLoad
+                            ? (long) Math
+                                    .ceil(humanLikeTimeout * Math.max(1.0, heavyTimeoutMultiplier))
+                            : humanLikeTimeout;
+                    log.info(
+                            "Human-like mode timeout calculated: {} seconds ({} minutes) for {} forms [delay range: {}-{} seconds]",
+                            timeoutSeconds, timeoutSeconds / 60, futures.size(), minGapHumanSeconds,
+                            maxGapHumanSeconds);
+                } else {
+                    // Fast mode: use original logic
+                    timeoutSeconds = heavyLoad
+                            ? (long) Math.ceil(
+                                    baseTimeoutSeconds * Math.max(1.0, heavyTimeoutMultiplier))
+                            : baseTimeoutSeconds;
+                }
+
                 allTasks.get(timeoutSeconds, TimeUnit.SECONDS);
                 log.info("All {} form filling tasks completed successfully for fillRequestId: {}",
                         futures.size(), fillRequestId);
-            } catch (Exception e) {
+            } catch (java.util.concurrent.TimeoutException e) {
                 log.error(
-                        "Form filling execution was interrupted or timed out for fillRequestId: {}",
+                        "Form filling execution timed out after {} seconds for fillRequestId: {}. "
+                                + "This may be due to insufficient timeout for human-like delays. "
+                                + "Completed: {}/{}, Success: {}, Failed: {}",
+                        timeoutSeconds, fillRequestId, totalProcessed.get(), remainingSurveys,
+                        successCount.get(), failCount.get());
+
+                // Don't immediately fail - let remaining tasks continue in background
+                // Just log the timeout and return current progress
+                log.warn("Allowing remaining tasks to continue in background for fillRequestId: {}",
+                        fillRequestId);
+
+                // CRITICAL FIX: Schedule a background task to monitor completion
+                // This ensures final status is updated when all tasks complete
+                CompletableFuture.runAsync(() -> {
+                    try {
+                        // Wait for all tasks to complete (with extended timeout)
+                        long extendedTimeout = timeoutSeconds * 2; // Double the timeout
+                        allTasks.get(extendedTimeout, TimeUnit.SECONDS);
+                        log.info("Background monitoring: All tasks completed for fillRequestId: {}",
+                                fillRequestId);
+                    } catch (Exception ex) {
+                        log.warn(
+                                "Background monitoring: Tasks still running for fillRequestId: {} after extended timeout",
+                                fillRequestId);
+                    }
+                });
+
+                return successCount.get();
+            } catch (Exception e) {
+                log.error("Form filling execution was interrupted for fillRequestId: {}",
                         fillRequestId, e);
                 updateFillRequestStatusInTransaction(fillRequest,
                         Constants.FILL_REQUEST_STATUS_FAILED);
@@ -558,14 +620,27 @@ public class GoogleFormServiceImpl implements GoogleFormService {
             }
 
         } finally {
-            // Ensure executor is properly shutdown
+            // CRITICAL FIX: Don't shutdown executor immediately for human-like mode
+            // Let tasks continue in background and shutdown gracefully later
             if (executor != null) {
                 try {
-                    executor.shutdown();
-                    if (!executor.awaitTermination(180, TimeUnit.SECONDS)) {
-                        executor.shutdownNow();
-                        if (!executor.awaitTermination(30, TimeUnit.SECONDS)) {
-                            log.error("Executor did not terminate");
+                    if (fillRequest.isHumanLike()) {
+                        // For human-like mode, shutdown gracefully without forcing termination
+                        // This allows remaining tasks to complete their delays
+                        log.info(
+                                "Shutting down executor gracefully for human-like mode (fillRequestId: {})",
+                                fillRequestId);
+                        executor.shutdown();
+                        // Don't wait for termination - let tasks complete in background
+                        // The whenComplete callbacks will handle final status updates
+                    } else {
+                        // For fast mode, use original shutdown logic
+                        executor.shutdown();
+                        if (!executor.awaitTermination(180, TimeUnit.SECONDS)) {
+                            executor.shutdownNow();
+                            if (!executor.awaitTermination(30, TimeUnit.SECONDS)) {
+                                log.error("Executor did not terminate");
+                            }
                         }
                     }
                 } catch (InterruptedException e) {

@@ -110,6 +110,10 @@ google:
     heavy-load-threshold: 50 # Increased threshold for 8-core server
     heavy-timeout-multiplier: 2.0 # Increased multiplier for better performance
 
+    # Human-like delay configuration
+    min-gap-human: 60 # 120 Minimum 2 minutes between forms (in seconds)
+    max-gap-human: 120 # 900 Maximum 15 minutes between forms (in seconds)
+
     # Advanced settings
     similarity-threshold: 0.7
 

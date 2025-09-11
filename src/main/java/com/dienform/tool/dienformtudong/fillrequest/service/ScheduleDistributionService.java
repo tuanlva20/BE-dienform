@@ -7,6 +7,7 @@ import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import com.dienform.common.util.DateTimeUtil;
 import lombok.extern.slf4j.Slf4j;
@@ -70,6 +71,7 @@ public class ScheduleDistributionService {
       return adjustedForTimeConstraint;
     }
   }
+
   /**
    * Inner class for time slots
    */
@@ -99,8 +101,13 @@ public class ScheduleDistributionService {
   }
 
   private static final ZoneId VIETNAM_TIMEZONE = ZoneId.of("Asia/Ho_Chi_Minh");
-
   private static final Random random = new Random();
+
+  @Value("${google.form.min-gap-human:120}")
+  private int minGapHumanSeconds;
+
+  @Value("${google.form.max-gap-human:900}")
+  private int maxGapHumanSeconds;
 
   /**
    * Distribute form filling tasks across time period with human-like behavior
@@ -286,8 +293,9 @@ public class ScheduleDistributionService {
         log.debug("Human-like mode: First form with immediate execution (delay: {} seconds)",
             delaySeconds);
       } else {
-        // Subsequent forms: distributed delays between 2-15 minutes (120-900 seconds)
-        delaySeconds = 120 + random.nextInt(780); // 120-899 seconds (2-15 minutes)
+        // Subsequent forms: distributed delays using configurable range
+        int delayRange = maxGapHumanSeconds - minGapHumanSeconds;
+        delaySeconds = minGapHumanSeconds + random.nextInt(delayRange + 1);
 
         // ENFORCE MIN-GAP: ensure minimum 2-15 minute gap from last execution
         if (lastExecutionTime != null) {
@@ -301,7 +309,9 @@ public class ScheduleDistributionService {
             executionTime = end.toLocalDateTime().minusMinutes(submissionCount - i);
             // But still respect minimum gap if possible
             if (lastExecutionTime != null) {
-              LocalDateTime minTime = lastExecutionTime.plusSeconds(120); // minimum 2 minutes
+              LocalDateTime minTime = lastExecutionTime.plusSeconds(minGapHumanSeconds); // minimum
+                                                                                         // gap from
+                                                                                         // config
               if (minTime.isBefore(end.toLocalDateTime())) {
                 executionTime = minTime;
               }
@@ -312,8 +322,9 @@ public class ScheduleDistributionService {
         }
 
         log.debug(
-            "Human-like mode: Form {} with delay of {} seconds ({} minutes), executionTime: {}",
-            i + 1, delaySeconds, delaySeconds / 60, executionTime);
+            "Human-like mode: Form {} with delay of {} seconds ({} minutes), executionTime: {} [range: {}-{} seconds]",
+            i + 1, delaySeconds, delaySeconds / 60, executionTime, minGapHumanSeconds,
+            maxGapHumanSeconds);
       }
 
       lastExecutionTime = executionTime;
@@ -391,7 +402,7 @@ public class ScheduleDistributionService {
     for (int i = 0; i < submissionCount; i++) {
       int delaySeconds;
 
-      // IMPROVED LOGIC: First form executes immediately, subsequent forms have distributed delays
+      // CRITICAL FIX: Calculate cumulative delay for proper scheduling
       if (isHumanLike) {
         if (completedSurvey == 0 && i == 0) {
           delaySeconds = 0; // First form: execute immediately
@@ -399,11 +410,15 @@ public class ScheduleDistributionService {
           log.debug("Human-like mode: First form with immediate execution (delay: {} seconds)",
               delaySeconds);
         } else {
-          // Subsequent forms: distributed delays between 2-15 minutes (120-900 seconds)
-          delaySeconds = 120 + random.nextInt(780); // 120-899 seconds (2-15 minutes)
-          currentTime = DateTimeUtil.now().plusSeconds(delaySeconds);
-          log.debug("Human-like mode: Form {} with delay of {} seconds ({} minutes)", i + 1,
-              delaySeconds, delaySeconds / 60);
+          // Subsequent forms: distributed delays using configurable range
+          int delayRange = maxGapHumanSeconds - minGapHumanSeconds;
+          delaySeconds = minGapHumanSeconds + random.nextInt(delayRange + 1);
+          // CRITICAL FIX: Add delay to current time, not from now()
+          currentTime = currentTime.plusSeconds(delaySeconds);
+          log.debug(
+              "Human-like mode: Form {} with delay of {} seconds ({} minutes), scheduled at {} [range: {}-{} seconds]",
+              i + 1, delaySeconds, delaySeconds / 60, currentTime, minGapHumanSeconds,
+              maxGapHumanSeconds);
         }
       } else {
         // Fast mode: minimal delays
@@ -414,8 +429,10 @@ public class ScheduleDistributionService {
               delaySeconds);
         } else {
           delaySeconds = 1 + random.nextInt(2); // 1 or 2 seconds
-          currentTime = DateTimeUtil.now().plusSeconds(delaySeconds);
-          log.debug("Fast mode: Form {} with {} second delay", i + 1, delaySeconds);
+          // CRITICAL FIX: Add delay to current time, not from now()
+          currentTime = currentTime.plusSeconds(delaySeconds);
+          log.debug("Fast mode: Form {} with {} second delay, scheduled at {}", i + 1, delaySeconds,
+              currentTime);
         }
       }
 
