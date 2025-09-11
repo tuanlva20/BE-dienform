@@ -15,7 +15,7 @@ spring:
     open-in-view: false
     show-sql: false # Disable SQL logging in production
     hibernate:
-      ddl-auto: none # Validate schema in production
+      ddl-auto: update # Validate schema in production
     properties:
       hibernate:
         jdbc:
@@ -105,14 +105,14 @@ google:
       skip-failed-forms: true # Bỏ qua form lỗi
 
     # Legacy timeout settings (for backward compatibility)
-    fast-timeout-seconds: 600 # 10 phút cho fast mode
-    human-timeout-seconds: 600 # 10 phút cho human-like
+    fast-timeout-seconds: 600000 # 10 phút cho fast mode
+    human-timeout-seconds: 600000 # 10 phút cho human-like
     heavy-load-threshold: 50 # Increased threshold for 8-core server
     heavy-timeout-multiplier: 2.0 # Increased multiplier for better performance
 
     # Human-like delay configuration
-    min-gap-human: 60 # 120 Minimum 2 minutes between forms (in seconds)
-    max-gap-human: 120 # 900 Maximum 15 minutes between forms (in seconds)
+    min-gap-human: 120 # 120 Minimum 2 minutes between forms (in seconds)
+    max-gap-human: 900 # 900 Maximum 15 minutes between forms (in seconds)
 
     # Advanced settings
     similarity-threshold: 0.7
