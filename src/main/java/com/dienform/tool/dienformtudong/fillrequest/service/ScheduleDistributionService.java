@@ -139,6 +139,18 @@ public class ScheduleDistributionService {
       endDate = startDate.toLocalDate().atTime(23, 59);
     }
 
+    if (startDate == null || endDate == null) {
+      log.warn("Invalid date range: startDate={}, endDate={}", startDate, endDate);
+      return schedule;
+    }
+
+    // CRITICAL FIX: Ensure startDate is not in the past
+    LocalDateTime now = com.dienform.common.util.DateTimeUtil.now();
+    if (startDate.isBefore(now)) {
+      startDate = now.plusMinutes(1); // Start 1 minute from now
+      log.info("Adjusted startDate to current time + 1 minute: {}", startDate);
+    }
+
     // CRITICAL FIX: If startDate equals endDate OR non-human-like, execute immediately without
     // scheduling delays
     if (startDate.equals(endDate) || !isHumanLike) {
@@ -161,6 +173,27 @@ public class ScheduleDistributionService {
       schedule = createFastSchedule(submissionCount, startZoned, endZoned, completedSurvey);
     }
 
+    // CRITICAL FIX: Sort tasks by row_index first, then by execution time
+    // This ensures row 3 always executes before row 6, regardless of execution time
+    schedule.sort((a, b) -> {
+      // First priority: sort by row_index (ascending)
+      int rowIndexCompare = Integer.compare(a.getRowIndex(), b.getRowIndex());
+      if (rowIndexCompare != 0) {
+        return rowIndexCompare;
+      }
+
+      // Second priority: sort by execution time (ascending)
+      if (a.getExecutionTime() == null && b.getExecutionTime() == null)
+        return 0;
+      if (a.getExecutionTime() == null)
+        return 1;
+      if (b.getExecutionTime() == null)
+        return -1;
+      return a.getExecutionTime().compareTo(b.getExecutionTime());
+    });
+
+    log.info("Created {} scheduled tasks, sorted by row_index then execution time",
+        schedule.size());
     return schedule;
   }
 
@@ -362,7 +395,8 @@ public class ScheduleDistributionService {
 
       for (int i = 0; i < remainingTasks; i++) {
         int delaySeconds;
-        if (completedSurvey == 0 && i == 0) {
+        if (i == 0) {
+          // CRITICAL FIX: First form of remaining surveys should always execute immediately
           delaySeconds = 0;
           schedule.add(new ScheduledTask(now, delaySeconds, completedSurvey + i));
           cursor = now;
@@ -381,6 +415,11 @@ public class ScheduleDistributionService {
           "Scheduled {} tasks within current slot [{} - {}] with effectiveGap={}s (small-job mode)",
           remainingTasks, timeSlots.get(currentIdx).getStart(), timeSlots.get(currentIdx).getEnd(),
           effectiveGap);
+
+      // CRITICAL FIX: Sort tasks by row_index to ensure proper order
+      // This ensures row 3 always executes before row 6, regardless of execution time
+      schedule.sort(java.util.Comparator.comparingInt(ScheduledTask::getRowIndex));
+
       return schedule;
     }
 
@@ -411,10 +450,14 @@ public class ScheduleDistributionService {
 
       for (int j = 0; j < count; j++) {
         int delayRange = Math.max(0, maxGapHumanSeconds - minGapHumanSeconds);
-        // Ensure the very first task is NOT immediate: enforce at least minGap
-        int stepSeconds = (produced == 0 && completedSurvey == 0)
-            ? (minGapHumanSeconds + (delayRange > 0 ? random.nextInt(delayRange + 1) : 0))
-            : (minGapHumanSeconds + (delayRange > 0 ? random.nextInt(delayRange + 1) : 0));
+        // CRITICAL FIX: First form of remaining surveys should always execute immediately
+        // When resuming from QUEUED, the first remaining form should start immediately
+        int stepSeconds;
+        if (produced == 0) {
+          stepSeconds = 0; // First form of remaining surveys: execute immediately
+        } else {
+          stepSeconds = minGapHumanSeconds + (delayRange > 0 ? random.nextInt(delayRange + 1) : 0);
+        }
 
         if (lastExecutionTime != null) {
           LocalDateTime candidate = lastExecutionTime.plusSeconds(stepSeconds);
@@ -423,13 +466,11 @@ public class ScheduleDistributionService {
           }
         }
 
-        // For the first global task in current slot, ensure we don't start earlier than now +
-        // minGap
+        // CRITICAL FIX: For the first global task in current slot, always start immediately
+        // When resuming from QUEUED, the first remaining form should start immediately
         if (produced == 0 && slotIndex == currentIdx) {
-          LocalDateTime minStart = now.plusSeconds(minGapHumanSeconds);
-          if (cursor.isBefore(minStart)) {
-            cursor = minStart;
-          }
+          // First form of remaining surveys: start immediately at current time
+          cursor = now;
         }
 
         // Keep inside slot bounds and ensure continuity to next slot if overflow
@@ -447,6 +488,11 @@ public class ScheduleDistributionService {
 
     log.info("Human-like schedule (current-first, weighted) created with {} tasks across {} slots",
         schedule.size(), totalSlots);
+
+    // CRITICAL FIX: Sort tasks by row_index to ensure proper order
+    // This ensures row 3 always executes before row 6, regardless of execution time
+    schedule.sort(java.util.Comparator.comparingInt(ScheduledTask::getRowIndex));
+
     return schedule;
   }
 
@@ -595,6 +641,10 @@ public class ScheduleDistributionService {
       }
     }
 
+    // CRITICAL FIX: Sort tasks by row_index to ensure proper order
+    // This ensures row 3 always executes before row 6, regardless of execution time
+    schedule.sort(java.util.Comparator.comparingInt(ScheduledTask::getRowIndex));
+
     return schedule;
   }
 
@@ -653,7 +703,12 @@ public class ScheduleDistributionService {
       schedule.add(new ScheduledTask(currentTime, delaySeconds, rowIndex));
     }
 
-    log.info("Created {} immediate execution tasks starting at {}", schedule.size(), startDate);
+    // CRITICAL FIX: Sort tasks by row_index to ensure proper order
+    // This ensures row 3 always executes before row 6, regardless of execution time
+    schedule.sort(java.util.Comparator.comparingInt(ScheduledTask::getRowIndex));
+
+    log.info("Created {} immediate execution tasks starting at {} (sorted by row_index)",
+        schedule.size(), startDate);
     return schedule;
   }
 

@@ -158,10 +158,50 @@ public class DataFillCampaignService {
         fillRequest.getId(), fillRequest.getSurveyCount(), fillRequest.isHumanLike(),
         Math.max(1, perRequestMaxInflight));
 
-    // Create schedule distribution for regular fill request
-    List<ScheduleDistributionService.ScheduledTask> schedule = scheduleDistributionService
-        .distributeSchedule(fillRequest.getSurveyCount(), fillRequest.getStartDate(),
-            fillRequest.getEndDate(), fillRequest.isHumanLike(), fillRequest.getCompletedSurvey());
+    // CRITICAL FIX: When resuming from QUEUED with completedSurvey > 0,
+    // update startDate to current time for proper slot scheduling
+    if (fillRequest.getCompletedSurvey() > 0) {
+      LocalDateTime now = com.dienform.common.util.DateTimeUtil.now();
+      fillRequest.setStartDate(now);
+      log.info(
+          "Resuming fillRequest: {} with completedSurvey: {}, updated startDate to current time: {}",
+          fillRequest.getId(), fillRequest.getCompletedSurvey(), now);
+    }
+
+    // CRITICAL FIX: Only create schedule for remaining surveys to avoid long delays
+    int remainingSurveys = fillRequest.getSurveyCount() - fillRequest.getCompletedSurvey();
+    log.info("Creating schedule for {} remaining surveys (total: {}, completed: {})",
+        remainingSurveys, fillRequest.getSurveyCount(), fillRequest.getCompletedSurvey());
+
+    // Create schedule distribution for remaining surveys only
+    List<ScheduleDistributionService.ScheduledTask> schedule =
+        scheduleDistributionService.distributeSchedule(remainingSurveys, fillRequest.getStartDate(),
+            fillRequest.getEndDate(), fillRequest.isHumanLike(), 0); // Always start from 0 for
+                                                                     // remaining surveys
+
+    // Minimal-impact enhancement: if resuming (completedSurvey > 0) then force the very next
+    // form to run immediately by prepending an immediate task, and shift the rest within the
+    // remaining window. This avoids changing distribution internals and guarantees the next form
+    // starts now.
+    if (fillRequest.getCompletedSurvey() > 0 && remainingSurveys > 0) {
+      LocalDateTime now = com.dienform.common.util.DateTimeUtil.now();
+      // Immediate first remaining task (rowIndex 0 in remaining list)
+      ScheduleDistributionService.ScheduledTask immediate =
+          new ScheduleDistributionService.ScheduledTask(now, 0, 0);
+
+      java.util.List<ScheduleDistributionService.ScheduledTask> adjusted =
+          new java.util.ArrayList<>();
+      adjusted.add(immediate);
+      for (int k = 0; k < schedule.size() - 1; k++) {
+        ScheduleDistributionService.ScheduledTask t = schedule.get(k + 1);
+        adjusted.add(new ScheduleDistributionService.ScheduledTask(t.getExecutionTime(),
+            t.getDelaySeconds(), t.getRowIndex() + 1));
+      }
+      schedule = adjusted;
+      log.info(
+          "Resuming mode: injected immediate first task for next form; remaining tasks shifted (size: {})",
+          schedule.size());
+    }
 
     return executeRegularCampaignCore(fillRequest, questions, schedule);
   }
@@ -279,9 +319,16 @@ public class DataFillCampaignService {
     log.info("Regular fill request {} has {} completed, needs {} more surveys to complete",
         fillRequest.getId(), fillRequest.getCompletedSurvey(), remainingSurveys);
 
-    // Adjust schedule to only process remaining surveys
-    List<ScheduledTask> remainingSchedule =
-        schedule.subList(0, Math.min(remainingSurveys, schedule.size()));
+    // CRITICAL FIX: Schedule is already created for remaining surveys only, no need to adjust
+    // But we need to adjust rowIndex to continue from the correct position
+    List<ScheduledTask> remainingSchedule = new ArrayList<>();
+    for (ScheduledTask task : schedule) {
+      // Adjust rowIndex to continue from completedSurvey position
+      int adjustedRowIndex = fillRequest.getCompletedSurvey() + task.getRowIndex();
+      remainingSchedule.add(
+          new ScheduledTask(task.getExecutionTime(), task.getDelaySeconds(), adjustedRowIndex));
+    }
+
     // Enforce stable ascending order by row index to guarantee lower rows execute first
     remainingSchedule.sort(java.util.Comparator.comparingInt(ScheduledTask::getRowIndex));
     log.info("Adjusted schedule to {} tasks for remaining surveys (sorted by rowIndex asc)",
@@ -472,9 +519,25 @@ public class DataFillCampaignService {
               long diff = java.time.Duration.between(now, task.getExecutionTime()).toMillis();
               long jitterMs = 5000L + new java.util.Random().nextInt(15000); // 5-20s jitter
               submissionDelayMs = Math.max(0L, diff) + jitterMs;
-              // Ensure the very first task submits immediately
-              if (taskIndex == 1) {
+
+              // CRITICAL FIX: Cap delay to maximum 2 hours (7200 seconds)
+              long maxDelayMs = 2 * 60 * 60 * 1000L; // 2 hours
+              if (submissionDelayMs > maxDelayMs) {
+                log.warn("Task {} has excessive delay {}ms, capping to {}ms", task.getRowIndex(),
+                    submissionDelayMs, maxDelayMs);
+                submissionDelayMs = maxDelayMs;
+              }
+
+              // CRITICAL FIX: Only execute immediately if this is truly the first form
+              // (completedSurvey == 0)
+              // When resuming from QUEUED with completedSurvey > 0, all forms should wait for
+              // scheduled time
+              if (taskIndex == 1 && fillRequest.getCompletedSurvey() == 0) {
                 submissionDelayMs = 0L;
+                log.info("First form (completedSurvey=0) - executing immediately without delay");
+              } else if (taskIndex == 1 && fillRequest.getCompletedSurvey() > 0) {
+                log.info("Resuming form (completedSurvey={}) - waiting for scheduled time: {}",
+                    fillRequest.getCompletedSurvey(), task.getExecutionTime());
               }
               log.debug("Task {}: using executionTime {} with {}ms delay ({}s jitter)", taskIndex,
                   task.getExecutionTime(), submissionDelayMs, jitterMs / 1000);

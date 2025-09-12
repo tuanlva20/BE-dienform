@@ -16,6 +16,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import jakarta.persistence.EntityManager;
 import lombok.extern.slf4j.Slf4j;
 
 @Service
@@ -112,6 +113,9 @@ public class BatchProcessingService {
   @Autowired
   private FillRequestRepository fillRequestRepository;
 
+  @Autowired
+  private EntityManager entityManager;
+
   @Value("${google.form.batch-size:100}")
   private int defaultBatchSize;
 
@@ -131,9 +135,31 @@ public class BatchProcessingService {
         fillScheduleRepository.findByFillRequestId(fillRequest.getId());
 
     if (existingSchedule.isPresent()) {
-      log.info("Schedule already exists for fillRequest: {}, returning existing schedule",
-          fillRequest.getId());
-      return existingSchedule.get();
+      // CRITICAL FIX: When resuming from QUEUED with completedSurvey > 0,
+      // delete old schedule and create new one with current time
+      if (fillRequest.getCompletedSurvey() > 0) {
+        log.info(
+            "Resuming fillRequest: {} with completedSurvey: {}, deleting old schedule and creating new one",
+            fillRequest.getId(), fillRequest.getCompletedSurvey());
+
+        // CRITICAL FIX: Delete existing schedule and flush immediately to avoid duplicate key
+        // constraint
+        fillScheduleRepository.delete(existingSchedule.get());
+        // Force immediate deletion from database to avoid duplicate key constraint
+        entityManager.flush();
+
+        log.info("Successfully deleted old schedule for fillRequest: {}", fillRequest.getId());
+
+        // Update startDate to current time for proper slot scheduling
+        LocalDateTime now = com.dienform.common.util.DateTimeUtil.now();
+        fillRequest.setStartDate(now);
+        log.info("Updated startDate to current time: {} for resumed fillRequest: {}", now,
+            fillRequest.getId());
+      } else {
+        log.info("Schedule already exists for fillRequest: {}, returning existing schedule",
+            fillRequest.getId());
+        return existingSchedule.get();
+      }
     }
 
     // Calculate total batches
@@ -145,10 +171,28 @@ public class BatchProcessingService {
             fillRequest.getStartDate(), fillRequest.getEndDate(), fillRequest.isHumanLike(),
             fillRequest.getCompletedSurvey(), batchSize);
 
-    // Serialize schedule data
+    // Serialize schedule data (with minimal-impact clamp for first remaining task when resuming)
     String scheduleData;
     try {
-      scheduleData = objectMapper.writeValueAsString(batchInfo.getTasks());
+      if (fillRequest.getCompletedSurvey() > 0) {
+        // Ensure the first remaining task starts immediately and rowIndex starts from completed
+        LocalDateTime now = com.dienform.common.util.DateTimeUtil.now();
+        List<ScheduleDistributionService.ScheduledTask> tasks = new java.util.ArrayList<>();
+        if (!batchInfo.getTasks().isEmpty()) {
+          // First remaining task: execute now with zero delay
+          tasks.add(new ScheduleDistributionService.ScheduledTask(now, 0,
+              fillRequest.getCompletedSurvey()));
+          // Keep subsequent tasks as-is but advance rowIndex from completedSurvey + 1
+          for (int i = 1; i < batchInfo.getTasks().size(); i++) {
+            ScheduleDistributionService.ScheduledTask t = batchInfo.getTasks().get(i);
+            tasks.add(new ScheduleDistributionService.ScheduledTask(t.getExecutionTime(),
+                t.getDelaySeconds(), fillRequest.getCompletedSurvey() + i));
+          }
+        }
+        scheduleData = objectMapper.writeValueAsString(tasks);
+      } else {
+        scheduleData = objectMapper.writeValueAsString(batchInfo.getTasks());
+      }
     } catch (JsonProcessingException e) {
       log.error("Failed to serialize schedule data", e);
       throw new RuntimeException("Failed to create batch schedule", e);
