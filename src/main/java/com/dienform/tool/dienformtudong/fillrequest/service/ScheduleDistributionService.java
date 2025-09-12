@@ -153,9 +153,8 @@ public class ScheduleDistributionService {
 
     // CRITICAL FIX: If startDate equals endDate OR non-human-like, execute immediately without
     // scheduling delays
-    if (startDate.equals(endDate) || !isHumanLike) {
-      log.info("Execute immediately - startDate equals endDate: {} OR non-human-like: {}",
-          startDate.equals(endDate), !isHumanLike);
+    boolean isSameDay = startDate.toLocalDate().equals(endDate.toLocalDate());
+    if (startDate.equals(endDate) || isSameDay || !isHumanLike) {
       return distributeWithoutEndDate(submissionCount, startDate, isHumanLike, completedSurvey);
     }
 
@@ -214,9 +213,15 @@ public class ScheduleDistributionService {
 
     log.info("Creating batch schedule for {} forms with batch size {}", submissionCount, batchSize);
 
-    // Calculate estimated completion with original delays
-    LocalDateTime estimatedCompletion = calculateEstimatedCompletion(submissionCount, startDate,
-        endDate, isHumanLike, completedSurvey);
+    // Create schedule first to get actual execution times
+    List<ScheduledTask> allTasks =
+        distributeSchedule(submissionCount, startDate, endDate, isHumanLike, completedSurvey);
+
+    // Calculate estimated completion based on actual schedule
+    LocalDateTime estimatedCompletion =
+        calculateEstimatedCompletionFromSchedule(allTasks, isHumanLike);
+    log.info("Batch processing: Created {} tasks, estimated completion: {}", allTasks.size(),
+        estimatedCompletion);
 
     boolean adjustedForTimeConstraint = false;
 
@@ -234,10 +239,6 @@ public class ScheduleDistributionService {
       log.info("Adjusted estimated completion: {}", estimatedCompletion);
     }
 
-    // Create schedule (will be split into batches later)
-    List<ScheduledTask> allTasks =
-        distributeSchedule(submissionCount, startDate, endDate, isHumanLike, completedSurvey);
-
     return new BatchScheduleInfo(allTasks, estimatedCompletion, adjustedForTimeConstraint);
   }
 
@@ -254,12 +255,62 @@ public class ScheduleDistributionService {
 
     int remainingTasks = submissionCount - completedSurvey;
 
-    // Always use current time as base for estimation to avoid past completion dates
-    // Use DateTimeUtil.now() to ensure Vietnam timezone
-    LocalDateTime base = DateTimeUtil.now();
+    // Try to create a temporary schedule to get accurate execution times
+    // Use the same logic as batch processing: create schedule for full submissionCount
+    try {
+      List<ScheduledTask> tempSchedule =
+          distributeSchedule(submissionCount, startDate, endDate, isHumanLike, completedSurvey);
+      if (!tempSchedule.isEmpty()) {
+        return calculateEstimatedCompletionFromSchedule(tempSchedule, isHumanLike);
+      }
+    } catch (Exception e) {
+      log.warn(
+          "Failed to create temporary schedule for estimation, falling back to realistic estimate: {}",
+          e.getMessage());
+    }
 
-    // Use separate estimation logic that doesn't affect actual form filling
+    // Fallback to realistic estimate if schedule creation fails
+    LocalDateTime base = DateTimeUtil.now();
     return calculateRealisticEstimate(remainingTasks, base, endDate, isHumanLike, completedSurvey);
+  }
+
+  /**
+   * Calculate estimated completion time based on actual schedule execution times When using
+   * executionTime, this uses the last task's execution time + form execution buffer
+   */
+  private LocalDateTime calculateEstimatedCompletionFromSchedule(List<ScheduledTask> tasks,
+      boolean isHumanLike) {
+    if (tasks.isEmpty()) {
+      return DateTimeUtil.now().plusMinutes(1);
+    }
+
+    // Find the task with the latest execution time
+    ScheduledTask lastTask = tasks.stream().filter(task -> task.getExecutionTime() != null)
+        .max((a, b) -> a.getExecutionTime().compareTo(b.getExecutionTime()))
+        .orElse(tasks.get(tasks.size() - 1));
+
+    LocalDateTime lastExecutionTime = lastTask.getExecutionTime();
+    if (lastExecutionTime == null) {
+      // Fallback to delay-based calculation if no execution time
+      return calculateRealisticEstimate(tasks.size(), DateTimeUtil.now(), null, isHumanLike, 0);
+    }
+
+    // Add buffer time for form execution (time to actually fill and submit the form)
+    int formExecutionBufferSeconds = 120;
+
+    LocalDateTime estimatedCompletion = lastExecutionTime.plusSeconds(formExecutionBufferSeconds);
+
+    // Ensure estimate is always in the future (at least 1 minute from now)
+    LocalDateTime now = DateTimeUtil.now();
+    if (estimatedCompletion.isBefore(now.plusMinutes(1))) {
+      estimatedCompletion = now.plusMinutes(1);
+    }
+
+    log.info(
+        "Calculated estimated completion from schedule: {} (last task execution: {}, buffer: {}s, total tasks: {})",
+        estimatedCompletion, lastExecutionTime, formExecutionBufferSeconds, tasks.size());
+
+    return estimatedCompletion;
   }
 
   /**
@@ -448,6 +499,11 @@ public class ScheduleDistributionService {
         cursor = now;
       }
 
+      // CRITICAL FIX: For the first task in the current slot, always start immediately
+      if (produced == 0 && slotIndex == currentIdx) {
+        cursor = now;
+      }
+
       for (int j = 0; j < count; j++) {
         int delayRange = Math.max(0, maxGapHumanSeconds - minGapHumanSeconds);
         // CRITICAL FIX: First form of remaining surveys should always execute immediately
@@ -466,12 +522,6 @@ public class ScheduleDistributionService {
           }
         }
 
-        // CRITICAL FIX: For the first global task in current slot, always start immediately
-        // When resuming from QUEUED, the first remaining form should start immediately
-        if (produced == 0 && slotIndex == currentIdx) {
-          // First form of remaining surveys: start immediately at current time
-          cursor = now;
-        }
 
         // Keep inside slot bounds and ensure continuity to next slot if overflow
         if (cursor.isAfter(slot.getEnd())) {
@@ -853,8 +903,7 @@ public class ScheduleDistributionService {
       log.info("Adjusted human-like delay: {} seconds (original: 120-900 seconds)",
           adjustedDelaySeconds);
     } else {
-      // For fast mode, assume ~20 seconds per form to match 5-35s spacing
-      adjustedDelaySeconds = 3;
+      adjustedDelaySeconds = 120;
     }
 
     LocalDateTime currentTime = startDate;

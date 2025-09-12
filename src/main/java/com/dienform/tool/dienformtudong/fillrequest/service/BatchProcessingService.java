@@ -16,7 +16,6 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
-import jakarta.persistence.EntityManager;
 import lombok.extern.slf4j.Slf4j;
 
 @Service
@@ -113,8 +112,6 @@ public class BatchProcessingService {
   @Autowired
   private FillRequestRepository fillRequestRepository;
 
-  @Autowired
-  private EntityManager entityManager;
 
   @Value("${google.form.batch-size:100}")
   private int defaultBatchSize;
@@ -135,31 +132,12 @@ public class BatchProcessingService {
         fillScheduleRepository.findByFillRequestId(fillRequest.getId());
 
     if (existingSchedule.isPresent()) {
-      // CRITICAL FIX: When resuming from QUEUED with completedSurvey > 0,
-      // delete old schedule and create new one with current time
-      if (fillRequest.getCompletedSurvey() > 0) {
-        log.info(
-            "Resuming fillRequest: {} with completedSurvey: {}, deleting old schedule and creating new one",
-            fillRequest.getId(), fillRequest.getCompletedSurvey());
-
-        // CRITICAL FIX: Delete existing schedule and flush immediately to avoid duplicate key
-        // constraint
-        fillScheduleRepository.delete(existingSchedule.get());
-        // Force immediate deletion from database to avoid duplicate key constraint
-        entityManager.flush();
-
-        log.info("Successfully deleted old schedule for fillRequest: {}", fillRequest.getId());
-
-        // Update startDate to current time for proper slot scheduling
-        LocalDateTime now = com.dienform.common.util.DateTimeUtil.now();
-        fillRequest.setStartDate(now);
-        log.info("Updated startDate to current time: {} for resumed fillRequest: {}", now,
-            fillRequest.getId());
-      } else {
-        log.info("Schedule already exists for fillRequest: {}, returning existing schedule",
-            fillRequest.getId());
-        return existingSchedule.get();
-      }
+      // FIXED: Keep existing schedule-data when resuming from QUEUED with completedSurvey > 0
+      // The getNextBatch() method already handles skipping completed rowIndex tasks
+      log.info(
+          "Schedule already exists for fillRequest: {}, returning existing schedule (completedSurvey: {})",
+          fillRequest.getId(), fillRequest.getCompletedSurvey());
+      return existingSchedule.get();
     }
 
     // Calculate total batches
